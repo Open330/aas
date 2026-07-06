@@ -10,6 +10,25 @@ A single-binary, dependency-free **multi-account switcher for LLM coding agents*
 - Live usage at a glance (`aas usage`) — every account fetched in parallel, rendered as a table.
 - **Reads existing `asx` state** — drop-in adoption, usually zero re-login.
 
+## Quickstart for Agents
+
+Paste this into your coding agent (Claude Code, Codex, …) to install and set up `aas`:
+
+<div><img src="https://quickstart-for-agents.vercel.app/api/header.svg?theme=claude-code&title=Set+up+aas&lang=Agents" width="100%" /></div>
+
+```
+Install the aas CLI (Agent Account Switcher) from https://github.com/Open330/aas
+
+1. macOS/Linux — run:  curl -fsSL https://raw.githubusercontent.com/open330/aas/main/install.sh | sh
+   (Windows PowerShell:  irm https://raw.githubusercontent.com/open330/aas/main/install.ps1 | iex)
+2. Verify it works:     aas --version
+3. Show my accounts and live usage:  aas list  &&  aas usage
+
+aas reads my existing asx state, so my current logins should already appear.
+```
+
+<div><img src="https://quickstart-for-agents.vercel.app/api/footer.svg?theme=claude-code&tokens=1.8k&model=Opus+4.8" /></div>
+
 ## Install
 
 macOS / Linux (single static binary — no Node, no runtime):
