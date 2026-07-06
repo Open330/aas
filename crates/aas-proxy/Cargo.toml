@@ -1,0 +1,22 @@
+[package]
+name = "aas-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+aas-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+axum.workspace = true
+futures-util.workspace = true
+bytes.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

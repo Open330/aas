@@ -1,0 +1,16 @@
+[package]
+name = "aas-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "aas"
+path = "src/main.rs"
+
+[dependencies]
+aas-core.workspace = true
+aas-import.workspace = true
+anyhow.workspace = true
+clap.workspace = true

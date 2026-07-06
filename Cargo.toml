@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/aas-core",
+    "crates/aas-providers",
+    "crates/aas-proxy",
+    "crates/aas-import",
+    "crates/aas-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/open330/aas"
+authors = ["open330"]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+sha2 = "0.10"
+base64 = "0.22"
+dirs = "6"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+bytes = "1"
+uuid = { version = "1", features = ["v4"] }
+axum = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+clap = { version = "4", features = ["derive"] }
+comfy-table = "7"
+owo-colors = "4"
+anstream = "0.6"
+
+# Internal crates
+aas-core = { path = "crates/aas-core" }
+aas-providers = { path = "crates/aas-providers" }
+aas-proxy = { path = "crates/aas-proxy" }
+aas-import = { path = "crates/aas-import" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
