@@ -89,7 +89,12 @@ enum Command {
     },
     /// Live usage table for every account (shorthand for `list -u`).
     #[command(visible_alias = "u")]
-    Usage { provider: Option<String> },
+    Usage {
+        provider: Option<String>,
+        /// Emit machine-readable JSON (for aas-bar and other integrations).
+        #[arg(long)]
+        json: bool,
+    },
     /// Show asx-tracked active account(s).
     Status { provider: Option<String> },
     /// Print shell env for a profile (`eval "$(aas export <name>)"`), or `--all` for a
@@ -171,7 +176,13 @@ async fn main() {
     let store = AccountStore::open_default();
     let result = match cli.command {
         Command::List { provider, usage, debug } => cmd_list(&store, provider.as_deref(), usage, debug).await,
-        Command::Usage { provider } => cmd_list(&store, provider.as_deref(), true, false).await,
+        Command::Usage { provider, json } => {
+            if json {
+                cmd_usage_json(&store, provider.as_deref()).await
+            } else {
+                cmd_list(&store, provider.as_deref(), true, false).await
+            }
+        }
         Command::Status { provider } => cmd_status(&store, provider.as_deref()),
         Command::Export { name, all, shell, out } => export::run(&store, name, all, shell, out),
         Command::Import { file } => cmd_import(file.as_deref()),
@@ -219,12 +230,6 @@ async fn live_credentials(providers: &[Provider]) -> HashMap<String, Option<Stri
     join_all(futs).await.into_iter().collect()
 }
 
-async fn ensure_fresh(p: Provider, name: &str) {
-    if p.is_expired(name).await {
-        let _ = p.refresh(name).await;
-    }
-}
-
 /// Resolve which providers to show and an optional single-account filter.
 fn resolve_list_scope(store: &AccountStore, provider: Option<&str>) -> anyhow::Result<(Vec<Provider>, Option<String>)> {
     match provider {
@@ -251,37 +256,21 @@ async fn cmd_list(store: &AccountStore, provider: Option<&str>, usage: bool, deb
     let live = live_credentials(&provs).await;
 
     if usage {
-        // Fan out ensure_fresh + usage across every account, then render once.
-        let mut jobs = Vec::new();
-        for p in &provs {
-            let accts: Vec<_> = store
-                .list(Some(p.id()))
-                .into_iter()
-                .filter(|a| single_name.as_ref().is_none_or(|n| &a.name == n))
-                .collect();
-            for a in accts {
-                let p = *p;
-                jobs.push(async move {
-                    ensure_fresh(p, &a.name).await;
-                    let u = p.usage(&a.name).await;
-                    (p, a, u)
-                });
-            }
-        }
-        let done = join_all(jobs).await;
-        let rows: Vec<UsageRow> = done
+        // Shared fetch path (also used by aas-bar): parallel usage for every account.
+        let items = aas_providers::snapshot(store, provider).await?;
+        let rows: Vec<UsageRow> = items
             .into_iter()
-            .map(|(p, a, usage)| {
-                let live_cred = live.get(p.id()).and_then(|c| c.clone());
-                let stored = secure_store::get_secret(p.id(), &a.name);
+            .map(|it| {
+                let live_cred = live.get(&it.provider).and_then(|c| c.clone());
+                let stored = secure_store::get_secret(&it.provider, &it.name);
                 let current = matches!((&stored, &live_cred), (Some(s), Some(l)) if s == l);
                 UsageRow {
-                    provider: p.id().to_string(),
-                    name: a.name.clone(),
-                    email: a.email.clone(),
-                    active: store.get_active(p.id()).as_deref() == Some(a.name.as_str()),
+                    provider: it.provider,
+                    name: it.name,
+                    email: it.email,
+                    active: it.active,
                     current_in_system: current,
-                    usage,
+                    usage: it.usage,
                 }
             })
             .collect();
@@ -362,6 +351,36 @@ async fn cmd_list(store: &AccountStore, provider: Option<&str>, usage: bool, deb
         return Ok(());
     }
     render::render_list_table(&rows);
+    Ok(())
+}
+
+/// Machine-readable usage for aas-bar / integrations: the same parallel fetch as the table,
+/// serialized as `{"accounts":[{provider,name,email,active,plan,headline,error,meters:[…]}]}`.
+async fn cmd_usage_json(store: &AccountStore, provider: Option<&str>) -> anyhow::Result<()> {
+    use serde_json::json;
+    let items = aas_providers::snapshot(store, provider).await?;
+    let accounts: Vec<_> = items
+        .iter()
+        .map(|it| {
+            let meters: Vec<_> = it
+                .usage
+                .meters
+                .iter()
+                .map(|m| json!({ "label": m.label, "usedPct": m.used_pct, "resetMs": m.reset_ms }))
+                .collect();
+            json!({
+                "provider": it.provider,
+                "name": it.name,
+                "email": it.email,
+                "active": it.active,
+                "plan": it.usage.plan,
+                "headline": it.usage.headline,
+                "error": it.usage.error,
+                "meters": meters,
+            })
+        })
+        .collect();
+    println!("{}", serde_json::to_string(&json!({ "accounts": accounts }))?);
     Ok(())
 }
 

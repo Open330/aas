@@ -1,0 +1,4 @@
+# SwiftPM build products
+.build/
+# Assembled app bundle (produced by build-app.sh)
+AasBar.app/

@@ -12,6 +12,9 @@ mod codex;
 mod common;
 mod cursor;
 mod key_adapter;
+mod snapshot;
+
+pub use snapshot::{snapshot, AccountUsage};
 
 /// The five adapters the CLI drives. `Grok`/`Zai` share `key_adapter`; `Cursor` is a marker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
