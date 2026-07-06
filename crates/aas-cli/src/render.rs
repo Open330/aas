@@ -98,13 +98,13 @@ fn render_limits(u: &Usage) -> (String, Option<BarLevel>) {
             Some(w) => worse(w, lvl),
             None => lvl,
         });
-        let bar = render_bar_plain(rem, 12);
+        let bar = render_bar_plain(rem, 10);
         // Compact: relative time-to-reset + window elapsed %, no absolute timestamp (it
         // wraps in narrow terminals and "9m left" already conveys the reset).
         let reset = match m.reset_ms {
             Some(ms) => match elapsed_pct(&m.label, ms) {
-                Some(e) => format!("  · {} · {e:.0}%", time_left(ms)),
-                None => format!("  · {}", time_left(ms)),
+                Some(e) => format!(" · {} · {e:.0}%", time_left(ms)),
+                None => format!(" · {}", time_left(ms)),
             },
             None => String::new(),
         };
@@ -158,6 +158,11 @@ pub fn render_usage_table(rows: &[UsageRow]) {
             Cell::new(plan_label(&r.usage)),
             limits_cell,
         ]);
+    }
+
+    // Tighten cell padding (default is 1 space each side).
+    for column in table.column_iter_mut() {
+        column.set_padding((0, 1));
     }
 
     println!("{table}");
