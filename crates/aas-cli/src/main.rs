@@ -5,6 +5,7 @@
 mod exec;
 mod login;
 mod render;
+mod ui;
 
 use aas_core::model::ProfileType;
 use aas_core::naming::{normalize_provider, normalize_provider_key};
@@ -12,13 +13,37 @@ use aas_core::secure_store;
 use aas_core::share::{describe_share, resolve_share_selection, ShareOpts};
 use aas_core::store::AccountStore;
 use aas_providers::{all_providers, get_adapter, Provider};
+use clap::builder::styling::{AnsiColor, Styles};
 use clap::{Args, Parser, Subcommand};
 use futures_util::future::join_all;
 use render::UsageRow;
 use std::collections::HashMap;
 
+const STYLES: Styles = Styles::styled()
+    .header(AnsiColor::Cyan.on_default().bold())
+    .usage(AnsiColor::Cyan.on_default().bold())
+    .literal(AnsiColor::Green.on_default())
+    .placeholder(AnsiColor::BrightBlack.on_default());
+
+const EXAMPLES: &str = "\
+Examples:
+  aas list -u              live usage for every account (fetched in parallel)
+  aas login claude work    add a Claude account as an isolated profile
+  aas switch codex work    make a stored account active
+  aas e work               run the agent under a profile
+  aas e work claude        cross-provider: run Claude's UI on this backend
+
+Reads existing asx state directly — no migration needed.";
+
 #[derive(Parser)]
-#[command(name = "aas", version, about = "Agent Account Switcher — multi-account switcher for LLM coding agents")]
+#[command(
+    name = "aas",
+    version,
+    about = "Agent Account Switcher — multi-account switcher for LLM coding agents",
+    styles = STYLES,
+    after_help = EXAMPLES,
+    propagate_version = true,
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -136,7 +161,7 @@ async fn main() {
         Command::Proxy { name, frontend } => exec::cmd_proxy(&store, &name, &frontend).await,
     };
     if let Err(e) = result {
-        eprintln!("{e}");
+        ui::error(e);
         std::process::exit(1);
     }
 }
@@ -248,34 +273,42 @@ async fn cmd_list(store: &AccountStore, provider: Option<&str>, usage: bool, deb
             .collect();
         if accts.is_empty() {
             if provider.is_some() && single_name.is_none() {
-                println!("{}:", p.id());
-                println!("  (none)");
+                println!("{}", ui::heading(&format!("{}:", p.id())));
+                println!("  {}", ui::dim("(none)"));
             }
             continue;
         }
         let active = store.get_active(p.id());
         let live_cred = live.get(p.id()).and_then(|c| c.clone());
-        println!("{}:", p.id());
+        println!("{}", ui::heading(&format!("{}:", p.id())));
         for a in &accts {
-            let star = if active.as_deref() == Some(a.name.as_str()) { "*" } else { " " };
-            let email = a.email.as_deref().map(|e| format!(" <{e}>")).unwrap_or_default();
+            let star = if active.as_deref() == Some(a.name.as_str()) {
+                ui::green("●")
+            } else {
+                " ".to_string()
+            };
+            let email = a
+                .email
+                .as_deref()
+                .map(|e| ui::dim(&format!(" <{e}>")))
+                .unwrap_or_default();
             let label = match &a.label {
-                Some(l) if l != &a.name => format!(" ({l})"),
+                Some(l) if l != &a.name => ui::dim(&format!(" ({l})")),
                 _ => String::new(),
             };
             let stored = secure_store::get_secret(p.id(), &a.name);
             let current = matches!((&stored, &live_cred), (Some(s), Some(l)) if s == l);
-            let sysmark = if current { " (current in system)".to_string() } else { String::new() };
+            let sysmark = if current { ui::cyan(" (current in system)") } else { String::new() };
             let share = if can_show_sharing(p.id(), a.profile_type) && !current {
-                format!(" [{}]", describe_share(a.share.as_deref(), Some(p.id())))
+                ui::yellow(&format!(" [{}]", describe_share(a.share.as_deref(), Some(p.id()))))
             } else {
                 String::new()
             };
             println!(" {star} {}{email}{label}{sysmark}{share}", a.name);
             if debug {
                 match secure_store::get_secret(p.id(), &a.name) {
-                    Some(c) => println!("    credential: {c}"),
-                    None => println!("    credential: (none)"),
+                    Some(c) => println!("    {}", ui::dim(&format!("credential: {c}"))),
+                    None => println!("    {}", ui::dim("credential: (none)")),
                 }
             }
         }
@@ -290,8 +323,8 @@ fn cmd_status(store: &AccountStore, provider: Option<&str>) -> anyhow::Result<()
     };
     for p in provs {
         match store.get_active(&p) {
-            Some(name) => println!("{p}: {name}"),
-            None => println!("{p}: (none)"),
+            Some(name) => println!("{p}: {}", ui::green(&name)),
+            None => println!("{p}: {}", ui::dim("(none)")),
         }
     }
     Ok(())
@@ -340,7 +373,7 @@ async fn cmd_load(store: &AccountStore, provider: Option<String>, name: Option<S
         match adapter.load_current(&final_name, None).await {
             Ok(()) => {
                 store.set_profile_type(adapter.id(), &final_name, ProfileType::System)?;
-                println!("Loaded {}/{}", adapter.id(), final_name);
+                ui::success(format!("Loaded {}/{}", adapter.id(), final_name));
                 loaded_any = true;
             }
             Err(e) => {
@@ -351,7 +384,7 @@ async fn cmd_load(store: &AccountStore, provider: Option<String>, name: Option<S
         }
     }
     if provider.is_none() && !loaded_any {
-        println!("No configured agents found to load.");
+        ui::warn("No configured agents found to load.");
     }
     Ok(())
 }
@@ -360,7 +393,12 @@ async fn cmd_login(store: &AccountStore, provider: Option<String>, name: Option<
     // Resolve provider (explicit, or inferred from an existing account name).
     let (prov, name) = match (&provider, &name) {
         (Some(p), n) => (p.clone(), n.clone()),
-        (None, _) => anyhow::bail!("Specify a provider. e.g. aas login claude"),
+        (None, _) => {
+            ui::error("Specify a provider to log in.");
+            ui::hint("providers:  claude · codex · grok · zai");
+            ui::hint("example:    aas login claude work");
+            std::process::exit(2);
+        }
     };
     let Some(adapter) = get_adapter(&prov) else {
         anyhow::bail!("Unknown provider: {prov}");
@@ -373,7 +411,7 @@ async fn cmd_login(store: &AccountStore, provider: Option<String>, name: Option<
         if share_sel.provided {
             store.set_share(adapter.id(), &final_name, share_sel.value)?;
         }
-        println!("Logged in: {}/{}", adapter.id(), final_name);
+        ui::success(format!("Logged in: {}/{}", adapter.id(), final_name));
     }
     Ok(())
 }
@@ -384,7 +422,7 @@ async fn cmd_switch(store: &AccountStore, a: &str, b: Option<&str>) -> anyhow::R
         anyhow::bail!("Unknown provider: {prov}");
     };
     adapter.switch_to(&name).await?;
-    println!("Switched {} -> {}", adapter.id(), name);
+    ui::success(format!("Switched {} → {}", adapter.id(), name));
     Ok(())
 }
 
@@ -394,7 +432,7 @@ fn cmd_rename(store: &AccountStore, from: &str, to: &str) -> anyhow::Result<()> 
     };
     secure_store::rename_secret(&acct.provider, from, to)?;
     store.rename(from, to)?;
-    println!("Renamed {from} -> {to}");
+    ui::success(format!("Renamed {from} → {to}"));
     Ok(())
 }
 
@@ -411,9 +449,9 @@ fn cmd_remove(store: &AccountStore, args: &[String]) -> anyhow::Result<()> {
     };
     if store.remove(&prov, &name)? {
         secure_store::delete_secret(&prov, &name);
-        println!("Removed {prov}/{name}");
+        ui::success(format!("Removed {prov}/{name}"));
     } else {
-        println!("Not found: {prov}/{name}");
+        ui::warn(format!("Not found: {prov}/{name}"));
     }
     Ok(())
 }
@@ -431,7 +469,7 @@ fn cmd_sharing(store: &AccountStore, name: &str, share: &ShareArgs) -> anyhow::R
     let sel = resolve_share_selection(&share.to_opts(), Some(&acct.provider))?;
     if sel.provided {
         store.set_share(&acct.provider, name, sel.value)?;
-        println!("Updated sharing for {}/{name}", acct.provider);
+        ui::success(format!("Updated sharing for {}/{name}", acct.provider));
     }
     let cur = store.get(&acct.provider, name);
     println!(
@@ -452,10 +490,10 @@ async fn cmd_refresh(store: &AccountStore, a: &str, b: Option<&str>, no_login: b
     }
     let r = adapter.refresh(&name).await;
     if r.ok {
-        println!("✓ {name}: {}", r.message);
+        ui::success(format!("{name}: {}", r.message));
         return Ok(());
     }
-    eprintln!("✗ {name}: {}", r.message);
+    ui::error(format!("{name}: {}", r.message));
     if r.needs_relogin && !no_login {
         let acct = store.get(&prov, &name);
         let system_home = acct.and_then(|a| a.profile_type) == Some(ProfileType::System);
