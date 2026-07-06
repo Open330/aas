@@ -35,6 +35,41 @@ fn worse(a: BarLevel, b: BarLevel) -> BarLevel {
     }
 }
 
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Fraction of a time-boxed window (5h / 7d) that has elapsed, from its reset time.
+fn elapsed_pct(label: &str, reset_ms: i64) -> Option<f64> {
+    let dur_ms = match label {
+        "5h" => 5.0 * 3_600_000.0,
+        "7d" => 7.0 * 86_400_000.0,
+        _ => return None,
+    };
+    let rem = reset_ms as f64 - now_ms() as f64;
+    Some((1.0 - rem / dur_ms).clamp(0.0, 1.0) * 100.0)
+}
+
+/// Combine subscription + short tier, e.g. `max · 20x`, `team · 5x`, `pro`.
+fn plan_label(u: &Usage) -> String {
+    let base = u
+        .plan
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| u.headline.clone());
+    // Pull `tier=default_claude_max_20x` out of the headline and shorten to `20x`.
+    if let Some(tier) = u.headline.split_whitespace().find_map(|w| w.strip_prefix("tier=")) {
+        let short = tier.rsplit('_').next().unwrap_or(tier);
+        if !short.is_empty() && short != "default" && short != base {
+            return format!("{base} · {short}");
+        }
+    }
+    base
+}
+
 fn render_limits(u: &Usage) -> (String, Option<BarLevel>) {
     if let Some(err) = &u.error {
         return (format!("⚠ {err}"), Some(BarLevel::Bad));
@@ -49,11 +84,21 @@ fn render_limits(u: &Usage) -> (String, Option<BarLevel>) {
             None => lvl,
         });
         let bar = render_bar_plain(rem, 16);
+        // Reset: drop the redundant "resets" word, and append time-window elapsed %.
         let reset = m
             .reset_ms
-            .map(|ms| format!("  · {}", format_reset(ms)))
+            .map(|ms| {
+                let s = format_reset(ms);
+                let s = s.strip_prefix("resets ").unwrap_or(&s).to_string();
+                match elapsed_pct(&m.label, ms) {
+                    Some(e) => s.replacen(" left)", &format!(" left · {e:.0}%)"), 1),
+                    None => s,
+                }
+            })
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("  · {s}"))
             .unwrap_or_default();
-        lines.push(format!("{:<7}{} {:>3.0}% used{}", m.label, bar, m.used_pct, reset));
+        lines.push(format!("{:<4}{} {:>3.0}%{}", m.label, bar, m.used_pct, reset));
     }
     for n in &u.notes {
         lines.push(n.clone());
@@ -72,10 +117,13 @@ pub fn render_usage_table(rows: &[UsageRow]) {
         .set_content_arrangement(ContentArrangement::Dynamic);
     table.set_header(vec!["", "Provider", "Account", "Plan", "Limits"]);
 
+    let mut any_marker = false;
     for r in rows {
         let mark_cell = if r.active {
+            any_marker = true;
             Cell::new("●").fg(Color::Green)
         } else if r.current_in_system {
+            any_marker = true;
             Cell::new("◆").fg(Color::Cyan)
         } else {
             Cell::new(" ")
@@ -87,13 +135,6 @@ pub fn render_usage_table(rows: &[UsageRow]) {
             acct.push_str(e);
         }
 
-        let plan = r
-            .usage
-            .plan
-            .clone()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| r.usage.headline.clone());
-
         let (limits, worst) = render_limits(&r.usage);
         let limits_cell = match worst {
             Some(l) => Cell::new(limits).fg(level_color(l)),
@@ -104,10 +145,15 @@ pub fn render_usage_table(rows: &[UsageRow]) {
             mark_cell,
             Cell::new(&r.provider),
             Cell::new(acct),
-            Cell::new(plan),
+            Cell::new(plan_label(&r.usage)),
             limits_cell,
         ]);
     }
 
     println!("{table}");
+    if any_marker {
+        println!("  ● active   ◆ current in system");
+    } else {
+        println!("  (● = active · ◆ = current in system — none set)");
+    }
 }
