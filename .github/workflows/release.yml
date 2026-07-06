@@ -13,8 +13,19 @@ permissions:
   contents: write
 
 jobs:
+  # Create the GitHub Release first so the parallel upload jobs never race to create it
+  # (that race is what "release not found" was).
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/create-gh-release-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
   release:
     name: ${{ matrix.target }}
+    needs: create-release
     strategy:
       fail-fast: false
       matrix:
