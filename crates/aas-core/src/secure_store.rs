@@ -35,6 +35,20 @@ pub fn set_secret(provider: &str, name: &str, value: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Write the credential straight to the profile-home file, bypassing the keychain. Import
+/// fallback for when the OS keychain isn't writable — e.g. a non-interactive SSH session, where
+/// macOS keeps the login keychain locked. `get_secret` reads this file when the keychain has no
+/// entry, so the credential stays usable.
+pub fn set_secret_file(provider: &str, name: &str, value: &str) -> io::Result<()> {
+    let home = profile_home(provider, name);
+    std::fs::create_dir_all(&home)?;
+    set_0700(&home);
+    let p = profile_credential_path(provider, name);
+    std::fs::write(&p, value)?;
+    set_0600(&p);
+    Ok(())
+}
+
 pub fn get_secret(provider: &str, name: &str) -> Option<String> {
     if is_mac_claude(provider) {
         if let Some(v) = keychain_read(&claude_profile_service(provider, name)) {

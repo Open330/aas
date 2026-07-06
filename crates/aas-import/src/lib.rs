@@ -81,6 +81,8 @@ pub struct RestoreReport {
     pub conflicts: Vec<String>,
     /// Imported accounts whose bundle entry had no credential.
     pub without_credential: Vec<String>,
+    /// Imported accounts whose credential could not be stored at all.
+    pub failed: Vec<String>,
 }
 
 /// Recreate accounts + credentials from a bundle on this host.
@@ -94,8 +96,15 @@ pub fn import_bundle(bundle: &Bundle) -> RestoreReport {
                 report.accounts += 1;
                 match &ba.credential {
                     Some(c) => {
-                        if secure_store::set_secret(&ba.record.provider, &ba.record.name, c).is_ok() {
+                        // Prefer native storage (keychain on macOS Claude); if that fails — e.g.
+                        // a locked keychain over a non-interactive SSH session — fall back to the
+                        // profile-home file, which get_secret reads when the keychain is empty.
+                        let ok = secure_store::set_secret(&ba.record.provider, &ba.record.name, c).is_ok()
+                            || secure_store::set_secret_file(&ba.record.provider, &ba.record.name, c).is_ok();
+                        if ok {
                             report.credentials += 1;
+                        } else {
+                            report.failed.push(id);
                         }
                     }
                     None => report.without_credential.push(id),

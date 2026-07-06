@@ -409,6 +409,9 @@ fn cmd_import(file: Option<&str>) -> anyhow::Result<()> {
     if !report.without_credential.is_empty() {
         ui::hint(format!("no credential in bundle for: {}", report.without_credential.join(", ")));
     }
+    if !report.failed.is_empty() {
+        ui::warn(format!("could not store credential for: {}", report.failed.join(", ")));
+    }
     Ok(())
 }
 
