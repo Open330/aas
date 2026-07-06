@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "aas-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aas-core",
  "aas-import",
@@ -22,7 +22,7 @@ dependencies = [
 
 [[package]]
 name = "aas-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -36,7 +36,7 @@ dependencies = [
 
 [[package]]
 name = "aas-import"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aas-core",
  "anyhow",
@@ -44,7 +44,7 @@ dependencies = [
 
 [[package]]
 name = "aas-providers"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aas-core",
  "anyhow",
@@ -59,7 +59,7 @@ dependencies = [
 
 [[package]]
 name = "aas-proxy"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aas-core",
  "anyhow",

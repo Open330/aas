@@ -1,3 +1,5 @@
+<div align="center"><img src="https://quickstart-for-agents.vercel.app/api/header.svg?theme=opencode&logo=aas&title=Agent+Account+Switcher" width="640" /></div>
+
 # aas — Agent Account Switcher
 
 A single-binary, dependency-free **multi-account switcher for LLM coding agents**
@@ -71,7 +73,13 @@ aas exec work -- --version
 aas exec personal.codex claude
 
 # Use a profile in the *current shell* without switching your default
-eval "$(aas export personal.codex)"
+eval "$(aas export personal.codex)"       # POSIX (bash/zsh)
+aas export zai work                        # prints: export ZAI_API_KEY="…"
+aas export codex work --shell fish | source          # fish
+aas export codex work --shell powershell | iex       # PowerShell
+
+# Adopt / inspect existing asx state (usually a no-op — aas reads the same files)
+aas import
 ```
 
 `switch` vs `exec` vs `export`:
