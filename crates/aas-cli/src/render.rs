@@ -1,6 +1,6 @@
 //! Rendering for `list` and the `list -u` usage table (comfy-table).
 
-use aas_core::usage::{bar_level, format_reset, render_bar_plain, BarLevel, Usage};
+use aas_core::usage::{bar_level, render_bar_plain, BarLevel, Usage};
 use comfy_table::modifiers::UTF8_ROUND_CORNERS;
 use comfy_table::presets::UTF8_FULL;
 use comfy_table::{Cell, Color, ContentArrangement, Table};
@@ -53,6 +53,21 @@ fn elapsed_pct(label: &str, reset_ms: i64) -> Option<f64> {
     Some((1.0 - rem / dur_ms).clamp(0.0, 1.0) * 100.0)
 }
 
+/// Compact relative time to reset, e.g. `9m left`, `7h 59m left`, `now`.
+fn time_left(reset_ms: i64) -> String {
+    let diff = reset_ms - now_ms();
+    if diff <= 0 {
+        return "now".to_string();
+    }
+    let mins = (diff as f64 / 60000.0).round() as i64;
+    let (h, m) = (mins / 60, mins % 60);
+    if h > 0 {
+        format!("{h}h {m}m left")
+    } else {
+        format!("{m}m left")
+    }
+}
+
 /// Combine subscription + short tier, e.g. `max · 20x`, `team · 5x`, `pro`.
 fn plan_label(u: &Usage) -> String {
     let base = u
@@ -83,22 +98,17 @@ fn render_limits(u: &Usage) -> (String, Option<BarLevel>) {
             Some(w) => worse(w, lvl),
             None => lvl,
         });
-        let bar = render_bar_plain(rem, 16);
-        // Reset: drop the redundant "resets" word, and append time-window elapsed %.
-        let reset = m
-            .reset_ms
-            .map(|ms| {
-                let s = format_reset(ms);
-                let s = s.strip_prefix("resets ").unwrap_or(&s).to_string();
-                match elapsed_pct(&m.label, ms) {
-                    Some(e) => s.replacen(" left)", &format!(" left · {e:.0}%)"), 1),
-                    None => s,
-                }
-            })
-            .filter(|s| !s.is_empty())
-            .map(|s| format!("  · {s}"))
-            .unwrap_or_default();
-        lines.push(format!("{:<4}{} {:>3.0}%{}", m.label, bar, m.used_pct, reset));
+        let bar = render_bar_plain(rem, 12);
+        // Compact: relative time-to-reset + window elapsed %, no absolute timestamp (it
+        // wraps in narrow terminals and "9m left" already conveys the reset).
+        let reset = match m.reset_ms {
+            Some(ms) => match elapsed_pct(&m.label, ms) {
+                Some(e) => format!("  · {} · {e:.0}%", time_left(ms)),
+                None => format!("  · {}", time_left(ms)),
+            },
+            None => String::new(),
+        };
+        lines.push(format!("{:<3}{} {:>3.0}%{}", m.label, bar, m.used_pct, reset));
     }
     for n in &u.notes {
         lines.push(n.clone());
@@ -151,9 +161,8 @@ pub fn render_usage_table(rows: &[UsageRow]) {
     }
 
     println!("{table}");
+    // Legend only when a marker is actually shown.
     if any_marker {
         println!("  ● active   ◆ current in system");
-    } else {
-        println!("  (● = active · ◆ = current in system — none set)");
     }
 }
