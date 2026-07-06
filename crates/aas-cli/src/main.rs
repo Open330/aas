@@ -92,14 +92,21 @@ enum Command {
     Usage { provider: Option<String> },
     /// Show asx-tracked active account(s).
     Status { provider: Option<String> },
-    /// Print shell env to use a profile in the current shell: `eval "$(aas export <name>)"`.
+    /// Print shell env for a profile (`eval "$(aas export <name>)"`), or `--all` for a
+    /// portable credential bundle to migrate every account to another host.
     Export {
-        name: String,
+        name: Option<String>,
+        /// Export every account + credential as a JSON bundle (for `aas import`).
+        #[arg(short = 'a', long)]
+        all: bool,
         #[arg(long, value_enum, default_value_t = export::Shell::Posix)]
         shell: export::Shell,
+        /// Write the bundle to a file (0600) instead of stdout.
+        #[arg(short = 'o', long)]
+        out: Option<std::path::PathBuf>,
     },
-    /// Adopt / inspect existing asx state.
-    Import,
+    /// Adopt existing asx state, or restore a bundle from `aas export --all` (file, or `-` for stdin).
+    Import { file: Option<String> },
     /// Snapshot the live credential as a system profile.
     Load {
         provider: Option<String>,
@@ -159,8 +166,8 @@ async fn main() {
         Command::List { provider, usage, debug } => cmd_list(&store, provider.as_deref(), usage, debug).await,
         Command::Usage { provider } => cmd_list(&store, provider.as_deref(), true, false).await,
         Command::Status { provider } => cmd_status(&store, provider.as_deref()),
-        Command::Export { name, shell } => export::cmd_export(&store, &name, shell),
-        Command::Import => cmd_import(),
+        Command::Export { name, all, shell, out } => export::run(&store, name, all, shell, out),
+        Command::Import { file } => cmd_import(file.as_deref()),
         Command::Load { provider, name, share } => cmd_load(&store, provider, name, &share).await,
         Command::Login { provider, name, long_lived, device_auth, share } => {
             cmd_login(&store, provider, name, long_lived, device_auth, &share).await
@@ -362,13 +369,39 @@ fn cmd_status(store: &AccountStore, provider: Option<&str>) -> anyhow::Result<()
     Ok(())
 }
 
-fn cmd_import() -> anyhow::Result<()> {
-    let report = aas_import::inspect()?;
-    let dir = aas_core::platform::asx_config_dir();
-    println!("{} {}", ui::heading("asx state:"), ui::dim(&dir.display().to_string()));
-    println!("  {} {}", ui::dim("accounts         "), report.accounts);
-    println!("  {} {}", ui::dim("with profile home"), report.with_profile_home);
-    ui::success("Adopted directly — no migration needed.");
+fn cmd_import(file: Option<&str>) -> anyhow::Result<()> {
+    let Some(src) = file else {
+        // No file → inspect/adopt the existing (shared) asx state.
+        let report = aas_import::inspect()?;
+        let dir = aas_core::platform::asx_config_dir();
+        println!("{} {}", ui::heading("asx state:"), ui::dim(&dir.display().to_string()));
+        println!("  {} {}", ui::dim("accounts         "), report.accounts);
+        println!("  {} {}", ui::dim("with profile home"), report.with_profile_home);
+        ui::success("Adopted directly — no migration needed.");
+        return Ok(());
+    };
+
+    // Restore a bundle produced by `aas export --all` (a file, or `-` for stdin).
+    let data = if src == "-" {
+        use std::io::Read;
+        let mut s = String::new();
+        std::io::stdin().read_to_string(&mut s)?;
+        s
+    } else {
+        std::fs::read_to_string(src)?
+    };
+    let bundle: aas_import::Bundle = serde_json::from_str(&data)?;
+    let report = aas_import::import_bundle(&bundle);
+    ui::success(format!(
+        "Imported {} accounts, {} credentials",
+        report.accounts, report.credentials
+    ));
+    if !report.conflicts.is_empty() {
+        ui::warn(format!("skipped (name already used): {}", report.conflicts.join(", ")));
+    }
+    if !report.without_credential.is_empty() {
+        ui::hint(format!("no credential in bundle for: {}", report.without_credential.join(", ")));
+    }
     Ok(())
 }
 

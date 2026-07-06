@@ -11,6 +11,7 @@ use aas_core::naming::{normalize_provider_key, profile_home};
 use aas_core::secure_store;
 use aas_core::store::AccountStore;
 use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, Default)]
 pub enum Shell {
@@ -127,4 +128,56 @@ pub fn cmd_export(store: &AccountStore, name: &str, shell: Shell) -> anyhow::Res
         ui::hint(format!("apply with:  eval \"$(aas export {name})\""));
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn set_0600(p: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
+}
+#[cfg(not(unix))]
+fn set_0600(_p: &Path) {}
+
+/// Export every account + credential as a portable JSON bundle (for host-to-host migration).
+fn export_all(out: Option<&Path>) -> anyhow::Result<()> {
+    let bundle = aas_import::export_bundle();
+    let n = bundle.accounts.len();
+    let json = serde_json::to_string_pretty(&bundle)?;
+    match out {
+        Some(path) => {
+            std::fs::write(path, format!("{json}\n"))?;
+            set_0600(path);
+            ui::success(format!("Exported {n} accounts (with credentials) → {}", path.display()));
+            ui::warn("this file holds plaintext credentials — transfer securely, then delete it.");
+        }
+        None => {
+            println!("{json}");
+            if std::io::stdout().is_terminal() {
+                ui::warn("this bundle holds plaintext credentials — pipe it, don't leave it on screen.");
+                ui::hint("migrate:  aas export --all | ssh other-host aas import -");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Dispatch for the `export` command: `--all` → bundle, otherwise per-account shell env.
+pub fn run(
+    store: &AccountStore,
+    name: Option<String>,
+    all: bool,
+    shell: Shell,
+    out: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    if all {
+        return export_all(out.as_deref());
+    }
+    match name {
+        Some(n) => cmd_export(store, &n, shell),
+        None => {
+            ui::error("specify an account, or --all to export every account");
+            ui::hint("e.g.  aas export codex work   |   aas export --all");
+            std::process::exit(2);
+        }
+    }
 }

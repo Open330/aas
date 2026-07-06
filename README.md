@@ -80,6 +80,10 @@ aas export codex work --shell powershell | iex       # PowerShell
 
 # Adopt / inspect existing asx state (usually a no-op — aas reads the same files)
 aas import
+
+# Move ALL accounts + credentials to another host
+aas export --all | ssh other-host aas import -    # over ssh — nothing touches disk
+aas export --all -o creds.json                     # …or a file (0600); scp it, then: aas import creds.json
 ```
 
 `switch` vs `exec` vs `export`:
@@ -104,13 +108,13 @@ aas import
 | `load [provider] [name]` | Snapshot the **currently logged-in** credential as a **system** profile (auto-scans providers if none given). |
 | `switch <provider> <name>` (alias `s`) | Make a stored account the active credential. |
 | `exec <name> [target] [args…]` (alias `e`) | Run the native CLI under a profile. If `target` ≠ the profile's provider, requests route through the local **ASX Proxy** (cross-provider). `-b` full-access bypass; cross-run share flags `-s/-i/--share/--isolate/--keep-context`; `--` passes the rest to the agent. |
-| `export <name>` `--shell posix\|fish\|powershell` | Print shell env to use a profile in the current shell: `eval "$(aas export <name>)"`. |
+| `export [name]` `--all`, `-o <file>`, `--shell posix\|fish\|powershell` | Print shell env to use a profile in the current shell (`eval "$(aas export <name>)"`), or `--all` for a portable JSON bundle of **every account + credential** (to `-o <file>` or stdout) for host-to-host migration. |
 | `sharing <name>` *share flags* | Show or change which state (sessions/skills/agents/hooks/settings) an isolated profile shares from the provider's home. |
 | `rename <from> <to>` | Rename an account (moves its profile home + markers). |
 | `remove [provider] <name>` (alias `rm`) | Remove a stored account. |
 | `refresh <provider> <name>` `--no-login` | Rotate a credential via its refresh token (falls back to login unless `--no-login`). |
 | `proxy <name> <frontend>` | Start a standalone ASX Proxy for `<name>`'s backend and print env to point a `<frontend>` agent at it. |
-| `import` | Inspect/adopt existing `asx` state (usually a no-op — `aas` reads the same files). |
+| `import [file]` | No arg: adopt/inspect existing `asx` state. With a file (or `-` for stdin): restore a bundle from `export --all` on another host. |
 
 **Share flags** (for `login` / `sharing`, and per-run on cross-provider `exec`): `--shared`
 (default), `--isolated`, `--share <a,b,…>`, `--isolate <a,b,…>` over the categories
