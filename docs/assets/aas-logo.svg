@@ -1,27 +1,10 @@
-<svg width="640" height="180" viewBox="0 0 640 180" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="aas — Agent Account Switcher">
+<svg width="340" height="130" viewBox="0 0 340 130" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="aas — Multi-account switcher for LLM coding agents">
   <defs>
     <linearGradient id="brand" x1="0" y1="0" x2="1" y2="0">
       <stop offset="0" stop-color="#3fb950"/>
       <stop offset="1" stop-color="#58a6ff"/>
     </linearGradient>
   </defs>
-
-  <!-- terminal window (self-contained dark card → reads on light & dark) -->
-  <rect x="1.5" y="1.5" width="637" height="177" rx="16" fill="#0d1117" stroke="#30363d" stroke-width="1.5"/>
-
-  <!-- title bar -->
-  <circle cx="30" cy="30" r="6" fill="#ff5f56"/>
-  <circle cx="50" cy="30" r="6" fill="#febc2e"/>
-  <circle cx="70" cy="30" r="6" fill="#28c840"/>
-  <text x="320" y="34" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#6e7681">~ aas</text>
-  <line x1="16" y1="52" x2="624" y2="52" stroke="#21262d" stroke-width="1"/>
-
-  <!-- prompt: ❯ aas ▮ -->
-  <text x="32" y="120" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="54" font-weight="700">
-    <tspan fill="#3fb950">❯</tspan><tspan dx="18" fill="url(#brand)">aas</tspan>
-  </text>
-  <rect x="196" y="79" width="24" height="48" rx="2" fill="#58a6ff" opacity="0.85"/>
-
-  <!-- tagline -->
-  <text x="34" y="156" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="16" fill="#8b949e">Multi-account switcher for LLM coding agents</text>
+  <text x="2" y="84" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="92" font-weight="800" letter-spacing="-3" fill="url(#brand)">aas</text>
+  <text x="4" y="116" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="15" fill="#8b949e">Multi-account switcher for LLM coding agents</text>
 </svg>

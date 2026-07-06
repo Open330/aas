@@ -1,4 +1,4 @@
-<div align="center"><img src="docs/assets/aas-logo.svg" alt="aas — Agent Account Switcher" width="640" /></div>
+<div align="center"><img src="docs/assets/aas-logo.svg" alt="aas — Agent Account Switcher" width="360" /></div>
 
 # aas — Agent Account Switcher
 
