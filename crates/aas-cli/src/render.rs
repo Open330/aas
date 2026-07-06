@@ -69,9 +69,7 @@ pub struct ListRow {
 pub fn render_list_table(rows: &[ListRow]) {
     let mut table = new_table();
     table.set_header(vec!["", "Provider", "Account", "Sharing"]);
-    let mut any_marker = false;
     for r in rows {
-        any_marker |= r.active || r.current_in_system;
         let (txt, color) = match &r.sharing {
             Sharing::Categories(s) => (s.clone(), Color::Yellow),
             Sharing::CurrentInSystem => ("current in system".to_string(), Color::Cyan),
@@ -86,9 +84,6 @@ pub fn render_list_table(rows: &[ListRow]) {
     }
     tighten(&mut table);
     println!("{table}");
-    if any_marker {
-        println!("  ● active   ◆ current in system");
-    }
 }
 
 pub fn render_status_table(rows: &[(String, Option<String>)]) {
@@ -241,9 +236,7 @@ pub fn render_usage_table(rows: &[UsageRow]) {
     let mut table = new_table();
     table.set_header(vec!["", "Provider", "Account", "Plan", "Usage", "Reset"]);
 
-    let mut any_marker = false;
     for r in rows {
-        any_marker |= r.active || r.current_in_system;
         let (usage, reset) = usage_reset_cells(&r.usage);
         table.add_row(vec![
             marker_cell(r.active, r.current_in_system),
@@ -257,8 +250,4 @@ pub fn render_usage_table(rows: &[UsageRow]) {
 
     tighten(&mut table);
     println!("{table}");
-    // Legend only when a marker is actually shown.
-    if any_marker {
-        println!("  ● active   ◆ current in system");
-    }
 }
