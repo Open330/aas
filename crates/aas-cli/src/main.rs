@@ -264,7 +264,29 @@ async fn cmd_list(store: &AccountStore, provider: Option<&str>, usage: bool, deb
         return Ok(());
     }
 
-    // Plain listing.
+    // `-d` keeps a plain text dump (raw credentials don't belong in a table).
+    if debug {
+        for p in &provs {
+            let accts: Vec<_> = store
+                .list(Some(p.id()))
+                .into_iter()
+                .filter(|a| single_name.as_ref().is_none_or(|n| &a.name == n))
+                .collect();
+            if accts.is_empty() {
+                continue;
+            }
+            println!("{}", ui::heading(&format!("{}:", p.id())));
+            for a in &accts {
+                let cred = secure_store::get_secret(p.id(), &a.name).unwrap_or_else(|| "(none)".into());
+                println!("   {} {}", a.name, ui::dim(&format!("→ {cred}")));
+            }
+        }
+        return Ok(());
+    }
+
+    // Build display rows for the table.
+    let mut rows: Vec<render::ListRow> = Vec::new();
+    let mut named_empty = false;
     for p in &provs {
         let accts: Vec<_> = store
             .list(Some(p.id()))
@@ -273,46 +295,44 @@ async fn cmd_list(store: &AccountStore, provider: Option<&str>, usage: bool, deb
             .collect();
         if accts.is_empty() {
             if provider.is_some() && single_name.is_none() {
-                println!("{}", ui::heading(&format!("{}:", p.id())));
-                println!("  {}", ui::dim("(none)"));
+                named_empty = true;
             }
             continue;
         }
         let active = store.get_active(p.id());
         let live_cred = live.get(p.id()).and_then(|c| c.clone());
-        println!("{}", ui::heading(&format!("{}:", p.id())));
         for a in &accts {
-            let star = if active.as_deref() == Some(a.name.as_str()) {
-                ui::green("●")
-            } else {
-                " ".to_string()
-            };
-            let email = a
-                .email
-                .as_deref()
-                .map(|e| ui::dim(&format!(" <{e}>")))
-                .unwrap_or_default();
-            let label = match &a.label {
-                Some(l) if l != &a.name => ui::dim(&format!(" ({l})")),
-                _ => String::new(),
-            };
             let stored = secure_store::get_secret(p.id(), &a.name);
             let current = matches!((&stored, &live_cred), (Some(s), Some(l)) if s == l);
-            let sysmark = if current { ui::cyan(" (current in system)") } else { String::new() };
-            let share = if can_show_sharing(p.id(), a.profile_type) && !current {
-                ui::yellow(&format!(" [{}]", describe_share(a.share.as_deref(), Some(p.id()))))
+            let sharing = if current {
+                render::Sharing::CurrentInSystem
+            } else if !can_show_sharing(p.id(), a.profile_type) {
+                render::Sharing::System
             } else {
-                String::new()
+                let txt = match a.share.as_deref() {
+                    None => "shared: all".to_string(),
+                    Some(v) if v.is_empty() => "isolated".to_string(),
+                    Some(v) => format!("shared: {}", v.join(", ")),
+                };
+                render::Sharing::Categories(txt)
             };
-            println!(" {star} {}{email}{label}{sysmark}{share}", a.name);
-            if debug {
-                match secure_store::get_secret(p.id(), &a.name) {
-                    Some(c) => println!("    {}", ui::dim(&format!("credential: {c}"))),
-                    None => println!("    {}", ui::dim("credential: (none)")),
-                }
-            }
+            rows.push(render::ListRow {
+                provider: p.id().to_string(),
+                name: a.name.clone(),
+                email: a.email.clone(),
+                active: active.as_deref() == Some(a.name.as_str()),
+                current_in_system: current,
+                sharing,
+            });
         }
     }
+
+    if rows.is_empty() {
+        let msg = if named_empty { "(none)" } else { "(no accounts)" };
+        println!("{}", ui::dim(msg));
+        return Ok(());
+    }
+    render::render_list_table(&rows);
     Ok(())
 }
 
@@ -321,21 +341,19 @@ fn cmd_status(store: &AccountStore, provider: Option<&str>) -> anyhow::Result<()
         Some(p) => vec![p.to_string()],
         None => all_providers().iter().map(|p| p.id().to_string()).collect(),
     };
-    for p in provs {
-        match store.get_active(&p) {
-            Some(name) => println!("{p}: {}", ui::green(&name)),
-            None => println!("{p}: {}", ui::dim("(none)")),
-        }
-    }
+    let rows: Vec<(String, Option<String>)> =
+        provs.into_iter().map(|p| { let a = store.get_active(&p); (p, a) }).collect();
+    render::render_status_table(&rows);
     Ok(())
 }
 
 fn cmd_import() -> anyhow::Result<()> {
     let report = aas_import::inspect()?;
-    println!("asx state at {}", aas_core::platform::asx_config_dir().display());
-    println!("  accounts:          {}", report.accounts);
-    println!("  with profile home: {}", report.with_profile_home);
-    println!("aas reads these directly — no migration needed.");
+    let dir = aas_core::platform::asx_config_dir();
+    println!("{} {}", ui::heading("asx state:"), ui::dim(&dir.display().to_string()));
+    println!("  {} {}", ui::dim("accounts         "), report.accounts);
+    println!("  {} {}", ui::dim("with profile home"), report.with_profile_home);
+    ui::success("Adopted directly — no migration needed.");
     Ok(())
 }
 

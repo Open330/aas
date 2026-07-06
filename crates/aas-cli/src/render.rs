@@ -14,6 +14,96 @@ pub struct UsageRow {
     pub usage: Usage,
 }
 
+/// Rounded, dynamically-arranged base table shared by every view.
+fn new_table() -> Table {
+    let mut t = Table::new();
+    t.load_preset(UTF8_FULL)
+        .apply_modifier(UTF8_ROUND_CORNERS)
+        .set_content_arrangement(ContentArrangement::Dynamic);
+    t
+}
+
+/// Trim per-column padding to 1 space (right only).
+fn tighten(t: &mut Table) {
+    for column in t.column_iter_mut() {
+        column.set_padding((0, 1));
+    }
+}
+
+fn account_cell(name: &str, email: &Option<String>) -> Cell {
+    let mut s = name.to_string();
+    if let Some(e) = email {
+        s.push('\n');
+        s.push_str(e);
+    }
+    Cell::new(s)
+}
+
+fn marker_cell(active: bool, current: bool) -> Cell {
+    if active {
+        Cell::new("●").fg(Color::Green)
+    } else if current {
+        Cell::new("◆").fg(Color::Cyan)
+    } else {
+        Cell::new(" ")
+    }
+}
+
+/// How a profile shares state (for the `list` Sharing column).
+pub enum Sharing {
+    Categories(String),
+    CurrentInSystem,
+    System,
+}
+
+pub struct ListRow {
+    pub provider: String,
+    pub name: String,
+    pub email: Option<String>,
+    pub active: bool,
+    pub current_in_system: bool,
+    pub sharing: Sharing,
+}
+
+pub fn render_list_table(rows: &[ListRow]) {
+    let mut table = new_table();
+    table.set_header(vec!["", "Provider", "Account", "Sharing"]);
+    let mut any_marker = false;
+    for r in rows {
+        any_marker |= r.active || r.current_in_system;
+        let (txt, color) = match &r.sharing {
+            Sharing::Categories(s) => (s.clone(), Color::Yellow),
+            Sharing::CurrentInSystem => ("current in system".to_string(), Color::Cyan),
+            Sharing::System => ("system".to_string(), Color::DarkGrey),
+        };
+        table.add_row(vec![
+            marker_cell(r.active, r.current_in_system),
+            Cell::new(&r.provider),
+            account_cell(&r.name, &r.email),
+            Cell::new(txt).fg(color),
+        ]);
+    }
+    tighten(&mut table);
+    println!("{table}");
+    if any_marker {
+        println!("  ● active   ◆ current in system");
+    }
+}
+
+pub fn render_status_table(rows: &[(String, Option<String>)]) {
+    let mut table = new_table();
+    table.set_header(vec!["Provider", "Active"]);
+    for (prov, active) in rows {
+        let cell = match active {
+            Some(n) => Cell::new(n).fg(Color::Green),
+            None => Cell::new("(none)").fg(Color::DarkGrey),
+        };
+        table.add_row(vec![Cell::new(prov), cell]);
+    }
+    tighten(&mut table);
+    println!("{table}");
+}
+
 fn level_color(l: BarLevel) -> Color {
     match l {
         BarLevel::Good => Color::Green,
@@ -120,51 +210,27 @@ fn render_limits(u: &Usage) -> (String, Option<BarLevel>) {
 }
 
 pub fn render_usage_table(rows: &[UsageRow]) {
-    let mut table = Table::new();
-    table
-        .load_preset(UTF8_FULL)
-        .apply_modifier(UTF8_ROUND_CORNERS)
-        .set_content_arrangement(ContentArrangement::Dynamic);
+    let mut table = new_table();
     table.set_header(vec!["", "Provider", "Account", "Plan", "Limits"]);
 
     let mut any_marker = false;
     for r in rows {
-        let mark_cell = if r.active {
-            any_marker = true;
-            Cell::new("●").fg(Color::Green)
-        } else if r.current_in_system {
-            any_marker = true;
-            Cell::new("◆").fg(Color::Cyan)
-        } else {
-            Cell::new(" ")
-        };
-
-        let mut acct = r.name.clone();
-        if let Some(e) = &r.email {
-            acct.push('\n');
-            acct.push_str(e);
-        }
-
+        any_marker |= r.active || r.current_in_system;
         let (limits, worst) = render_limits(&r.usage);
         let limits_cell = match worst {
             Some(l) => Cell::new(limits).fg(level_color(l)),
             None => Cell::new(limits),
         };
-
         table.add_row(vec![
-            mark_cell,
+            marker_cell(r.active, r.current_in_system),
             Cell::new(&r.provider),
-            Cell::new(acct),
+            account_cell(&r.name, &r.email),
             Cell::new(plan_label(&r.usage)),
             limits_cell,
         ]);
     }
 
-    // Tighten cell padding (default is 1 space each side).
-    for column in table.column_iter_mut() {
-        column.set_padding((0, 1));
-    }
-
+    tighten(&mut table);
     println!("{table}");
     // Legend only when a marker is actually shown.
     if any_marker {

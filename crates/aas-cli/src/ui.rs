@@ -59,12 +59,3 @@ pub fn heading(s: &str) -> String {
 pub fn dim(s: &str) -> String {
     if out() { s.dimmed().to_string() } else { s.to_string() }
 }
-pub fn green(s: &str) -> String {
-    if out() { s.green().to_string() } else { s.to_string() }
-}
-pub fn cyan(s: &str) -> String {
-    if out() { s.cyan().to_string() } else { s.to_string() }
-}
-pub fn yellow(s: &str) -> String {
-    if out() { s.yellow().to_string() } else { s.to_string() }
-}
