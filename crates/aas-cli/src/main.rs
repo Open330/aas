@@ -27,7 +27,7 @@ const STYLES: Styles = Styles::styled()
 
 const EXAMPLES: &str = "\
 Examples:
-  aas list -u              live usage for every account (fetched in parallel)
+  aas usage                live usage for every account (fetched in parallel)
   aas login claude work    add a Claude account as an isolated profile
   aas switch codex work    make a stored account active
   aas e work               run the agent under a profile
@@ -86,6 +86,9 @@ enum Command {
         #[arg(short, long)]
         debug: bool,
     },
+    /// Live usage table for every account (shorthand for `list -u`).
+    #[command(visible_alias = "u")]
+    Usage { provider: Option<String> },
     /// Show asx-tracked active account(s).
     Status { provider: Option<String> },
     /// Adopt / inspect existing asx state.
@@ -144,6 +147,7 @@ async fn main() {
     let store = AccountStore::open_default();
     let result = match cli.command {
         Command::List { provider, usage, debug } => cmd_list(&store, provider.as_deref(), usage, debug).await,
+        Command::Usage { provider } => cmd_list(&store, provider.as_deref(), true, false).await,
         Command::Status { provider } => cmd_status(&store, provider.as_deref()),
         Command::Import => cmd_import(),
         Command::Load { provider, name, share } => cmd_load(&store, provider, name, &share).await,
