@@ -132,16 +132,16 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// Fraction of a time-boxed window (5h / 7d) that has elapsed, from its reset time.
-/// Shown next to time-left so you can compare usage pace against time pace.
-fn elapsed_pct(label: &str, reset_ms: i64) -> Option<f64> {
+/// Fraction of a time-boxed window (5h / 7d) still remaining, from its reset time.
+/// Shown next to the time-left so both the amount and the % refer to what remains.
+fn remaining_window_pct(label: &str, reset_ms: i64) -> Option<f64> {
     let dur_ms = match label {
         "5h" => 5.0 * 3_600_000.0,
         "7d" => 7.0 * 86_400_000.0,
         _ => return None,
     };
     let rem = reset_ms as f64 - now_ms() as f64;
-    Some((1.0 - rem / dur_ms).clamp(0.0, 1.0) * 100.0)
+    Some((rem / dur_ms).clamp(0.0, 1.0) * 100.0)
 }
 
 /// Colour by how close to the limit: low use green, high use red.
@@ -155,8 +155,8 @@ fn used_level(used_pct: f64) -> BarLevel {
     }
 }
 
-/// Compact relative time to reset, e.g. `9m left`, `7h 59m left`, `now`.
-fn time_left(reset_ms: i64) -> String {
+/// Compact time to reset without a suffix, e.g. `9m`, `7h 59m`, `now`.
+fn time_amount(reset_ms: i64) -> String {
     let diff = reset_ms - now_ms();
     if diff <= 0 {
         return "now".to_string();
@@ -164,9 +164,9 @@ fn time_left(reset_ms: i64) -> String {
     let mins = (diff as f64 / 60000.0).round() as i64;
     let (h, m) = (mins / 60, mins % 60);
     if h > 0 {
-        format!("{h}h {m}m left")
+        format!("{h}h {m}m")
     } else {
-        format!("{m}m left")
+        format!("{m}m")
     }
 }
 
@@ -202,12 +202,18 @@ fn render_limits(u: &Usage) -> (String, Option<BarLevel>) {
         });
         // Bar fills with USED (like Claude Code's /usage): a full bar = at the limit.
         let bar = render_bar_plain(used, 8);
-        // Time-to-reset, plus the % of the window elapsed (bare % after "left" = time pace).
+        // e.g. "· 7h 7m (4%) left" — the time and the % both refer to what remains.
         let reset = match m.reset_ms {
-            Some(ms) => match elapsed_pct(&m.label, ms) {
-                Some(e) => format!(" · {} · {e:.0}%", time_left(ms)),
-                None => format!(" · {}", time_left(ms)),
-            },
+            Some(ms) => {
+                let amount = time_amount(ms);
+                if amount == "now" {
+                    " · now".to_string()
+                } else if let Some(rem) = remaining_window_pct(&m.label, ms) {
+                    format!(" · {amount} ({rem:.0}%) left")
+                } else {
+                    format!(" · {amount} left")
+                }
+            }
             None => String::new(),
         };
         lines.push(format!("{:<3}{} {:>3.0}% used{}", m.label, bar, used, reset));
