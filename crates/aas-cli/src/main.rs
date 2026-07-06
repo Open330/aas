@@ -160,6 +160,13 @@ enum Command {
 
 #[tokio::main]
 async fn main() {
+    // Behave like a normal Unix CLI: exit quietly on a broken pipe (e.g. `aas export … | head`)
+    // instead of panicking when a downstream reader goes away.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     let cli = Cli::parse();
     let store = AccountStore::open_default();
     let result = match cli.command {
