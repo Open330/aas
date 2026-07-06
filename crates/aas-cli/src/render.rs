@@ -132,6 +132,18 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Fraction of a time-boxed window (5h / 7d) that has elapsed, from its reset time.
+/// Shown next to time-left so you can compare usage pace against time pace.
+fn elapsed_pct(label: &str, reset_ms: i64) -> Option<f64> {
+    let dur_ms = match label {
+        "5h" => 5.0 * 3_600_000.0,
+        "7d" => 7.0 * 86_400_000.0,
+        _ => return None,
+    };
+    let rem = reset_ms as f64 - now_ms() as f64;
+    Some((1.0 - rem / dur_ms).clamp(0.0, 1.0) * 100.0)
+}
+
 /// Colour by how close to the limit: low use green, high use red.
 fn used_level(used_pct: f64) -> BarLevel {
     if used_pct >= 85.0 {
@@ -189,9 +201,13 @@ fn render_limits(u: &Usage) -> (String, Option<BarLevel>) {
             None => lvl,
         });
         // Bar fills with USED (like Claude Code's /usage): a full bar = at the limit.
-        let bar = render_bar_plain(used, 10);
+        let bar = render_bar_plain(used, 8);
+        // Time-to-reset, plus the % of the window elapsed (bare % after "left" = time pace).
         let reset = match m.reset_ms {
-            Some(ms) => format!(" · {}", time_left(ms)),
+            Some(ms) => match elapsed_pct(&m.label, ms) {
+                Some(e) => format!(" · {} · {e:.0}%", time_left(ms)),
+                None => format!(" · {}", time_left(ms)),
+            },
             None => String::new(),
         };
         lines.push(format!("{:<3}{} {:>3.0}% used{}", m.label, bar, used, reset));
