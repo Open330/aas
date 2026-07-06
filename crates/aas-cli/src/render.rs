@@ -4,6 +4,7 @@ use aas_core::usage::{render_bar_plain, BarLevel, Usage};
 use comfy_table::modifiers::UTF8_ROUND_CORNERS;
 use comfy_table::presets::UTF8_FULL;
 use comfy_table::{Cell, Color, ContentArrangement, Table};
+use owo_colors::OwoColorize;
 
 pub struct UsageRow {
     pub provider: String,
@@ -104,24 +105,32 @@ pub fn render_status_table(rows: &[(String, Option<String>)]) {
     println!("{table}");
 }
 
-fn level_color(l: BarLevel) -> Color {
-    match l {
-        BarLevel::Good => Color::Green,
-        BarLevel::Warn => Color::Yellow,
-        BarLevel::Bad => Color::Red,
+fn color_on() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
+
+/// Colour a whole line by level (TTY-aware). Relies on comfy-table's `custom_styling`
+/// feature so the embedded ANSI is measured correctly for column widths.
+fn color_line(text: String, level: BarLevel) -> String {
+    if !color_on() {
+        return text;
+    }
+    match level {
+        BarLevel::Good => text.green().to_string(),
+        BarLevel::Warn => text.yellow().to_string(),
+        BarLevel::Bad => text.red().to_string(),
     }
 }
 
-fn worse(a: BarLevel, b: BarLevel) -> BarLevel {
-    let rank = |l: BarLevel| match l {
-        BarLevel::Bad => 0,
-        BarLevel::Warn => 1,
-        BarLevel::Good => 2,
-    };
-    if rank(a) <= rank(b) {
-        a
+/// Colour time-remaining: lots of time left = green, almost reset = red.
+fn remaining_level(remaining_pct: f64) -> BarLevel {
+    if remaining_pct <= 15.0 {
+        BarLevel::Bad
+    } else if remaining_pct <= 40.0 {
+        BarLevel::Warn
     } else {
-        b
+        BarLevel::Good
     }
 }
 
@@ -187,64 +196,62 @@ fn plan_label(u: &Usage) -> String {
     base
 }
 
-fn render_limits(u: &Usage) -> (String, Option<BarLevel>) {
+/// Build the `Usage` and `Reset` cell contents for an account — one line per meter (5h/7d),
+/// each line coloured independently (usage green→red by used %, reset green→red by time left).
+fn usage_reset_cells(u: &Usage) -> (String, String) {
     if let Some(err) = &u.error {
-        return (format!("⚠ {err}"), Some(BarLevel::Bad));
+        return (color_line(format!("⚠ {err}"), BarLevel::Bad), String::new());
     }
-    let mut lines: Vec<String> = Vec::new();
-    let mut worst: Option<BarLevel> = None;
+    let mut usage_lines: Vec<String> = Vec::new();
+    let mut reset_lines: Vec<String> = Vec::new();
     for m in &u.meters {
         let used = m.used_pct.clamp(0.0, 100.0);
-        let lvl = used_level(used);
-        worst = Some(match worst {
-            Some(w) => worse(w, lvl),
-            None => lvl,
-        });
         // Bar fills with USED (like Claude Code's /usage): a full bar = at the limit.
         let bar = render_bar_plain(used, 8);
-        // e.g. "· 7h 7m (4%) left" — the time and the % both refer to what remains.
-        let reset = match m.reset_ms {
+        usage_lines.push(color_line(
+            format!("{:<3}{} {:>3.0}% used", m.label, bar, used),
+            used_level(used),
+        ));
+        // e.g. "7h 7m (4%) left" — the time and the % both refer to what remains.
+        let rline = match m.reset_ms {
             Some(ms) => {
                 let amount = time_amount(ms);
                 if amount == "now" {
-                    " · now".to_string()
+                    color_line("now".to_string(), BarLevel::Bad)
                 } else if let Some(rem) = remaining_window_pct(&m.label, ms) {
-                    format!(" · {amount} ({rem:.0}%) left")
+                    color_line(format!("{amount} ({rem:.0}%) left"), remaining_level(rem))
                 } else {
-                    format!(" · {amount} left")
+                    format!("{amount} left")
                 }
             }
             None => String::new(),
         };
-        lines.push(format!("{:<3}{} {:>3.0}% used{}", m.label, bar, used, reset));
+        reset_lines.push(rline);
     }
     for n in &u.notes {
-        lines.push(n.clone());
+        usage_lines.push(n.clone());
     }
-    if lines.is_empty() {
-        lines.push(u.headline.clone());
+    if usage_lines.is_empty() {
+        usage_lines.push(u.headline.clone());
     }
-    (lines.join("\n"), worst)
+    (usage_lines.join("\n"), reset_lines.join("\n"))
 }
 
 pub fn render_usage_table(rows: &[UsageRow]) {
     let mut table = new_table();
-    table.set_header(vec!["", "Provider", "Account", "Plan", "Limits"]);
+    table.set_header(vec!["", "Provider", "Account", "Plan", "Usage", "Reset"]);
 
     let mut any_marker = false;
     for r in rows {
         any_marker |= r.active || r.current_in_system;
-        let (limits, worst) = render_limits(&r.usage);
-        let limits_cell = match worst {
-            Some(l) => Cell::new(limits).fg(level_color(l)),
-            None => Cell::new(limits),
-        };
+        let (usage, reset) = usage_reset_cells(&r.usage);
         table.add_row(vec![
             marker_cell(r.active, r.current_in_system),
             Cell::new(&r.provider),
             account_cell(&r.name, &r.email),
             Cell::new(plan_label(&r.usage)),
-            limits_cell,
+            Cell::new(usage),
+            Cell::new(reset),
         ]);
     }
 
