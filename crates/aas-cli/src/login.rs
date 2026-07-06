@@ -1,11 +1,23 @@
 //! Login flow. Mirrors asx `runLoginFlow` (cli.ts:348-502): long-lived Claude token, Z.AI API
 //! key, and native OAuth login into an isolated (or system) profile home.
 
+use crate::ui;
 use aas_core::naming::{derive_account_name, native_cred_file, normalize_provider_key, profile_home};
 use aas_providers::Provider;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// Native login argv, with the provider's headless/device flag appended when requested.
+fn build_login_command(provider: Provider, device_auth: bool) -> anyhow::Result<Vec<String>> {
+    let mut cmd = provider
+        .login_command()
+        .ok_or_else(|| anyhow::anyhow!("Login flow is not supported for provider '{}'.", provider.id()))?;
+    if device_auth && provider == Provider::Codex {
+        cmd.push("--device-auth".to_string());
+    }
+    Ok(cmd)
+}
 
 fn home_env_var(provider_key: &str) -> Option<&'static str> {
     match provider_key {
@@ -76,25 +88,29 @@ async fn login_in_home(
     provider: Provider,
     target: &str,
     home: Option<&Path>,
+    device_auth: bool,
 ) -> anyhow::Result<Option<String>> {
     let key = normalize_provider_key(provider.id());
     let env_var = home_env_var(&key);
-    let cmd = provider
-        .login_command()
-        .ok_or_else(|| anyhow::anyhow!("Login flow is not supported for provider '{}'.", provider.id()))?;
+    let cmd = build_login_command(provider, device_auth)?;
 
     let env = match (home, env_var) {
         (Some(h), Some(ev)) => Some((ev, h)),
         _ => None,
     };
-    println!(
-        "Launching native login: {}{}",
-        cmd.join(" "),
-        env.map(|(k, v)| format!(" ({k}={})", v.display())).unwrap_or_default()
-    );
+    ui::step(format!(
+        "Signing in to {} as \"{target}\"{}",
+        provider.id(),
+        if device_auth { " (headless)" } else { "" }
+    ));
+    if device_auth {
+        ui::hint("follow the device-code prompt below");
+    } else {
+        ui::hint("a browser will open — finish the sign-in there");
+    }
     let code = run_native(&cmd, env)?;
     if code != 0 {
-        eprintln!("Native login exited with code {code}.");
+        ui::warn(format!("native login exited with code {code}"));
     }
 
     // Load the newly logged-in session, with the home env var pointed at the profile home.
@@ -119,6 +135,7 @@ pub async fn run_login_flow(
     provider: Provider,
     name: Option<&str>,
     long_lived: bool,
+    device_auth: bool,
     system_home: bool,
 ) -> anyhow::Result<Option<String>> {
     let key = normalize_provider_key(provider.id());
@@ -126,13 +143,17 @@ pub async fn run_login_flow(
         .map(String::from)
         .unwrap_or_else(|| derive_account_name(None, provider.id()));
 
+    if device_auth && provider == Provider::Claude && !long_lived {
+        ui::hint("claude has no device flow — use `--long-lived` for headless setups.");
+    }
+
     // 1. Claude long-lived token (claude setup-token).
     if long_lived && provider == Provider::Claude {
         let cmd = vec!["claude".to_string(), "setup-token".to_string()];
-        println!("Launching native token setup: {}", cmd.join(" "));
+        ui::step(format!("Setting up a long-lived token for claude as \"{target}\""));
         let code = run_native(&cmd, None)?;
         if code != 0 {
-            eprintln!("setup-token exited with code {code}.");
+            ui::warn(format!("setup-token exited with code {code}"));
             return Ok(None);
         }
         let token = match std::env::var("ASX_CLAUDE_CODE_OAUTH_TOKEN") {
@@ -167,7 +188,7 @@ pub async fn run_login_flow(
 
     // 4. system profile → login into the provider's normal home.
     if system_home {
-        return login_in_home(provider, &target, None).await;
+        return login_in_home(provider, &target, None, device_auth).await;
     }
 
     // 5. Isolated agent profile → login into a per-profile home.
@@ -175,6 +196,5 @@ pub async fn run_login_flow(
     ensure_700(&dir);
     seed_agent_home(&key, &dir);
     let _ = std::fs::remove_file(dir.join(native_cred_file(provider.id())));
-    println!("Complete the login in the opened browser/terminal...");
-    login_in_home(provider, &target, Some(&dir)).await
+    login_in_home(provider, &target, Some(&dir), device_auth).await
 }

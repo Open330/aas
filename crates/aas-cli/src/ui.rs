@@ -33,6 +33,15 @@ pub fn success(msg: impl Display) {
     }
 }
 
+/// `→ …` step/progress line in cyan, to stdout.
+pub fn step(msg: impl Display) {
+    if out() {
+        println!("{} {msg}", "→".cyan().bold());
+    } else {
+        println!("→ {msg}");
+    }
+}
+
 /// `! …` in yellow, to stderr.
 pub fn warn(msg: impl Display) {
     if eout() {

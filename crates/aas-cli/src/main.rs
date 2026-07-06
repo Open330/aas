@@ -106,6 +106,9 @@ enum Command {
         name: Option<String>,
         #[arg(long)]
         long_lived: bool,
+        /// Headless / no browser: use the provider's device-code flow (codex).
+        #[arg(long, visible_alias = "headless")]
+        device_auth: bool,
         #[command(flatten)]
         share: ShareArgs,
     },
@@ -151,8 +154,8 @@ async fn main() {
         Command::Status { provider } => cmd_status(&store, provider.as_deref()),
         Command::Import => cmd_import(),
         Command::Load { provider, name, share } => cmd_load(&store, provider, name, &share).await,
-        Command::Login { provider, name, long_lived, share } => {
-            cmd_login(&store, provider, name, long_lived, &share).await
+        Command::Login { provider, name, long_lived, device_auth, share } => {
+            cmd_login(&store, provider, name, long_lived, device_auth, &share).await
         }
         Command::Switch { provider, name } => cmd_switch(&store, &provider, name.as_deref()).await,
         Command::Rename { from, to } => cmd_rename(&store, &from, &to),
@@ -411,7 +414,7 @@ async fn cmd_load(store: &AccountStore, provider: Option<String>, name: Option<S
     Ok(())
 }
 
-async fn cmd_login(store: &AccountStore, provider: Option<String>, name: Option<String>, long_lived: bool, share: &ShareArgs) -> anyhow::Result<()> {
+async fn cmd_login(store: &AccountStore, provider: Option<String>, name: Option<String>, long_lived: bool, device_auth: bool, share: &ShareArgs) -> anyhow::Result<()> {
     // Resolve provider (explicit, or inferred from an existing account name).
     let (prov, name) = match (&provider, &name) {
         (Some(p), n) => (p.clone(), n.clone()),
@@ -427,7 +430,7 @@ async fn cmd_login(store: &AccountStore, provider: Option<String>, name: Option<
     };
     let share_sel = resolve_share_selection(&share.to_opts(), Some(adapter.id()))?;
     let system_home = false; // system-profile re-login detection lands with exec/P3
-    let final_name = login::run_login_flow(adapter, name.as_deref(), long_lived, system_home).await?;
+    let final_name = login::run_login_flow(adapter, name.as_deref(), long_lived, device_auth, system_home).await?;
     if let Some(final_name) = final_name {
         store.set_profile_type(adapter.id(), &final_name, ProfileType::Isolated)?;
         if share_sel.provided {
@@ -519,7 +522,7 @@ async fn cmd_refresh(store: &AccountStore, a: &str, b: Option<&str>, no_login: b
     if r.needs_relogin && !no_login {
         let acct = store.get(&prov, &name);
         let system_home = acct.and_then(|a| a.profile_type) == Some(ProfileType::System);
-        login::run_login_flow(adapter, Some(&name), false, system_home).await?;
+        login::run_login_flow(adapter, Some(&name), false, false, system_home).await?;
         return Ok(());
     }
     anyhow::bail!("refresh failed");
