@@ -12,13 +12,32 @@ A single-binary, dependency-free **multi-account switcher for LLM coding agents*
 
 ## Status
 
-🚧 Early port in progress. See [`docs/DESIGN.md`](docs/DESIGN.md) and
+Functionally complete port (P1–P4): storage/keychain/import, all provider adapters + parallel
+`list -u`, every CLI command, same- and cross-provider `exec`, and the translating proxy.
+**90 tests** across the workspace. See [`docs/DESIGN.md`](docs/DESIGN.md) and
 [`docs/PARITY_SPEC.md`](docs/PARITY_SPEC.md).
 
-Phases: **P0** scaffold · **P1** core (storage/keychain/import) · **P2** single-provider CLI ·
-**P3** exec · **P4** proxy · **P5** distribution.
+## Install
 
-## Build
+macOS / Linux (single static binary — no Node, no runtime):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/open330/aas/main/install.sh | sh
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/open330/aas/main/install.ps1 | iex
+```
+
+From source:
+
+```bash
+cargo install --path crates/aas-cli --locked   # -> ~/.cargo/bin/aas
+```
+
+## Develop
 
 ```bash
 cargo build
