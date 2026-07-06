@@ -3,6 +3,7 @@
 //! sharing, refresh, import. exec (P3) / proxy (P4) land next.
 
 mod exec;
+mod export;
 mod login;
 mod render;
 mod ui;
@@ -91,6 +92,12 @@ enum Command {
     Usage { provider: Option<String> },
     /// Show asx-tracked active account(s).
     Status { provider: Option<String> },
+    /// Print shell env to use a profile in the current shell: `eval "$(aas export <name>)"`.
+    Export {
+        name: String,
+        #[arg(long, value_enum, default_value_t = export::Shell::Posix)]
+        shell: export::Shell,
+    },
     /// Adopt / inspect existing asx state.
     Import,
     /// Snapshot the live credential as a system profile.
@@ -152,6 +159,7 @@ async fn main() {
         Command::List { provider, usage, debug } => cmd_list(&store, provider.as_deref(), usage, debug).await,
         Command::Usage { provider } => cmd_list(&store, provider.as_deref(), true, false).await,
         Command::Status { provider } => cmd_status(&store, provider.as_deref()),
+        Command::Export { name, shell } => export::cmd_export(&store, &name, shell),
         Command::Import => cmd_import(),
         Command::Load { provider, name, share } => cmd_load(&store, provider, name, &share).await,
         Command::Login { provider, name, long_lived, device_auth, share } => {
@@ -376,7 +384,17 @@ async fn cmd_load(store: &AccountStore, provider: Option<String>, name: Option<S
     for (prov, explicit) in targets {
         let Some(adapter) = get_adapter(&prov) else {
             if provider.is_some() {
-                eprintln!("Unknown provider: {prov}");
+                if store.get_by_name(&prov).ok().flatten().is_some() {
+                    ui::error(format!("\"{prov}\" is an account, not a provider."));
+                    ui::hint(format!("activate it:   aas switch {prov}"));
+                    ui::hint(format!("run under it:  aas exec {prov}"));
+                    ui::hint(format!("shell env:     eval \"$(aas export {prov})\""));
+                } else {
+                    ui::error(format!("Unknown provider: {prov}"));
+                    ui::hint("providers: claude · codex · grok · zai · cursor");
+                    ui::hint("`load` snapshots the currently logged-in credential, e.g.:  aas load codex");
+                }
+                std::process::exit(1);
             }
             continue;
         };
