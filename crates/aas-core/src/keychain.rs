@@ -6,7 +6,9 @@
 //! `"Claude Code-credentials-" + hex(sha256(configDir))[..8]`.
 
 use sha2::{Digest, Sha256};
+use std::io;
 use std::path::Path;
+use std::process::{Command, Stdio};
 
 pub const SERVICE_PREFIX: &str = "Claude Code-credentials";
 
@@ -41,6 +43,49 @@ pub fn current_user() -> String {
             }
         })
         .unwrap_or_else(|| "user".to_string())
+}
+
+/// Read a generic-password credential from the macOS Keychain via the `security` CLI.
+/// Returns `None` on any failure or empty value. (No-op-ish off macOS: `security` missing → None.)
+pub fn read_credential(service: &str) -> Option<String> {
+    let out = Command::new("security")
+        .args(["find-generic-password", "-s", service, "-a", &current_user(), "-w"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// Write (create or update via `-U`) a generic-password credential.
+pub fn write_credential(service: &str, raw: &str) -> io::Result<()> {
+    let status = Command::new("security")
+        .args(["add-generic-password", "-s", service, "-a", &current_user(), "-w", raw, "-U"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("security add-generic-password failed for {service}")))
+    }
+}
+
+/// Delete a generic-password credential (errors ignored, matching asx).
+pub fn delete_credential(service: &str) {
+    let _ = Command::new("security")
+        .args(["delete-generic-password", "-s", service, "-a", &current_user()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 #[cfg(test)]

@@ -50,7 +50,7 @@ static CLAUDE: [SharedEntry; 14] = [
     file("CLAUDE.md", "settings"),
 ];
 
-static CODEX: [SharedEntry; 8] = [
+static CODEX: [SharedEntry; 9] = [
     dir("sessions", "sessions"),
     dir("archived_sessions", "sessions"),
     file("history.jsonl", "sessions"),
@@ -59,33 +59,27 @@ static CODEX: [SharedEntry; 8] = [
     dir("rules", "settings"),
     dir("plugins", "settings"),
     file("AGENTS.md", "settings"),
-    // config.toml is in settings but injected-when-cross; kept out of the static list because
-    // asx includes it in settings — we add it explicitly to preserve `settings` membership.
+    // config.toml is in `settings`, but skipped on cross-provider runs (the proxy injects its own).
+    file("config.toml", "settings"),
 ];
 
-static GROK: [SharedEntry; 4] = [
+static GROK: [SharedEntry; 6] = [
     dir("sessions", "sessions"),
     dir("projects", "sessions"),
     file("active_sessions.json", "sessions"),
     dir("skills", "skills"),
+    dir("completions", "settings"),
+    file("config.toml", "settings"),
 ];
-
-// NOTE: codex/grok `settings` also include `config.toml` (a file). It is represented via
-// `supported_share_categories` (which derives from the category set) and handled specially by
-// the cross-run injector; the static arrays above omit it to avoid double-injection. When P3
-// materializes symlinks it appends `config.toml` for non-cross runs.
 
 /// Categories a provider actually supports, ordered by SHARE_CATEGORIES. asx
 /// `supportedShareCategories`.
 pub fn supported_share_categories(provider: &str) -> Vec<&'static str> {
-    // codex/grok settings membership includes config.toml (settings), so force `settings` in.
-    let key = normalize_provider_key(provider);
-    let has_settings = matches!(key.as_str(), "claude" | "codex" | "grok");
     let entries = shared_entries(provider);
     SHARE_CATEGORIES
         .iter()
         .copied()
-        .filter(|cat| entries.iter().any(|e| e.category == *cat) || (*cat == "settings" && has_settings))
+        .filter(|cat| entries.iter().any(|e| e.category == *cat))
         .collect()
 }
 
@@ -207,6 +201,57 @@ pub fn describe_share(share: Option<&[String]>, provider: Option<&str>) -> Strin
     }
     out
 }
+
+/// asx `linkSharedState`: symlink shared state from the provider system home into `home`.
+/// `categories = None` shares every category; `Some([])` shares nothing; `Some(subset)` those.
+/// Best-effort — individual link failures are ignored. Mirrors shared-state.ts:118-148.
+#[cfg(unix)]
+pub fn link_shared_state(provider: &str, home: &std::path::Path, is_cross: bool, categories: Option<&[String]>) {
+    use std::os::unix::fs::symlink;
+
+    let Some(base) = crate::platform::system_home_for(provider) else {
+        return;
+    };
+    // Never self-link (system profile pointing at its own home).
+    let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    if canon(&base) == canon(home) {
+        return;
+    }
+
+    for entry in shared_entries(provider) {
+        if let Some(cats) = categories {
+            if !cats.iter().any(|c| c == entry.category) {
+                continue;
+            }
+        }
+        if is_cross && INJECTED_WHEN_CROSS.contains(&entry.name) {
+            continue;
+        }
+        let target = base.join(entry.name);
+        let link = home.join(entry.name);
+
+        if entry.is_dir {
+            if !target.exists() {
+                let _ = std::fs::create_dir_all(&target);
+            }
+        } else if !target.exists() {
+            // Don't fabricate empty shared files.
+            continue;
+        }
+
+        match std::fs::symlink_metadata(&link) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let _ = std::fs::remove_file(&link); // replace stale symlink
+            }
+            Ok(_) => continue, // real data already present — never clobber
+            Err(_) => {}
+        }
+        let _ = symlink(&target, &link);
+    }
+}
+
+#[cfg(not(unix))]
+pub fn link_shared_state(_provider: &str, _home: &std::path::Path, _is_cross: bool, _categories: Option<&[String]>) {}
 
 #[cfg(test)]
 mod tests {

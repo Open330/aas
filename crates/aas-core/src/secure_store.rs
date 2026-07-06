@@ -5,11 +5,10 @@
 //! Keychain service (derived in [`crate::keychain`]) via the `security` CLI. The `security`
 //! argv is byte-identical to asx so existing entries are found.
 
-use crate::keychain::{claude_keychain_service, current_user};
+use crate::keychain::{claude_keychain_service, delete_credential as keychain_delete, read_credential as keychain_read, write_credential as keychain_write};
 use crate::naming::{profile_credential_path, profile_home};
 use std::io;
 use std::path::Path;
-use std::process::Command;
 
 fn is_mac_claude(provider: &str) -> bool {
     cfg!(target_os = "macos") && provider.to_lowercase().contains("claude")
@@ -17,47 +16,6 @@ fn is_mac_claude(provider: &str) -> bool {
 
 fn claude_profile_service(provider: &str, name: &str) -> String {
     claude_keychain_service(Some(&profile_home(provider, name)))
-}
-
-// ---- macOS Keychain via the `security` CLI (exact asx argv) ----
-
-fn keychain_read(service: &str) -> Option<String> {
-    let out = Command::new("security")
-        .args(["find-generic-password", "-s", service, "-a", &current_user(), "-w"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
-}
-
-fn keychain_write(service: &str, raw: &str) -> io::Result<()> {
-    let status = Command::new("security")
-        .args(["add-generic-password", "-s", service, "-a", &current_user(), "-w", raw, "-U"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!("security add-generic-password failed for {service}")))
-    }
-}
-
-fn keychain_delete(service: &str) {
-    let _ = Command::new("security")
-        .args(["delete-generic-password", "-s", service, "-a", &current_user()])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
 }
 
 // ---- public API ----
