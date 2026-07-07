@@ -7,6 +7,12 @@ struct UsageResponse: Codable {
     let accounts: [Account]
 }
 
+/// On-disk snapshot shown on launch until the user refreshes.
+struct CachedUsage: Codable {
+    let accounts: [Account]
+    let updatedAt: Date
+}
+
 struct Account: Codable, Identifiable {
     let provider: String
     let name: String
@@ -131,6 +137,15 @@ func displayProvider(_ id: String) -> String {
     }
 }
 
+/// Relative "updated" label, e.g. "just now", "3 min ago", "5 hr ago" — makes stale cache obvious.
+func relativeTime(_ date: Date) -> String {
+    let seconds = Date().timeIntervalSince(date)
+    if seconds < 45 { return "just now" }
+    let fmt = RelativeDateTimeFormatter()
+    fmt.unitsStyle = .abbreviated
+    return fmt.localizedString(for: date, relativeTo: Date())
+}
+
 /// Compact "time left" from an epoch-ms reset, e.g. "1h 32m", "51h", "now".
 func shortEta(_ ms: Int64?) -> String? {
     guard let ms = ms else { return nil }
@@ -154,21 +169,25 @@ final class UsageModel: ObservableObject {
     @Published var loading = false
     @Published var loadError: String?
 
-    private var timer: Timer?
+    private var started = false
 
+    /// On first appearance: show the cached snapshot immediately (no network). Only bootstrap
+    /// a fetch if there's nothing cached yet — otherwise we never hit the API on our own; the
+    /// user drives it with Refresh. This keeps us from hammering the rate-limited usage API.
     func start() {
-        guard timer == nil else { return }
-        refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 180, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+        guard !started else { return }
+        started = true
+        loadCache()
+        if accounts.isEmpty && loadError == nil {
+            refresh()
         }
     }
 
     func refresh() {
-        Task { await load() }
+        Task { await fetch() }
     }
 
-    private func load() async {
+    private func fetch() async {
         loading = true
         defer { loading = false }
         do {
@@ -177,8 +196,34 @@ final class UsageModel: ObservableObject {
             accounts = decoded.accounts
             updated = Date()
             loadError = nil
+            saveCache()
         } catch {
             loadError = error.localizedDescription
+        }
+    }
+
+    // MARK: Cache (survives relaunch; shown until the user hits Refresh)
+
+    private static func cacheURL() -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        let dir = base.appendingPathComponent("aas-bar", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("usage-cache.json")
+    }
+
+    private func loadCache() {
+        guard let data = try? Data(contentsOf: Self.cacheURL()),
+              let cached = try? JSONDecoder().decode(CachedUsage.self, from: data)
+        else { return }
+        accounts = cached.accounts
+        updated = cached.updatedAt
+    }
+
+    private func saveCache() {
+        let payload = CachedUsage(accounts: accounts, updatedAt: updated ?? Date())
+        if let data = try? JSONEncoder().encode(payload) {
+            try? data.write(to: Self.cacheURL())
         }
     }
 

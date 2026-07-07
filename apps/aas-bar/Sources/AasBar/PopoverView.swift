@@ -38,7 +38,7 @@ struct PopoverView: View {
             Text(summary.text).font(.system(size: 11)).foregroundStyle(.secondary)
             Spacer(minLength: 6)
             if let updated = model.updated {
-                Text(updated.formatted(date: .omitted, time: .shortened))
+                Text(relativeTime(updated))
                     .font(.system(size: 10.5)).foregroundStyle(.tertiary)
             }
         }

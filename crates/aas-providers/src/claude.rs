@@ -321,6 +321,19 @@ pub(crate) async fn usage(account: &str) -> Usage {
 
     let token = get_claude_code_oauth_token(&raw);
 
+    // Honor a prior 429's Retry-After without touching the network (see aas_core::backoff),
+    // so we stop hammering (and re-extending) a rate-limited account.
+    let backoff_key = format!("claude/{account}");
+    if let Some(until) = aas_core::backoff::rate_limited_until(&backoff_key) {
+        let secs = ((until - chrono::Utc::now().timestamp_millis()) / 1000).max(0);
+        return Usage {
+            headline: claude_base_info(long_lived, &sub_type, &tier, None),
+            plan: if long_lived { None } else { Some(sub_type.clone()) },
+            error: Some(format!("rate limited (HTTP 429) — backing off {secs}s to recover.")),
+            ..Default::default()
+        };
+    }
+
     let mut profile: Option<Value> = None;
     if let Some(tok) = &token {
         let (status, prof, _) = fetch_anthropic_json("/api/oauth/profile", tok).await;
@@ -352,11 +365,17 @@ pub(crate) async fn usage(account: &str) -> Usage {
         };
     }
     if status == 429 {
-        let extra = retry.map(|r| format!(", retry after {r}s")).unwrap_or_default();
+        // Persist the Retry-After window so subsequent fetches back off instead of re-hitting.
+        let secs: i64 = retry
+            .as_deref()
+            .and_then(|r| r.trim().parse().ok())
+            .filter(|&s: &i64| s > 0)
+            .unwrap_or(300);
+        aas_core::backoff::set_rate_limited(&backoff_key, chrono::Utc::now().timestamp_millis() + secs * 1000);
         return Usage {
             headline,
             plan,
-            error: Some(format!("rate limited (HTTP 429){extra}.")),
+            error: Some(format!("rate limited (HTTP 429), retry after {secs}s.")),
             ..Default::default()
         };
     }
@@ -379,6 +398,7 @@ pub(crate) async fn usage(account: &str) -> Usage {
             ..Default::default()
         };
     }
+    aas_core::backoff::clear(&backoff_key); // recovered — drop any stale backoff
     Usage { headline, plan, meters, ..Default::default() }
 }
 

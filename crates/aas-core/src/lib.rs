@@ -5,6 +5,7 @@
 //! structured usage model. Network HTTP lives in `aas-providers`; the proxy in `aas-proxy`.
 //! (The one subprocess here is the macOS `security` CLI, used by `secure_store`/`keychain`.)
 
+pub mod backoff;
 pub mod execargs;
 pub mod jwt;
 pub mod keychain;
