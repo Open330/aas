@@ -200,7 +200,8 @@ func shortEta(_ ms: Int64?) -> String? {
 
 // MARK: - Model
 
-/// Runs `aas usage --json` on an interval (and on demand) and publishes the parsed accounts.
+/// Runs `aas usage --json` on demand (Refresh) plus a one-time bootstrap when nothing is
+/// cached, and publishes the parsed accounts. No polling — the usage API is rate-limited.
 @MainActor
 final class UsageModel: ObservableObject {
     @Published var accounts: [Account] = []
@@ -217,17 +218,23 @@ final class UsageModel: ObservableObject {
         guard !started else { return }
         started = true
         loadCache()
-        if accounts.isEmpty && loadError == nil {
+        // A cache (even an empty one) sets `updated`; only bootstrap when we've truly never
+        // fetched, so a zero-account user doesn't hit the API on every launch.
+        if updated == nil && loadError == nil {
             refresh()
         }
     }
 
     func refresh() {
+        // Coalesce overlapping fetches so two clicks (or click-during-bootstrap) can't spawn
+        // two `aas usage` subprocesses that double-hit the rate-limited API. `loading` is set
+        // synchronously here (this runs on the main actor) before any await.
+        guard !loading else { return }
+        loading = true
         Task { await fetch() }
     }
 
     private func fetch() async {
-        loading = true
         defer { loading = false }
         do {
             let data = try await Self.runAas()
@@ -294,16 +301,30 @@ final class UsageModel: ObservableObject {
                 process.executableURL = url
                 process.arguments = args
                 let stdout = Pipe()
+                let stderr = Pipe()
                 process.standardOutput = stdout
-                process.standardError = Pipe()
+                process.standardError = stderr
                 do {
                     try process.run()
+                    // Drain stderr on another thread so a large error stream can't fill the
+                    // pipe buffer and deadlock the stdout read; keep it for diagnostics.
+                    var errData = Data()
+                    let group = DispatchGroup()
+                    group.enter()
+                    DispatchQueue.global().async {
+                        errData = stderr.fileHandleForReading.readDataToEndOfFile()
+                        group.leave()
+                    }
                     let data = stdout.fileHandleForReading.readDataToEndOfFile()
                     process.waitUntilExit()
+                    group.wait()
                     if process.terminationStatus != 0 {
+                        let detail = String(data: errData, encoding: .utf8)?
+                            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        let suffix = detail.isEmpty ? "" : " — \(detail)"
                         continuation.resume(throwing: NSError(
                             domain: "aas", code: Int(process.terminationStatus),
-                            userInfo: [NSLocalizedDescriptionKey: "aas exited with code \(process.terminationStatus)"]
+                            userInfo: [NSLocalizedDescriptionKey: "aas exited with code \(process.terminationStatus)\(suffix)"]
                         ))
                     } else {
                         continuation.resume(returning: data)

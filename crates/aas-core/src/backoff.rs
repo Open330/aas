@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::platform::asx_config_dir;
 
@@ -29,8 +30,16 @@ fn load() -> HashMap<String, i64> {
 fn store(map: &HashMap<String, i64>) {
     let dir = asx_config_dir();
     let _ = std::fs::create_dir_all(&dir);
-    if let Ok(s) = serde_json::to_string(map) {
-        let _ = std::fs::write(path(), s);
+    let Ok(s) = serde_json::to_string(map) else { return };
+    // Atomic replace: write a uniquely-named temp file, then rename it over the target. This
+    // keeps concurrent readers (parallel fetches, aas-bar subprocesses) from ever seeing a
+    // half-written or truncated file. A lost update between two simultaneous 429s is benign —
+    // the dropped account just re-records its window on the next fetch.
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let uniq = format!("{}.{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed));
+    let tmp = dir.join(format!("usage-backoff.{uniq}.tmp"));
+    if std::fs::write(&tmp, s).is_ok() && std::fs::rename(&tmp, path()).is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
 }
 

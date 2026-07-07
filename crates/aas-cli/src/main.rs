@@ -230,29 +230,10 @@ async fn live_credentials(providers: &[Provider]) -> HashMap<String, Option<Stri
     join_all(futs).await.into_iter().collect()
 }
 
-/// Resolve which providers to show and an optional single-account filter.
-fn resolve_list_scope(store: &AccountStore, provider: Option<&str>) -> anyhow::Result<(Vec<Provider>, Option<String>)> {
-    match provider {
-        Some(p) => {
-            if let Some(adapter) = get_adapter(p) {
-                Ok((vec![adapter], None))
-            } else if let Some(acct) = store.get_by_name(p)? {
-                match get_adapter(&acct.provider) {
-                    Some(a) => Ok((vec![a], Some(p.to_string()))),
-                    None => anyhow::bail!("Unknown provider or name: {p}"),
-                }
-            } else {
-                anyhow::bail!("Unknown provider or name: {p}")
-            }
-        }
-        None => Ok((all_providers().to_vec(), None)),
-    }
-}
-
 // ---- commands ----
 
 async fn cmd_list(store: &AccountStore, provider: Option<&str>, usage: bool, debug: bool) -> anyhow::Result<()> {
-    let (provs, single_name) = resolve_list_scope(store, provider)?;
+    let (provs, single_name) = aas_providers::resolve_scope(store, provider)?;
     let live = live_credentials(&provs).await;
 
     if usage {
@@ -374,7 +355,9 @@ async fn cmd_usage_json(store: &AccountStore, provider: Option<&str>) -> anyhow:
                 "email": it.email,
                 "active": it.active,
                 "plan": it.usage.plan,
-                "planLabel": render::plan_label(&it.usage),
+                // Only a real plan gets a pretty label; long-lived tokens (plan=None) stay
+                // null so the app falls back cleanly instead of chipping the raw headline.
+                "planLabel": it.usage.plan.as_ref().map(|_| render::plan_label(&it.usage)),
                 "headline": it.usage.headline,
                 "error": it.usage.error,
                 "meters": meters,

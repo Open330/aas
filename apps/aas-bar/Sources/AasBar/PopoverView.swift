@@ -124,6 +124,7 @@ struct PopoverView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
+            .disabled(model.loading)
 
             if model.loading { ProgressView().controlSize(.small) }
             Spacer()

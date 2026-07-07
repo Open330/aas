@@ -28,8 +28,9 @@ async fn ensure_fresh(p: Provider, name: &str) {
 }
 
 /// Resolve `filter` (a provider id, an account name, or `None` for everything) to the
-/// providers to scan and an optional single-account restriction.
-fn resolve_scope(store: &AccountStore, filter: Option<&str>) -> anyhow::Result<(Vec<Provider>, Option<String>)> {
+/// providers to scan and an optional single-account restriction. Shared by `snapshot()` and
+/// the CLI's `list`/`usage` so the two never drift.
+pub fn resolve_scope(store: &AccountStore, filter: Option<&str>) -> anyhow::Result<(Vec<Provider>, Option<String>)> {
     match filter {
         Some(p) => {
             if let Some(a) = get_adapter(p) {

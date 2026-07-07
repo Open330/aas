@@ -322,7 +322,9 @@ pub(crate) async fn usage(account: &str) -> Usage {
     let token = get_claude_code_oauth_token(&raw);
 
     // Honor a prior 429's Retry-After without touching the network (see aas_core::backoff),
-    // so we stop hammering (and re-extending) a rate-limited account.
+    // so we stop hammering (and re-extending) a rate-limited account. The headline is rebuilt
+    // from stored fields only (profile=None), so org/has_max detail is intentionally omitted
+    // while backing off — the point is to make zero API calls.
     let backoff_key = format!("claude/{account}");
     if let Some(until) = aas_core::backoff::rate_limited_until(&backoff_key) {
         let secs = ((until - chrono::Utc::now().timestamp_millis()) / 1000).max(0);
@@ -366,11 +368,13 @@ pub(crate) async fn usage(account: &str) -> Usage {
     }
     if status == 429 {
         // Persist the Retry-After window so subsequent fetches back off instead of re-hitting.
+        // Anthropic sends Retry-After as delta-seconds; if it's absent or an HTTP-date we
+        // can't parse, fall back to a short, conservative window rather than a long ban.
         let secs: i64 = retry
             .as_deref()
             .and_then(|r| r.trim().parse().ok())
             .filter(|&s: &i64| s > 0)
-            .unwrap_or(300);
+            .unwrap_or(60);
         aas_core::backoff::set_rate_limited(&backoff_key, chrono::Utc::now().timestamp_millis() + secs * 1000);
         return Usage {
             headline,
