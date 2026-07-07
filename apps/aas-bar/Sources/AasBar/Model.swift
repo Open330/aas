@@ -137,27 +137,29 @@ func displayProvider(_ id: String) -> String {
     }
 }
 
-/// SF Symbol standing in for each provider's mark (no bundled brand logos).
+/// Bundled brand logo (template PNG) for a provider, if present in Resources.
+func providerLogo(_ id: String) -> NSImage? {
+    guard let url = Bundle.module.url(forResource: id, withExtension: "png"),
+          let img = NSImage(contentsOf: url) else { return nil }
+    img.isTemplate = true
+    return img
+}
+
+/// SF Symbol fallback when no bundled logo exists for a provider.
 func providerSymbol(_ id: String) -> String {
     switch id {
-    case "claude": return "sparkle"
-    case "codex": return "chevron.left.forwardslash.chevron.right"
-    case "grok": return "bolt.fill"
     case "zai": return "z.circle.fill"
-    case "cursor": return "cursorarrow.rays"
     default: return "circle.fill"
     }
 }
 
-/// Brand-ish accent per provider.
+/// Tint per provider — coral for Anthropic, otherwise the adaptive label color
+/// (the real OpenAI / X marks are monochrome).
 func providerColor(_ id: String) -> Color {
     switch id {
     case "claude": return Color(red: 0.85, green: 0.47, blue: 0.36) // Anthropic coral
-    case "codex": return Color(red: 0.06, green: 0.65, blue: 0.52)  // OpenAI green
-    case "grok": return Color(red: 0.36, green: 0.55, blue: 0.98)
     case "zai": return Color(red: 0.55, green: 0.45, blue: 0.95)
-    case "cursor": return .secondary
-    default: return .secondary
+    default: return .primary.opacity(0.85)
     }
 }
 

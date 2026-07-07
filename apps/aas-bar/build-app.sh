@@ -13,12 +13,18 @@ echo "building release binary…"
 swift build -c release
 
 APP="AasBar.app"
-BIN="$(swift build -c release --show-bin-path)/AasBar"
+BINDIR="$(swift build -c release --show-bin-path)"
 
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp Info.plist "$APP/Contents/Info.plist"
-cp "$BIN" "$APP/Contents/MacOS/AasBar"
+cp "$BINDIR/AasBar" "$APP/Contents/MacOS/AasBar"
+# Copy the SPM resource bundle (brand logos) so Bundle.module resolves inside the .app.
+for b in "$BINDIR"/*.bundle; do
+    [ -d "$b" ] || continue
+    cp -R "$b" "$APP/Contents/Resources/"
+    cp -R "$b" "$APP/Contents/MacOS/"
+done
 # Ad-hoc sign so macOS is happy launching a locally-built app.
 codesign --force --sign - "$APP" 2>/dev/null || true
 

@@ -70,14 +70,11 @@ struct PopoverView: View {
             .padding(.vertical, 40)
             .padding(.horizontal, 16)
         } else {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 11) {
                 ForEach(providerOrder, id: \.self) { provider in
-                    VStack(alignment: .leading, spacing: 6) {
+                    VStack(alignment: .leading, spacing: 5) {
                         HStack(spacing: 5) {
-                            Image(systemName: providerSymbol(provider))
-                                .font(.system(size: 10.5, weight: .semibold))
-                                .foregroundStyle(providerColor(provider))
-                                .frame(width: 13)
+                            ProviderMark(provider: provider)
                             Text(displayProvider(provider).uppercased())
                                 .font(.system(size: 10, weight: .semibold))
                                 .tracking(0.7)
@@ -163,63 +160,82 @@ struct PopoverView: View {
     }
 }
 
-// MARK: - Account row — identity on the left, ring gauges on the right
+// MARK: - Provider mark (real brand logo, or an SF Symbol fallback)
+
+struct ProviderMark: View {
+    let provider: String
+
+    var body: some View {
+        Group {
+            if let logo = providerLogo(provider) {
+                Image(nsImage: logo)
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                Image(systemName: providerSymbol(provider))
+                    .resizable()
+                    .scaledToFit()
+            }
+        }
+        .frame(width: 12, height: 12)
+        .foregroundStyle(providerColor(provider))
+    }
+}
+
+// MARK: - Account row — compact, linear meters
 
 struct AccountRow: View {
     let account: Account
 
     var body: some View {
-        HStack(alignment: .center, spacing: 10) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 6) {
-                    // Always present so names align; color signals active vs inactive.
-                    Circle()
-                        .fill(account.active ? Color.accentColor : Color.secondary.opacity(0.4))
-                        .frame(width: 6, height: 6)
-                    Text(account.name)
-                        .font(.system(size: 12.5, weight: .semibold))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                // Colour signals active (accent) vs inactive (muted); always present so names align.
+                Circle()
+                    .fill(account.active ? Color.accentColor : Color.secondary.opacity(0.4))
+                    .frame(width: 6, height: 6)
+                Text(account.name)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 8)
                 if let plan = account.plan, !plan.isEmpty {
                     Text(plan.uppercased())
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.system(size: 8.5, weight: .semibold))
                         .tracking(0.4)
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .fixedSize()
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(Capsule().fill(Color.primary.opacity(0.07)))
                 }
             }
 
-            Spacer(minLength: 6)
-
             if account.error != nil {
                 Text(compactError)
                     .font(.system(size: 10.5, weight: .medium))
                     .foregroundStyle(.red)
-                    .multilineTextAlignment(.trailing)
-                    .lineLimit(2)
-                    .frame(maxWidth: 108, alignment: .trailing)
+                    .lineLimit(1)
             } else if account.meters.isEmpty {
                 Text(account.headline)
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
-                    .lineLimit(2)
-                    .frame(maxWidth: 120, alignment: .trailing)
+                    .lineLimit(1)
             } else {
-                HStack(alignment: .top, spacing: 12) {
+                VStack(spacing: 3) {
                     ForEach(account.meters) { meter in
-                        RingMeter(label: meter.label, usedPct: meter.usedPct, reset: shortEta(meter.resetMs))
+                        LinearMeter(meter: meter)
                     }
                 }
             }
         }
-        .padding(.vertical, 8)
+        .padding(.vertical, 7)
         .padding(.horizontal, 12)
         .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(account.active ? Color.accentColor.opacity(0.10) : Color.primary.opacity(0.045))
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.primary.opacity(0.045))
         )
     }
 
@@ -232,37 +248,40 @@ struct AccountRow: View {
     }
 }
 
-// MARK: - Ring gauge (per meter, arc fills with used %; label + reset below)
+// MARK: - Linear meter (compact horizontal gauge)
 
-struct RingMeter: View {
-    let label: String
-    let usedPct: Double
-    let reset: String?
+struct LinearMeter: View {
+    let meter: Meter
 
     var body: some View {
-        VStack(spacing: 3) {
-            ZStack {
-                Circle()
-                    .stroke(Color.primary.opacity(0.10), lineWidth: 3.5)
-                Circle()
-                    .trim(from: 0, to: max(0.001, min(1, usedPct / 100)))
-                    .stroke(meterColor(usedPct: usedPct), style: StrokeStyle(lineWidth: 3.5, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
-                Text("\(Int(usedPct.rounded()))")
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .monospacedDigit()
+        HStack(spacing: 8) {
+            Text(meter.label)
+                .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 16, alignment: .leading)
+
+            GeometryReader { geo in
+                Capsule()
+                    .fill(Color.primary.opacity(0.09))
+                    .overlay(alignment: .leading) {
+                        Capsule()
+                            .fill(meterColor(usedPct: meter.usedPct))
+                            .frame(width: max(4, geo.size.width * CGFloat(min(1, meter.usedPct / 100))))
+                    }
             }
-            .frame(width: 36, height: 36)
-            VStack(spacing: 1) {
-                Text(label)
-                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                if let reset = reset {
-                    Text(reset)
-                        .font(.system(size: 8.5))
-                        .foregroundStyle(.quaternary)
-                        .monospacedDigit()
-                }
+            .frame(height: 5)
+
+            Text("\(Int(meter.usedPct.rounded()))%")
+                .font(.system(size: 11, weight: .semibold))
+                .monospacedDigit()
+                .frame(width: 34, alignment: .trailing)
+
+            if let eta = shortEta(meter.resetMs) {
+                Text(eta)
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.quaternary)
+                    .monospacedDigit()
+                    .frame(width: 44, alignment: .trailing)
             }
         }
     }
