@@ -15,6 +15,7 @@ struct VisualEffectBackground: NSViewRepresentable {
 
 struct PopoverView: View {
     @ObservedObject var model: UsageModel
+    var showFooter = true
     @State private var loginEnabled = SMAppService.mainApp.status == .enabled
 
     var body: some View {
@@ -22,8 +23,10 @@ struct PopoverView: View {
             header
             Divider().opacity(0.6)
             content
-            Divider().opacity(0.6)
-            footer
+            if showFooter {
+                Divider().opacity(0.6)
+                footer
+            }
         }
         .frame(width: 300)
     }
@@ -200,8 +203,8 @@ struct AccountRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 8)
-                if let plan = account.plan, !plan.isEmpty {
-                    Text(plan.uppercased())
+                if let plan = account.planChip {
+                    Text(plan)
                         .font(.system(size: 8.5, weight: .semibold))
                         .tracking(0.4)
                         .foregroundStyle(.secondary)

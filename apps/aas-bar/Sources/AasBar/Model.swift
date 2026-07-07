@@ -19,11 +19,24 @@ struct Account: Codable, Identifiable {
     let email: String?
     let active: Bool
     let plan: String?
+    let planLabel: String?
     let headline: String
     let error: String?
     let meters: [Meter]
 
     var id: String { "\(provider)/\(name)" }
+
+    /// Chip text: the detailed plan ("max · 20x"), base uppercased, suffix kept.
+    var planChip: String? {
+        let raw = (planLabel ?? plan).flatMap { $0.isEmpty ? nil : $0 }
+        guard let raw else { return nil }
+        if let dot = raw.firstIndex(of: "·") {
+            let base = raw[..<dot].trimmingCharacters(in: .whitespaces).uppercased()
+            let suffix = raw[raw.index(after: dot)...].trimmingCharacters(in: .whitespaces)
+            return suffix.isEmpty ? base : "\(base) · \(suffix)"
+        }
+        return raw.uppercased()
+    }
 }
 
 struct Meter: Codable, Identifiable {
@@ -50,11 +63,11 @@ extension Account {
         func inH(_ h: Double) -> Int64 { Int64(now + h * 3600 * 1000) }
         func m(_ label: String, _ used: Double, _ h: Double) -> Meter { Meter(label: label, usedPct: used, resetMs: inH(h)) }
         return [
-            Account(provider: "claude", name: "e-ed@callabo", email: nil, active: false, plan: "max", headline: "", error: nil, meters: [m("5h", 12, 2), m("7d", 21, 131)]),
-            Account(provider: "claude", name: "k-june@callabo", email: nil, active: true, plan: "max", headline: "", error: nil, meters: [m("5h", 38, 1.5), m("7d", 85, 51)]),
-            Account(provider: "claude", name: "june@rtzr", email: "june@rtzr.ai", active: false, plan: "team", headline: "", error: nil, meters: [m("5h", 100, 1.7), m("7d", 98, 4.4)]),
-            Account(provider: "codex", name: "personal.codex", email: nil, active: false, plan: "plus", headline: "", error: nil, meters: [m("5h", 5, 4), m("7d", 24, 142)]),
-            Account(provider: "codex", name: "e-ed.codex", email: nil, active: true, plan: "pro", headline: "", error: nil, meters: [m("5h", 7, 2), m("7d", 93, 16)]),
+            Account(provider: "claude", name: "e-ed@callabo", email: nil, active: false, plan: "max", planLabel: "max · 20x", headline: "", error: nil, meters: [m("5h", 12, 2), m("7d", 21, 131)]),
+            Account(provider: "claude", name: "k-june@callabo", email: nil, active: true, plan: "max", planLabel: "max · 20x", headline: "", error: nil, meters: [m("5h", 38, 1.5), m("7d", 85, 51)]),
+            Account(provider: "claude", name: "june@rtzr", email: "june@rtzr.ai", active: false, plan: "team", planLabel: "team · 5x", headline: "", error: nil, meters: [m("5h", 100, 1.7), m("7d", 98, 4.4)]),
+            Account(provider: "codex", name: "personal.codex", email: nil, active: false, plan: "plus", planLabel: "plus", headline: "", error: nil, meters: [m("5h", 5, 4), m("7d", 24, 142)]),
+            Account(provider: "codex", name: "e-ed.codex", email: nil, active: true, plan: "pro", planLabel: "pro", headline: "", error: nil, meters: [m("5h", 7, 2), m("7d", 93, 16)]),
         ]
     }
 }

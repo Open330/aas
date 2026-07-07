@@ -40,7 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             : Color(red: 0.13, green: 0.13, blue: 0.145)
         let content = ZStack {
             bg
-            PopoverView(model: model)
+            PopoverView(model: model, showFooter: false)
         }
         .frame(width: 300)
         .environment(\.colorScheme, scheme)

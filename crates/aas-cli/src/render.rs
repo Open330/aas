@@ -175,7 +175,7 @@ fn time_amount(reset_ms: i64) -> String {
 }
 
 /// Combine subscription + short tier, e.g. `max · 20x`, `team · 5x`, `pro`.
-fn plan_label(u: &Usage) -> String {
+pub fn plan_label(u: &Usage) -> String {
     let base = u
         .plan
         .clone()

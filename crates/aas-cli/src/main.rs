@@ -374,6 +374,7 @@ async fn cmd_usage_json(store: &AccountStore, provider: Option<&str>) -> anyhow:
                 "email": it.email,
                 "active": it.active,
                 "plan": it.usage.plan,
+                "planLabel": render::plan_label(&it.usage),
                 "headline": it.usage.headline,
                 "error": it.usage.error,
                 "meters": meters,
