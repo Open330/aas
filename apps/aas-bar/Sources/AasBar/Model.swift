@@ -137,6 +137,30 @@ func displayProvider(_ id: String) -> String {
     }
 }
 
+/// SF Symbol standing in for each provider's mark (no bundled brand logos).
+func providerSymbol(_ id: String) -> String {
+    switch id {
+    case "claude": return "sparkle"
+    case "codex": return "chevron.left.forwardslash.chevron.right"
+    case "grok": return "bolt.fill"
+    case "zai": return "z.circle.fill"
+    case "cursor": return "cursorarrow.rays"
+    default: return "circle.fill"
+    }
+}
+
+/// Brand-ish accent per provider.
+func providerColor(_ id: String) -> Color {
+    switch id {
+    case "claude": return Color(red: 0.85, green: 0.47, blue: 0.36) // Anthropic coral
+    case "codex": return Color(red: 0.06, green: 0.65, blue: 0.52)  // OpenAI green
+    case "grok": return Color(red: 0.36, green: 0.55, blue: 0.98)
+    case "zai": return Color(red: 0.55, green: 0.45, blue: 0.95)
+    case "cursor": return .secondary
+    default: return .secondary
+    }
+}
+
 /// Relative "updated" label, e.g. "just now", "3 min ago", "5 hr ago" — makes stale cache obvious.
 func relativeTime(_ date: Date) -> String {
     let seconds = Date().timeIntervalSince(date)
