@@ -158,94 +158,106 @@ struct PopoverView: View {
     }
 }
 
-// MARK: - Account row (subtle card, no border)
+// MARK: - Account row — identity on the left, ring gauges on the right
 
 struct AccountRow: View {
     let account: Account
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                if account.active {
-                    Circle().fill(Color.accentColor).frame(width: 5, height: 5)
+        HStack(alignment: .center, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 5) {
+                    if account.active {
+                        Circle().fill(Color.accentColor).frame(width: 5, height: 5)
+                    }
+                    Text(account.name)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
-                Text(account.name)
-                    .font(.system(size: 12.5, weight: .medium))
-                    .foregroundStyle(.primary)
-                Spacer(minLength: 8)
                 if let plan = account.plan, !plan.isEmpty {
-                    Text(plan)
-                        .font(.system(size: 10, weight: .medium))
+                    Text(plan.uppercased())
+                        .font(.system(size: 9, weight: .semibold))
+                        .tracking(0.5)
                         .foregroundStyle(.tertiary)
-                        .textCase(.uppercase)
-                        .tracking(0.3)
+                }
+                if account.error == nil, let eta = tightestReset {
+                    Text("↺ \(eta)")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.quaternary)
+                        .monospacedDigit()
                 }
             }
 
-            if let error = account.error {
-                Text(error)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.red.opacity(0.9))
+            Spacer(minLength: 6)
+
+            if account.error != nil {
+                Text(compactError)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.red)
+                    .multilineTextAlignment(.trailing)
                     .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: 110, alignment: .trailing)
             } else if account.meters.isEmpty {
                 Text(account.headline)
-                    .font(.system(size: 10.5))
+                    .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
+                    .lineLimit(2)
+                    .frame(maxWidth: 120, alignment: .trailing)
             } else {
-                VStack(spacing: 5) {
+                HStack(spacing: 12) {
                     ForEach(account.meters) { meter in
-                        MeterRow(meter: meter)
+                        RingMeter(label: meter.label, usedPct: meter.usedPct)
                     }
                 }
             }
         }
-        .padding(.vertical, 8)
+        .padding(.vertical, 9)
         .padding(.horizontal, 12)
         .background(
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .fill(account.active ? Color.accentColor.opacity(0.09) : Color.primary.opacity(0.04))
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(account.active ? Color.accentColor.opacity(0.10) : Color.primary.opacity(0.045))
         )
+    }
+
+    /// Reset time of the tightest (most-used) meter — the limit you'll hit first.
+    private var tightestReset: String? {
+        guard let m = account.meters.max(by: { $0.usedPct < $1.usedPct }) else { return nil }
+        return shortEta(m.resetMs)
+    }
+
+    private var compactError: String {
+        let l = (account.error ?? "").lowercased()
+        if l.contains("expired") || l.contains("401") { return "token expired" }
+        if l.contains("rate limit") || l.contains("429") || l.contains("backing off") { return "rate limited" }
+        if l.contains("network") { return "network error" }
+        return "unavailable"
     }
 }
 
-// MARK: - Meter row (aligned columns)
+// MARK: - Ring gauge (per meter, arc fills with used %)
 
-struct MeterRow: View {
-    let meter: Meter
+struct RingMeter: View {
+    let label: String
+    let usedPct: Double
 
     var body: some View {
-        HStack(spacing: 10) {
-            Text(meter.label)
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(width: 17, alignment: .leading)
-
-            GeometryReader { geo in
-                Capsule()
-                    .fill(Color.primary.opacity(0.09))
-                    .overlay(alignment: .leading) {
-                        Capsule()
-                            .fill(meterColor(usedPct: meter.usedPct))
-                            .frame(width: max(4, geo.size.width * CGFloat(min(1, meter.usedPct / 100))))
-                    }
-            }
-            .frame(height: 5)
-
-            Text("\(Int(meter.usedPct.rounded()))%")
-                .font(.system(size: 11.5, weight: .semibold))
-                .monospacedDigit()
-                .lineLimit(1)
-                .fixedSize()
-                .frame(width: 36, alignment: .trailing)
-
-            if let eta = shortEta(meter.resetMs) {
-                Text(eta)
-                    .font(.system(size: 10, weight: .regular))
-                    .foregroundStyle(.quaternary)
+        VStack(spacing: 4) {
+            ZStack {
+                Circle()
+                    .stroke(Color.primary.opacity(0.10), lineWidth: 3.5)
+                Circle()
+                    .trim(from: 0, to: max(0.001, min(1, usedPct / 100)))
+                    .stroke(meterColor(usedPct: usedPct), style: StrokeStyle(lineWidth: 3.5, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                Text("\(Int(usedPct.rounded()))")
+                    .font(.system(size: 12, weight: .semibold))
                     .monospacedDigit()
-                    .frame(width: 42, alignment: .trailing)
             }
+            .frame(width: 40, height: 40)
+            Text(label)
+                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
         }
     }
 }
