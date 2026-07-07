@@ -169,19 +169,23 @@ struct AccountRow: View {
                 if account.active {
                     Circle().fill(Color.accentColor).frame(width: 5, height: 5)
                 }
-                Text(account.name).font(.system(size: 12.5, weight: .semibold))
+                Text(account.name)
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(.primary)
                 Spacer(minLength: 8)
                 if let plan = account.plan, !plan.isEmpty {
                     Text(plan)
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(.tertiary)
+                        .textCase(.uppercase)
+                        .tracking(0.3)
                 }
             }
 
             if let error = account.error {
                 Text(error)
                     .font(.system(size: 10.5))
-                    .foregroundStyle(.red)
+                    .foregroundStyle(.red.opacity(0.9))
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
             } else if account.meters.isEmpty {
@@ -196,11 +200,11 @@ struct AccountRow: View {
                 }
             }
         }
-        .padding(.vertical, 7)
+        .padding(.vertical, 8)
         .padding(.horizontal, 12)
         .background(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .fill(account.active ? Color.accentColor.opacity(0.10) : Color.primary.opacity(0.05))
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .fill(account.active ? Color.accentColor.opacity(0.09) : Color.primary.opacity(0.04))
         )
     }
 }
@@ -211,34 +215,34 @@ struct MeterRow: View {
     let meter: Meter
 
     var body: some View {
-        HStack(spacing: 9) {
+        HStack(spacing: 10) {
             Text(meter.label)
-                .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
                 .foregroundStyle(.secondary)
-                .frame(width: 18, alignment: .leading)
+                .frame(width: 17, alignment: .leading)
 
             GeometryReader { geo in
                 Capsule()
-                    .fill(Color.primary.opacity(0.10))
+                    .fill(Color.primary.opacity(0.09))
                     .overlay(alignment: .leading) {
                         Capsule()
                             .fill(meterColor(usedPct: meter.usedPct))
-                            .frame(width: max(3, geo.size.width * CGFloat(min(1, meter.usedPct / 100))))
+                            .frame(width: max(4, geo.size.width * CGFloat(min(1, meter.usedPct / 100))))
                     }
             }
-            .frame(height: 6)
+            .frame(height: 5)
 
             Text("\(Int(meter.usedPct.rounded()))%")
                 .font(.system(size: 11.5, weight: .semibold))
                 .monospacedDigit()
                 .lineLimit(1)
                 .fixedSize()
-                .frame(width: 40, alignment: .trailing)
+                .frame(width: 36, alignment: .trailing)
 
             if let eta = shortEta(meter.resetMs) {
                 Text(eta)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
+                    .font(.system(size: 10, weight: .regular))
+                    .foregroundStyle(.quaternary)
                     .monospacedDigit()
                     .frame(width: 42, alignment: .trailing)
             }
