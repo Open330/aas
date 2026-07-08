@@ -124,6 +124,19 @@ aas export --all -o creds.json                     # …or a file (0600); scp it
 
 Colors respect `NO_COLOR` and only apply on a TTY.
 
+## MenuBucket widget
+
+Prefer the menubar? This repo ships an `aas usage` widget for
+[MenuBucket](https://github.com/jiunbae/menubucket), a scriptable menubar
+widget platform:
+
+```bash
+mbk install https://github.com/Open330/aas
+```
+
+See [`widgets/menubucket-aas-usage/`](widgets/menubucket-aas-usage/) for details
+(deep link, requirements, permissions).
+
 ## Status
 
 Functionally complete port of `asx` (P1–P5): storage/keychain/import, all provider adapters +
