@@ -9,8 +9,17 @@ use sha2::{Digest, Sha256};
 use std::io;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 
 pub const SERVICE_PREFIX: &str = "Claude Code-credentials";
+
+/// Serializes `security` CLI access across the process. The parallel usage fan-out
+/// (`snapshot()` spawns one task per account) otherwise fires several `security
+/// find-generic-password` invocations at once, and under that concurrency some spuriously
+/// return `errSecItemNotFound` (44) for items that exist and read fine sequentially — surfacing
+/// as a false "No stored credential". A brief lock around the CLI (reads are milliseconds)
+/// removes the false negative; the slow network fetches still run fully in parallel.
+static SECURITY_CLI_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn claude_keychain_service(config_dir: Option<&Path>) -> String {
     match config_dir {
@@ -48,6 +57,7 @@ pub fn current_user() -> String {
 /// Read a generic-password credential from the macOS Keychain via the `security` CLI.
 /// Returns `None` on any failure or empty value. (No-op-ish off macOS: `security` missing → None.)
 pub fn read_credential(service: &str) -> Option<String> {
+    let _guard = SECURITY_CLI_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let out = Command::new("security")
         .args(["find-generic-password", "-s", service, "-a", &current_user(), "-w"])
         .output()
@@ -65,6 +75,7 @@ pub fn read_credential(service: &str) -> Option<String> {
 
 /// Write (create or update via `-U`) a generic-password credential.
 pub fn write_credential(service: &str, raw: &str) -> io::Result<()> {
+    let _guard = SECURITY_CLI_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let status = Command::new("security")
         .args(["add-generic-password", "-s", service, "-a", &current_user(), "-w", raw, "-U"])
         .stdin(Stdio::null())
@@ -80,6 +91,7 @@ pub fn write_credential(service: &str, raw: &str) -> io::Result<()> {
 
 /// Delete a generic-password credential (errors ignored, matching asx).
 pub fn delete_credential(service: &str) {
+    let _guard = SECURITY_CLI_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let _ = Command::new("security")
         .args(["delete-generic-password", "-s", service, "-a", &current_user()])
         .stdin(Stdio::null())
