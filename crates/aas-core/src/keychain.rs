@@ -58,19 +58,26 @@ pub fn current_user() -> String {
 /// Returns `None` on any failure or empty value. (No-op-ish off macOS: `security` missing → None.)
 pub fn read_credential(service: &str) -> Option<String> {
     let _guard = SECURITY_CLI_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let out = Command::new("security")
-        .args(["find-generic-password", "-s", service, "-a", &current_user(), "-w"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
+    let user = current_user();
+    // The in-process lock serializes our own calls, but a *separate* aas process (e.g. the
+    // menubar app fetching while you also run `aas usage`) can still hit the Keychain at the
+    // same instant and make `security` spuriously return errSecItemNotFound (44). A non-zero
+    // exit is therefore not conclusive — back off briefly and retry a couple of times before
+    // deciding the item is really absent. A genuinely-missing item just costs ~60ms.
+    for attempt in 0..3u64 {
+        let out = Command::new("security")
+            .args(["find-generic-password", "-s", service, "-a", &user, "-w"])
+            .output()
+            .ok()?;
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            return (!s.is_empty()).then_some(s);
+        }
+        if attempt < 2 {
+            std::thread::sleep(std::time::Duration::from_millis(25 * (attempt + 1)));
+        }
     }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    None
 }
 
 /// Write (create or update via `-U`) a generic-password credential.
