@@ -13,13 +13,32 @@ use std::sync::Mutex;
 
 pub const SERVICE_PREFIX: &str = "Claude Code-credentials";
 
-/// Serializes `security` CLI access across the process. The parallel usage fan-out
-/// (`snapshot()` spawns one task per account) otherwise fires several `security
-/// find-generic-password` invocations at once, and under that concurrency some spuriously
-/// return `errSecItemNotFound` (44) for items that exist and read fine sequentially — surfacing
-/// as a false "No stored credential". A brief lock around the CLI (reads are milliseconds)
-/// removes the false negative; the slow network fetches still run fully in parallel.
+/// Serializes `security` CLI access so no two invocations touch the Keychain at once. The
+/// parallel usage fan-out (and a *second* aas process, e.g. the menubar app fetching while you
+/// run `aas usage`) otherwise make `security find-generic-password` spuriously return
+/// `errSecItemNotFound` for items that exist and read fine alone — surfacing as a false
+/// "No stored credential". A process-wide mutex covers our own threads; an advisory `flock`
+/// covers other processes. Reads are milliseconds, so this is invisible; the slow network
+/// fetches still run fully in parallel.
 static SECURITY_CLI_LOCK: Mutex<()> = Mutex::new(());
+
+fn with_keychain_lock<T>(f: impl FnOnce() -> T) -> T {
+    let _inproc = SECURITY_CLI_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let dir = crate::platform::asx_config_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(file) = std::fs::OpenOptions::new().create(true).write(true).open(dir.join(".keychain.lock")) {
+            // Advisory cross-process lock; auto-released when `file`'s fd closes at scope end.
+            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+            let out = f();
+            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+            return out;
+        }
+    }
+    f()
+}
 
 pub fn claude_keychain_service(config_dir: Option<&Path>) -> String {
     match config_dir {
@@ -57,54 +76,49 @@ pub fn current_user() -> String {
 /// Read a generic-password credential from the macOS Keychain via the `security` CLI.
 /// Returns `None` on any failure or empty value. (No-op-ish off macOS: `security` missing → None.)
 pub fn read_credential(service: &str) -> Option<String> {
-    let _guard = SECURITY_CLI_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let user = current_user();
-    // The in-process lock serializes our own calls, but a *separate* aas process (e.g. the
-    // menubar app fetching while you also run `aas usage`) can still hit the Keychain at the
-    // same instant and make `security` spuriously return errSecItemNotFound (44). A non-zero
-    // exit is therefore not conclusive — back off briefly and retry a couple of times before
-    // deciding the item is really absent. A genuinely-missing item just costs ~60ms.
-    for attempt in 0..3u64 {
+    with_keychain_lock(|| {
         let out = Command::new("security")
             .args(["find-generic-password", "-s", service, "-a", &user, "-w"])
             .output()
             .ok()?;
-        if out.status.success() {
-            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            return (!s.is_empty()).then_some(s);
+        if !out.status.success() {
+            return None;
         }
-        if attempt < 2 {
-            std::thread::sleep(std::time::Duration::from_millis(25 * (attempt + 1)));
-        }
-    }
-    None
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!s.is_empty()).then_some(s)
+    })
 }
 
 /// Write (create or update via `-U`) a generic-password credential.
 pub fn write_credential(service: &str, raw: &str) -> io::Result<()> {
-    let _guard = SECURITY_CLI_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let status = Command::new("security")
-        .args(["add-generic-password", "-s", service, "-a", &current_user(), "-w", raw, "-U"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!("security add-generic-password failed for {service}")))
-    }
+    let user = current_user();
+    with_keychain_lock(|| {
+        let status = Command::new("security")
+            .args(["add-generic-password", "-s", service, "-a", &user, "-w", raw, "-U"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!("security add-generic-password failed for {service}")))
+        }
+    })
 }
 
 /// Delete a generic-password credential (errors ignored, matching asx).
 pub fn delete_credential(service: &str) {
-    let _guard = SECURITY_CLI_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let _ = Command::new("security")
-        .args(["delete-generic-password", "-s", service, "-a", &current_user()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let user = current_user();
+    with_keychain_lock(|| {
+        let _ = Command::new("security")
+            .args(["delete-generic-password", "-s", service, "-a", &user])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    })
 }
 
 #[cfg(test)]
