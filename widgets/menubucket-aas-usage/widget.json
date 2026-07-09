@@ -1,0 +1,38 @@
+{
+  "$schema": "https://menubucket.dev/schema/widget-0.1.json",
+  "schemaVersion": 1,
+  "id": "dev.menubucket.aas-usage",
+  "name": "aas Usage",
+  "version": "0.1.0",
+  "icon": "gauge",
+  "bucket": { "group": "Agents", "order": 20, "size": "M" },
+
+  "entry": { "kind": "exec" },
+  "source": {
+    "kind": "exec",
+    "command": ["aas", "usage", "--json"],
+    "discover": ["$AAS_BIN", "~/.cargo/bin/aas", "/opt/homebrew/bin/aas", "/usr/local/bin/aas", "PATH"],
+    "timeoutMs": 25000,
+    "output": "data",
+    "adapter": "aas-usage"
+  },
+
+  "refresh": { "onOpen": true, "interval": null, "staleAfterSec": 600 },
+
+  "permissions": {
+    "exec": [
+      {
+        "command": "aas",
+        "allowedArgs": [["usage", "--json"]],
+        "maxOutputBytes": 1048576,
+        "sensitiveOutput": false
+      }
+    ],
+    "network": [],
+    "readPaths": [],
+    "env": ["AAS_BIN"],
+    "keychain": false
+  },
+
+  "settings": []
+}
