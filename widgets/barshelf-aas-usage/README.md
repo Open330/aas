@@ -1,19 +1,19 @@
-# aas Usage — MenuBucket widget
+# aas Usage — BarShelf widget
 
 Live LLM quota for every `aas` account, right in your macOS menubar via
-[MenuBucket](https://github.com/jiunbae/menubucket) — a scriptable menubar
+[BarShelf](https://github.com/Open330/barshelf) — a scriptable menubar
 widget platform.
 
 The widget runs `aas usage --json` (all accounts fetched in parallel) and
 renders the remaining quota per provider/account as a compact table in the
-MenuBucket dropdown.
+BarShelf popover.
 
 ![aas Usage widget screenshot](docs/screenshot.png)
 <!-- TODO: replace with a real screenshot (docs/screenshot.png) -->
 
 ## Install
 
-[![MenuBucket Install](https://img.shields.io/badge/MenuBucket-Install-0A84FF)](menubucket://install?url=https%3A%2F%2Fgithub.com%2FOpen330%2Faas)
+[![BarShelf Install](https://img.shields.io/badge/BarShelf-Install-0A84FF)](barshelf://install?url=https%3A%2F%2Fgithub.com%2FOpen330%2Faas)
 
 With the `mbk` CLI:
 
@@ -21,15 +21,16 @@ With the `mbk` CLI:
 mbk install https://github.com/Open330/aas
 ```
 
-Or open the deep link directly (requires MenuBucket to be installed):
+Or open the deep link directly (requires BarShelf to be installed):
 
 ```text
-menubucket://install?url=https%3A%2F%2Fgithub.com%2FOpen330%2Faas
+barshelf://install?url=https%3A%2F%2Fgithub.com%2FOpen330%2Faas
 ```
 
 ## Requirements
 
-- [MenuBucket](https://github.com/jiunbae/menubucket) installed.
+- [BarShelf](https://github.com/Open330/barshelf) installed (macOS 13+ on
+  Apple Silicon).
 - The `aas` binary available — the widget looks in `$AAS_BIN`,
   `~/.cargo/bin/aas`, `/opt/homebrew/bin/aas`, `/usr/local/bin/aas`, then
   `PATH`. See the [aas install instructions](../../README.md#install).

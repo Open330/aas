@@ -124,17 +124,17 @@ aas export --all -o creds.json                     # …or a file (0600); scp it
 
 Colors respect `NO_COLOR` and only apply on a TTY.
 
-## MenuBucket widget
+## BarShelf widget
 
 Prefer the menubar? This repo ships an `aas usage` widget for
-[MenuBucket](https://github.com/jiunbae/menubucket), a scriptable menubar
+[BarShelf](https://github.com/Open330/barshelf), a scriptable menubar
 widget platform:
 
 ```bash
 mbk install https://github.com/Open330/aas
 ```
 
-See [`widgets/menubucket-aas-usage/`](widgets/menubucket-aas-usage/) for details
+See [`widgets/barshelf-aas-usage/`](widgets/barshelf-aas-usage/) for details
 (deep link, requirements, permissions).
 
 ## Status

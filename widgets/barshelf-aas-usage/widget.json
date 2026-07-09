@@ -1,7 +1,7 @@
 {
-  "$schema": "https://menubucket.dev/schema/widget-0.1.json",
+  "$schema": "https://barshelf.dev/schema/widget-0.1.json",
   "schemaVersion": 1,
-  "id": "dev.menubucket.aas-usage",
+  "id": "dev.barshelf.aas-usage",
   "name": "aas Usage",
   "version": "0.1.0",
   "icon": "gauge",
