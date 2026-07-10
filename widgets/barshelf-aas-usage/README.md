@@ -8,9 +8,6 @@ The widget runs `aas usage --json` (all accounts fetched in parallel) and
 renders the remaining quota per provider/account as a compact table in the
 BarShelf popover.
 
-![aas Usage widget screenshot](docs/screenshot.png)
-<!-- TODO: replace with a real screenshot (docs/screenshot.png) -->
-
 ## Install
 
 [![BarShelf Install](https://img.shields.io/badge/BarShelf-Install-0A84FF)](barshelf://install?url=https%3A%2F%2Fgithub.com%2FOpen330%2Faas)
@@ -32,8 +29,8 @@ barshelf://install?url=https%3A%2F%2Fgithub.com%2FOpen330%2Faas
 - [BarShelf](https://github.com/Open330/barshelf) installed (macOS 13+ on
   Apple Silicon).
 - The `aas` binary available — the widget looks in `$AAS_BIN`,
-  `~/.cargo/bin/aas`, `/opt/homebrew/bin/aas`, `/usr/local/bin/aas`, then
-  `PATH`. See the [aas install instructions](../../README.md#install).
+  `~/.local/bin/aas`, `~/bin/aas`, `~/.cargo/bin/aas`, `/opt/homebrew/bin/aas`,
+  `/usr/local/bin/aas`, then `PATH`. See the [aas install instructions](../../README.md#install).
 - At least one account added (`aas login <provider> <name>`).
 
 ## Permissions

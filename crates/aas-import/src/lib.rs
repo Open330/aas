@@ -22,7 +22,7 @@ pub struct ImportReport {
 /// Inspect the current (shared) asx config and report adoptable state. Non-destructive.
 pub fn inspect() -> anyhow::Result<ImportReport> {
     let store = AccountStore::open_default();
-    let accounts = store.list(None);
+    let accounts = store.list(None)?;
     let mut report = ImportReport {
         accounts: accounts.len(),
         ..Default::default()
@@ -56,21 +56,24 @@ pub struct Bundle {
 }
 
 /// Collect every account + its credential into a portable bundle.
-pub fn export_bundle() -> Bundle {
+pub fn export_bundle() -> anyhow::Result<Bundle> {
     let store = AccountStore::open_default();
     let accounts = store
-        .list(None)
+        .list(None)?
         .into_iter()
         .map(|a| {
             let credential = secure_store::get_secret(&a.provider, &a.name);
-            BundleAccount { record: a, credential }
+            BundleAccount {
+                record: a,
+                credential,
+            }
         })
         .collect();
-    Bundle {
+    Ok(Bundle {
         version: 1,
         exported_at: Some(aas_core::model::now_iso()),
         accounts,
-    }
+    })
 }
 
 #[derive(Debug, Default)]
@@ -99,8 +102,14 @@ pub fn import_bundle(bundle: &Bundle) -> RestoreReport {
                         // Prefer native storage (keychain on macOS Claude); if that fails — e.g.
                         // a locked keychain over a non-interactive SSH session — fall back to the
                         // profile-home file, which get_secret reads when the keychain is empty.
-                        let ok = secure_store::set_secret(&ba.record.provider, &ba.record.name, c).is_ok()
-                            || secure_store::set_secret_file(&ba.record.provider, &ba.record.name, c).is_ok();
+                        let ok = secure_store::set_secret(&ba.record.provider, &ba.record.name, c)
+                            .is_ok()
+                            || secure_store::set_secret_file(
+                                &ba.record.provider,
+                                &ba.record.name,
+                                c,
+                            )
+                            .is_ok();
                         if ok {
                             report.credentials += 1;
                         } else {
@@ -114,4 +123,42 @@ pub fn import_bundle(bundle: &Bundle) -> RestoreReport {
         }
     }
     report
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundle_round_trip_preserves_account_metadata_and_credential() {
+        let mut record = AccountRecord::new("codex", "work");
+        record.share = Some(Vec::new());
+        record.profile_type = Some(aas_core::model::ProfileType::Isolated);
+        let bundle = Bundle {
+            version: 1,
+            exported_at: Some("2026-07-10T00:00:00.000Z".into()),
+            accounts: vec![BundleAccount {
+                record,
+                credential: Some("secret".into()),
+            }],
+        };
+
+        let json = serde_json::to_string(&bundle).unwrap();
+        let decoded: Bundle = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.version, 1);
+        assert_eq!(decoded.accounts[0].record.share, Some(Vec::new()));
+        assert_eq!(
+            decoded.accounts[0].record.profile_type,
+            Some(aas_core::model::ProfileType::Isolated)
+        );
+        assert_eq!(decoded.accounts[0].credential.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn missing_optional_bundle_fields_are_backward_compatible() {
+        let json = r#"{"version":1,"accounts":[{"provider":"zai","name":"work","addedAt":"2026-07-10T00:00:00.000Z"}]}"#;
+        let decoded: Bundle = serde_json::from_str(json).unwrap();
+        assert!(decoded.exported_at.is_none());
+        assert!(decoded.accounts[0].credential.is_none());
+    }
 }

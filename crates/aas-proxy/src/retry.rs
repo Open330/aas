@@ -47,7 +47,12 @@ pub enum BodyDecision {
 }
 
 /// Decide what to do after reading a non-stream / error body.
-pub fn classify_body(status: u16, backend_retryable: bool, attempt: u32, retries: u32) -> BodyDecision {
+pub fn classify_body(
+    status: u16,
+    backend_retryable: bool,
+    attempt: u32,
+    retries: u32,
+) -> BodyDecision {
     if FATAL_STATUS.contains(&status) {
         return BodyDecision::Fatal;
     }
@@ -126,12 +131,20 @@ pub async fn fetch_upstream_with_retry(
         let backend_retryable = backend.is_retryable(status, &text);
         match classify_body(status, backend_retryable, attempt, retries) {
             BodyDecision::Retry => continue,
-            _ => return Ok(UpstreamOutcome::Error { status, detail: text }),
+            _ => {
+                return Ok(UpstreamOutcome::Error {
+                    status,
+                    detail: text,
+                })
+            }
         }
     }
 
     match last_status {
-        Some(status) => Ok(UpstreamOutcome::Error { status, detail: last_text }),
+        Some(status) => Ok(UpstreamOutcome::Error {
+            status,
+            detail: last_text,
+        }),
         None => Err(anyhow::anyhow!(if last_text.is_empty() {
             "upstream fetch failed".to_string()
         } else {

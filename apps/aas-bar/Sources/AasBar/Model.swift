@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Darwin
 
 // MARK: - Wire format (matches `aas usage --json`)
 
@@ -22,6 +23,7 @@ struct Account: Codable, Identifiable {
     let planLabel: String?
     let headline: String
     let error: String?
+    let notes: [String]?
     let meters: [Meter]
 
     var id: String { "\(provider)/\(name)" }
@@ -63,12 +65,30 @@ extension Account {
         func inH(_ h: Double) -> Int64 { Int64(now + h * 3600 * 1000) }
         func m(_ label: String, _ used: Double, _ h: Double) -> Meter { Meter(label: label, usedPct: used, resetMs: inH(h)) }
         return [
-            Account(provider: "claude", name: "e-ed@callabo", email: nil, active: false, plan: "max", planLabel: "max · 20x", headline: "", error: nil, meters: [m("5h", 12, 2), m("7d", 21, 131)]),
-            Account(provider: "claude", name: "k-june@callabo", email: nil, active: true, plan: "max", planLabel: "max · 20x", headline: "", error: nil, meters: [m("5h", 38, 1.5), m("7d", 85, 51)]),
-            Account(provider: "claude", name: "june@rtzr", email: "june@rtzr.ai", active: false, plan: "team", planLabel: "team · 5x", headline: "", error: nil, meters: [m("5h", 100, 1.7), m("7d", 98, 4.4)]),
-            Account(provider: "codex", name: "personal.codex", email: nil, active: false, plan: "plus", planLabel: "plus", headline: "", error: nil, meters: [m("5h", 5, 4), m("7d", 24, 142)]),
-            Account(provider: "codex", name: "e-ed.codex", email: nil, active: true, plan: "pro", planLabel: "pro", headline: "", error: nil, meters: [m("5h", 7, 2), m("7d", 93, 16)]),
+            Account(provider: "claude", name: "e-ed@callabo", email: nil, active: false, plan: "max", planLabel: "max · 20x", headline: "", error: nil, notes: nil, meters: [m("5h", 12, 2), m("7d", 21, 131)]),
+            Account(provider: "claude", name: "k-june@callabo", email: nil, active: true, plan: "max", planLabel: "max · 20x", headline: "", error: nil, notes: nil, meters: [m("5h", 38, 1.5), m("7d", 85, 51)]),
+            Account(provider: "claude", name: "june@rtzr", email: "june@rtzr.ai", active: false, plan: "team", planLabel: "team · 5x", headline: "", error: nil, notes: nil, meters: [m("5h", 100, 1.7), m("7d", 98, 4.4)]),
+            Account(provider: "codex", name: "personal.codex", email: nil, active: false, plan: "plus", planLabel: "plus", headline: "", error: nil, notes: nil, meters: [m("5h", 5, 4), m("7d", 24, 142)]),
+            Account(provider: "codex", name: "e-ed.codex", email: nil, active: true, plan: "pro", planLabel: "pro", headline: "", error: nil, notes: nil, meters: [m("5h", 7, 2), m("7d", 93, 16)]),
         ]
+    }
+
+    static var largeSamples: [Account] {
+        (0..<20).map { index in
+            let base = samples[index % samples.count]
+            return Account(
+                provider: base.provider,
+                name: "\(base.name)-\(index)",
+                email: base.email,
+                active: index == 0,
+                plan: base.plan,
+                planLabel: base.planLabel,
+                headline: base.headline,
+                error: base.error,
+                notes: base.notes,
+                meters: base.meters
+            )
+        }
     }
 }
 
@@ -76,7 +96,7 @@ extension Account {
 
 /// Semantic health, mapped to both SwiftUI and AppKit colors so the popover (SwiftUI) and the
 /// menubar image (AppKit) stay in sync.
-enum HealthLevel {
+enum HealthLevel: Equatable {
     case good, warn, bad, none
 
     var color: Color {
@@ -152,7 +172,9 @@ func displayProvider(_ id: String) -> String {
 
 /// Bundled brand logo (template PNG) for a provider, if present in Resources.
 func providerLogo(_ id: String) -> NSImage? {
-    guard let url = Bundle.module.url(forResource: id, withExtension: "png"),
+    let url = Bundle.main.url(forResource: id, withExtension: "png")
+        ?? Bundle.module.url(forResource: id, withExtension: "png")
+    guard let url,
           let img = NSImage(contentsOf: url) else { return nil }
     img.isTemplate = true
     return img
@@ -208,8 +230,10 @@ final class UsageModel: ObservableObject {
     @Published var updated: Date?
     @Published var loading = false
     @Published var loadError: String?
+    @Published var refreshNotice: String?
 
     private var started = false
+    private var fetchTask: Task<Void, Never>?
     /// When we last *attempted* a fetch (success or failure). Guards against re-polling the
     /// rate-limited usage API on every incidental trigger — repeated refreshes inside this window
     /// coalesce to the cached snapshot. Complements the CLI's shared on-disk escalating backoff.
@@ -234,15 +258,29 @@ final class UsageModel: ObservableObject {
         // Coalesce overlapping fetches so two clicks (or click-during-bootstrap) can't spawn
         // two `aas usage` subprocesses that double-hit the rate-limited API. `loading` is set
         // synchronously here (this runs on the main actor) before any await.
-        guard !loading else { return }
+        guard !loading else {
+            refreshNotice = "Refresh already in progress"
+            return
+        }
         // Min-interval guard: within `minFetchInterval` of the last attempt, keep showing the
         // cached snapshot instead of re-polling. Usage moves slowly; this stops rapid Refresh /
         // incidental re-opens from re-hitting (and re-arming) the rate-limited endpoint.
         if let last = lastFetchAt, Date().timeIntervalSince(last) < Self.minFetchInterval {
+            let remaining = Int(ceil(Self.minFetchInterval - Date().timeIntervalSince(last)))
+            refreshNotice = "Refresh available in \(max(1, remaining))s"
             return
         }
         loading = true
-        Task { await fetch() }
+        refreshNotice = nil
+        fetchTask = Task { [weak self] in
+            guard let self else { return }
+            await self.fetch()
+            self.fetchTask = nil
+        }
+    }
+
+    func cancelRefresh() {
+        fetchTask?.cancel()
     }
 
     private func fetch() async {
@@ -254,9 +292,14 @@ final class UsageModel: ObservableObject {
             accounts = decoded.accounts
             updated = Date()
             loadError = nil
+            refreshNotice = nil
             saveCache()
+        } catch is CancellationError {
+            loadError = nil
+            refreshNotice = "Refresh cancelled"
         } catch {
             loadError = error.localizedDescription
+            refreshNotice = accounts.isEmpty ? nil : "Showing cached data"
         }
     }
 
@@ -293,6 +336,8 @@ final class UsageModel: ObservableObject {
         }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let candidates = [
+            "\(home)/.local/bin/aas",
+            "\(home)/bin/aas",
             "\(home)/.cargo/bin/aas",
             "/opt/homebrew/bin/aas",
             "/usr/local/bin/aas",
@@ -306,48 +351,99 @@ final class UsageModel: ObservableObject {
     }
 
     private nonisolated static func runAas() async throws -> Data {
-        try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let (url, args) = aasCommand()
-                let process = Process()
-                process.executableURL = url
-                process.arguments = args
-                let stdout = Pipe()
-                let stderr = Pipe()
-                process.standardOutput = stdout
-                process.standardError = stderr
-                do {
-                    try process.run()
-                    // Drain stderr on another thread so a large error stream can't fill the
-                    // pipe buffer and deadlock the stdout read; keep it for diagnostics.
-                    var errData = Data()
-                    let group = DispatchGroup()
-                    group.enter()
-                    DispatchQueue.global().async {
-                        errData = stderr.fileHandleForReading.readDataToEndOfFile()
-                        group.leave()
-                    }
-                    let data = stdout.fileHandleForReading.readDataToEndOfFile()
-                    process.waitUntilExit()
-                    group.wait()
-                    if process.terminationStatus != 0 {
-                        let detail = String(data: errData, encoding: .utf8)?
-                            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                        let suffix = detail.isEmpty ? "" : " — \(detail)"
-                        continuation.resume(throwing: NSError(
-                            domain: "aas", code: Int(process.terminationStatus),
-                            userInfo: [NSLocalizedDescriptionKey: "aas exited with code \(process.terminationStatus)\(suffix)"]
-                        ))
-                    } else {
-                        continuation.resume(returning: data)
-                    }
-                } catch {
-                    continuation.resume(throwing: NSError(
-                        domain: "aas", code: -1,
-                        userInfo: [NSLocalizedDescriptionKey: "couldn't run aas — is it installed? (\(error.localizedDescription))"]
-                    ))
-                }
+        let worker = Task.detached(priority: .userInitiated) {
+            try Self.runAasBlocking(timeout: 90)
+        }
+        return try await withTaskCancellationHandler {
+            try await worker.value
+        } onCancel: {
+            worker.cancel()
+        }
+    }
+
+    /// Run the CLI with file-backed stdout/stderr so neither pipe can deadlock, and enforce a
+    /// total deadline. The detached task's cancellation is checked by the polling loop.
+    private nonisolated static func runAasBlocking(timeout: TimeInterval) throws -> Data {
+        let (url, args) = aasCommand()
+        return try runProcessBlocking(url: url, args: args, timeout: timeout)
+    }
+
+    nonisolated static func runProcessBlocking(
+        url: URL,
+        args: [String],
+        timeout: TimeInterval
+    ) throws -> Data {
+        let temp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aas-bar-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temp) }
+
+        let stdoutURL = temp.appendingPathComponent("stdout")
+        let stderrURL = temp.appendingPathComponent("stderr")
+        FileManager.default.createFile(atPath: stdoutURL.path, contents: nil)
+        FileManager.default.createFile(atPath: stderrURL.path, contents: nil)
+        let stdout = try FileHandle(forWritingTo: stdoutURL)
+        let stderr = try FileHandle(forWritingTo: stderrURL)
+        defer {
+            try? stdout.close()
+            try? stderr.close()
+        }
+
+        let process = Process()
+        process.executableURL = url
+        process.arguments = args
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = stdout
+        process.standardError = stderr
+        do {
+            try process.run()
+        } catch {
+            throw NSError(
+                domain: "aas", code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "couldn't run aas — is it installed? (\(error.localizedDescription))"]
+            )
+        }
+
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning && Date() < deadline && !Task.isCancelled {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        let cancelled = Task.isCancelled
+        let timedOut = process.isRunning && Date() >= deadline
+        if process.isRunning {
+            process.terminate()
+            let grace = Date().addingTimeInterval(2)
+            while process.isRunning && Date() < grace {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            if process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
             }
         }
+        process.waitUntilExit()
+
+        if cancelled {
+            throw CancellationError()
+        }
+        if timedOut {
+            throw NSError(
+                domain: "aas", code: -2,
+                userInfo: [NSLocalizedDescriptionKey: "aas usage timed out after \(Int(timeout)) seconds"]
+            )
+        }
+
+        let data = try Data(contentsOf: stdoutURL)
+        if process.terminationStatus != 0 {
+            let allError = (try? Data(contentsOf: stderrURL)) ?? Data()
+            let errData = Data(allError.suffix(64 * 1024))
+            let detail = String(data: errData, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let suffix = detail.isEmpty ? "" : " — \(detail)"
+            throw NSError(
+                domain: "aas", code: Int(process.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: "aas exited with code \(process.terminationStatus)\(suffix)"]
+            )
+        }
+        return data
     }
 }

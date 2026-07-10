@@ -14,10 +14,18 @@ pub struct SharedEntry {
 }
 
 const fn dir(name: &'static str, category: &'static str) -> SharedEntry {
-    SharedEntry { name, is_dir: true, category }
+    SharedEntry {
+        name,
+        is_dir: true,
+        category,
+    }
 }
 const fn file(name: &'static str, category: &'static str) -> SharedEntry {
-    SharedEntry { name, is_dir: false, category }
+    SharedEntry {
+        name,
+        is_dir: false,
+        category,
+    }
 }
 
 /// config.toml is provider-injected on cross-provider runs, so it is skipped there.
@@ -144,28 +152,45 @@ pub fn resolve_share_selection(
     opts: &ShareOpts,
     provider: Option<&str>,
 ) -> Result<ShareSelection, ShareError> {
-    let count = [opts.isolated, opts.shared, opts.share.is_some(), opts.isolate.is_some()]
-        .iter()
-        .filter(|b| **b)
-        .count();
+    let count = [
+        opts.isolated,
+        opts.shared,
+        opts.share.is_some(),
+        opts.isolate.is_some(),
+    ]
+    .iter()
+    .filter(|b| **b)
+    .count();
     if count == 0 {
-        return Ok(ShareSelection { provided: false, value: None });
+        return Ok(ShareSelection {
+            provided: false,
+            value: None,
+        });
     }
     if count > 1 {
         return Err(ShareError::Multiple);
     }
     if opts.isolated {
-        return Ok(ShareSelection { provided: true, value: Some(vec![]) });
+        return Ok(ShareSelection {
+            provided: true,
+            value: Some(vec![]),
+        });
     }
     if opts.shared {
-        return Ok(ShareSelection { provided: true, value: None });
+        return Ok(ShareSelection {
+            provided: true,
+            value: None,
+        });
     }
     if let Some(csv) = &opts.share {
         let v = match provider {
             Some(p) => parse_categories_for_provider(csv, p)?,
             None => parse_categories(csv)?,
         };
-        return Ok(ShareSelection { provided: true, value: Some(v) });
+        return Ok(ShareSelection {
+            provided: true,
+            value: Some(v),
+        });
     }
     // isolate
     let csv = opts.isolate.as_deref().unwrap();
@@ -174,11 +199,17 @@ pub fn resolve_share_selection(
         None => parse_categories(csv)?,
     };
     let base: Vec<String> = match provider {
-        Some(p) => supported_share_categories(p).iter().map(|s| s.to_string()).collect(),
+        Some(p) => supported_share_categories(p)
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
         None => SHARE_CATEGORIES.iter().map(|s| s.to_string()).collect(),
     };
     let value: Vec<String> = base.into_iter().filter(|c| !exclude.contains(c)).collect();
-    Ok(ShareSelection { provided: true, value: Some(value) })
+    Ok(ShareSelection {
+        provided: true,
+        value: Some(value),
+    })
 }
 
 /// asx `describeShare`.
@@ -190,8 +221,16 @@ pub fn describe_share(share: Option<&[String]>, provider: Option<&str>) -> Strin
     let Some(share) = share else {
         return format!("shared: {}", categories.join(", "));
     };
-    let shared: Vec<&str> = categories.iter().copied().filter(|c| share.iter().any(|s| s == c)).collect();
-    let isolated: Vec<&str> = categories.iter().copied().filter(|c| !share.iter().any(|s| s == c)).collect();
+    let shared: Vec<&str> = categories
+        .iter()
+        .copied()
+        .filter(|c| share.iter().any(|s| s == c))
+        .collect();
+    let isolated: Vec<&str> = categories
+        .iter()
+        .copied()
+        .filter(|c| !share.iter().any(|s| s == c))
+        .collect();
     if shared.is_empty() {
         return format!("isolated: {}", categories.join(", "));
     }
@@ -206,7 +245,12 @@ pub fn describe_share(share: Option<&[String]>, provider: Option<&str>) -> Strin
 /// `categories = None` shares every category; `Some([])` shares nothing; `Some(subset)` those.
 /// Best-effort — individual link failures are ignored. Mirrors shared-state.ts:118-148.
 #[cfg(unix)]
-pub fn link_shared_state(provider: &str, home: &std::path::Path, is_cross: bool, categories: Option<&[String]>) {
+pub fn link_shared_state(
+    provider: &str,
+    home: &std::path::Path,
+    is_cross: bool,
+    categories: Option<&[String]>,
+) {
     use std::os::unix::fs::symlink;
 
     let Some(base) = crate::platform::system_home_for(provider) else {
@@ -251,7 +295,13 @@ pub fn link_shared_state(provider: &str, home: &std::path::Path, is_cross: bool,
 }
 
 #[cfg(not(unix))]
-pub fn link_shared_state(_provider: &str, _home: &std::path::Path, _is_cross: bool, _categories: Option<&[String]>) {}
+pub fn link_shared_state(
+    _provider: &str,
+    _home: &std::path::Path,
+    _is_cross: bool,
+    _categories: Option<&[String]>,
+) {
+}
 
 #[cfg(test)]
 mod tests {
@@ -259,28 +309,82 @@ mod tests {
 
     #[test]
     fn supported_categories() {
-        assert_eq!(supported_share_categories("claude"), vec!["sessions", "skills", "agents", "hooks", "settings"]);
-        assert_eq!(supported_share_categories("codex"), vec!["sessions", "skills", "settings"]);
-        assert_eq!(supported_share_categories("grok"), vec!["sessions", "skills", "settings"]);
+        assert_eq!(
+            supported_share_categories("claude"),
+            vec!["sessions", "skills", "agents", "hooks", "settings"]
+        );
+        assert_eq!(
+            supported_share_categories("codex"),
+            vec!["sessions", "skills", "settings"]
+        );
+        assert_eq!(
+            supported_share_categories("grok"),
+            vec!["sessions", "skills", "settings"]
+        );
     }
 
     #[test]
     fn resolve_flags() {
-        let iso = resolve_share_selection(&ShareOpts { isolated: true, ..Default::default() }, None).unwrap();
+        let iso = resolve_share_selection(
+            &ShareOpts {
+                isolated: true,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
         assert_eq!(iso.value, Some(vec![]));
-        let sh = resolve_share_selection(&ShareOpts { shared: true, ..Default::default() }, None).unwrap();
+        let sh = resolve_share_selection(
+            &ShareOpts {
+                shared: true,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
         assert_eq!(sh.value, None);
-        let only = resolve_share_selection(&ShareOpts { share: Some("sessions,skills".into()), ..Default::default() }, Some("codex")).unwrap();
+        let only = resolve_share_selection(
+            &ShareOpts {
+                share: Some("sessions,skills".into()),
+                ..Default::default()
+            },
+            Some("codex"),
+        )
+        .unwrap();
         assert_eq!(only.value, Some(vec!["sessions".into(), "skills".into()]));
-        let isolate = resolve_share_selection(&ShareOpts { isolate: Some("skills".into()), ..Default::default() }, Some("codex")).unwrap();
-        assert_eq!(isolate.value, Some(vec!["sessions".into(), "settings".into()]));
-        assert!(resolve_share_selection(&ShareOpts { isolated: true, shared: true, ..Default::default() }, None).is_err());
+        let isolate = resolve_share_selection(
+            &ShareOpts {
+                isolate: Some("skills".into()),
+                ..Default::default()
+            },
+            Some("codex"),
+        )
+        .unwrap();
+        assert_eq!(
+            isolate.value,
+            Some(vec!["sessions".into(), "settings".into()])
+        );
+        assert!(resolve_share_selection(
+            &ShareOpts {
+                isolated: true,
+                shared: true,
+                ..Default::default()
+            },
+            None
+        )
+        .is_err());
     }
 
     #[test]
     fn describe() {
-        assert_eq!(describe_share(None, Some("codex")), "shared: sessions, skills, settings");
-        assert_eq!(describe_share(Some(&[]), Some("codex")), "isolated: sessions, skills, settings");
+        assert_eq!(
+            describe_share(None, Some("codex")),
+            "shared: sessions, skills, settings"
+        );
+        assert_eq!(
+            describe_share(Some(&[]), Some("codex")),
+            "isolated: sessions, skills, settings"
+        );
         assert_eq!(
             describe_share(Some(&["sessions".to_string()]), Some("codex")),
             "shared: sessions (isolated: skills, settings)"

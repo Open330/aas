@@ -111,17 +111,29 @@ mod tests {
 
     #[test]
     fn derive_name_matches_asx() {
-        assert_eq!(derive_account_name(Some("e-ed@callabo.ai"), "codex"), "e-ed.codex");
+        assert_eq!(
+            derive_account_name(Some("e-ed@callabo.ai"), "codex"),
+            "e-ed.codex"
+        );
         assert_eq!(derive_account_name(None, "claude"), "personal.claude");
     }
 
     #[test]
     fn safe_dir_name_sanitizes() {
         // e-ed@callabo -> codex-e-ed_callabo (matches the on-disk homes we saw)
-        assert_eq!(safe_profile_dir_name("codex", "e-ed@callabo"), "codex-e-ed_callabo");
-        assert_eq!(safe_profile_dir_name("claude", "e-ed.codex"), "claude-e-ed.codex");
+        assert_eq!(
+            safe_profile_dir_name("codex", "e-ed@callabo"),
+            "codex-e-ed_callabo"
+        );
+        assert_eq!(
+            safe_profile_dir_name("claude", "e-ed.codex"),
+            "claude-e-ed.codex"
+        );
         // claude-containing provider keys normalize to `claude`
-        assert_eq!(safe_profile_dir_name("claude-code", "june@rtzr"), "claude-june_rtzr");
+        assert_eq!(
+            safe_profile_dir_name("claude-code", "june@rtzr"),
+            "claude-june_rtzr"
+        );
     }
 
     #[test]

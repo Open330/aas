@@ -16,12 +16,14 @@ aas-proxy.workspace = true
 aas-import.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 futures-util.workspace = true
 comfy-table.workspace = true
 owo-colors.workspace = true
 uuid.workspace = true
+rpassword.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

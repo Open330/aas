@@ -84,6 +84,11 @@ conflict check + updates active markers (`:160-201`).
 `safeProfileDirName(provider,name)="{normKey}-{name}".replace(/[^A-Za-z0-9_.-]/g,'_')` (`:29-31`).
 `getProfileHome=<profilesDir>/<safe>`; `getProfileCredentialPath=<home>/<nativeCredFile>`.
 
+**aas hardening:** keep the legacy path mapping for zero-migration compatibility, but reject
+global-name or resolved-home collisions under the account-store transaction lock before writing a
+credential. Store mutations use fail-closed parsing, last-valid backups, fsync, and atomic replace;
+rename/delete are fallible transactions with rollback instead of asx's best-effort ordering.
+
 ---
 
 ## §D. Keychain & paths
@@ -219,7 +224,7 @@ Continuity = full-transcript replay (no server session store). Tool ids round-tr
 - **util**: `sseData/sseEvent/sseHeaders`, chat↔common helpers, `parseChatToolDeltas`.
 
 ### Injection (`inject.ts`) & models (`models.ts`)
-`injectProxyEndpoint(source,env,url,tmpDir?,backend?)`: codex→write `config.toml`(`model_provider="asx-proxy"`,`base_url="<url>/v1"`,`env_key="ASX_PROXY_API_KEY"`,`wire_api="responses"`,`requires_openai_auth=false`)+`models.json`, set `CODEX_HOME`/`ASX_PROXY_API_KEY=asx-proxy-dummy`; claude→`ANTHROPIC_BASE_URL=url`, `ANTHROPIC_AUTH_TOKEN=asx-proxy-token` (if unset), del `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`, slots OPUS/SONNET/HAIKU/FABLE→`ANTHROPIC_DEFAULT_<SLOT>_MODEL[_NAME|_DESCRIPTION]`, `ANTHROPIC_MODEL`,`OPENAI_BASE_URL=url`; grok→`config.toml` `[models]default`+`[ui]permission_mode="always-approve"`+per-model `[model."<id>"]`(`base_url="<url>/v1"`,`api_backend="chat_completions"`,`api_key="asx-proxy-dummy"`,`context_window=200000`), set `GROK_HOME`. All config `0600`.
+`injectProxyEndpoint(source,env,url,authToken,tmpDir?,backend?,bypass)`: codex→write `config.toml`(`model_provider="asx-proxy"`,`base_url="<url>/v1"`,`env_key="ASX_PROXY_API_KEY"`,`wire_api="responses"`,`requires_openai_auth=false`)+`models.json`, set the explicit scratch `CODEX_HOME` and `ASX_PROXY_API_KEY=authToken`; claude→`ANTHROPIC_BASE_URL=url`, replace inherited credentials with `ANTHROPIC_AUTH_TOKEN=authToken`, del `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`, slots OPUS/SONNET/HAIKU/FABLE→`ANTHROPIC_DEFAULT_<SLOT>_MODEL[_NAME|_DESCRIPTION]`, `ANTHROPIC_MODEL`,`OPENAI_BASE_URL=url`; grok→an explicit scratch `GROK_HOME` with `config.toml` `[models]default`+per-model `[model."<id>"]`(`base_url="<url>/v1"`,`api_backend="chat_completions"`,`api_key=authToken`,`context_window=200000`). `[ui]permission_mode="always-approve"` is present only when `bypass=true`. All config writes are atomic and `0600`; every proxy route validates the per-run token.
 `models.ts`: `BackendChoice{id,model,effort?}`. `defaults`: codex `gpt-5.5-{high,medium,low,xhigh}`; claude `[opus-4-8,sonnet-4-6,haiku-4-5-20251001]`; grok `grok-build`; zai `[glm-5.2/high, glm-5.2-max/max, glm-5.2[1m]/high, glm-4.5-air]`. Precedence `env ASX_<PROV>_MODELS > <config>/models.json > defaults`. `resolveChoice(provider,id)`=find by id||list[0].
 
 ---

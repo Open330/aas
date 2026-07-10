@@ -19,14 +19,15 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp Info.plist "$APP/Contents/Info.plist"
 cp "$BINDIR/AasBar" "$APP/Contents/MacOS/AasBar"
-# Copy the SPM resource bundle (brand logos) so Bundle.module resolves inside the .app.
+# Copy resource files into the app's standard resource directory. The app checks Bundle.main
+# first and only falls back to SwiftPM's Bundle.module when run directly from `.build`.
 for b in "$BINDIR"/*.bundle; do
     [ -d "$b" ] || continue
-    cp -R "$b" "$APP/Contents/Resources/"
-    cp -R "$b" "$APP/Contents/MacOS/"
+    find "$b" -type f -name '*.png' -exec cp {} "$APP/Contents/Resources/" \;
 done
-# Ad-hoc sign so macOS is happy launching a locally-built app.
-codesign --force --sign - "$APP" 2>/dev/null || true
+# Ad-hoc sign and verify strictly; never print success for an invalid bundle.
+codesign --force --deep --sign - "$APP"
+codesign --verify --deep --strict --verbose=2 "$APP"
 
 echo "built $APP"
 

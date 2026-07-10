@@ -37,10 +37,14 @@ fn defaults(provider: &str) -> Vec<BackendChoice> {
             .collect();
     }
     if p.contains("claude") {
-        return ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
-            .iter()
-            .map(|m| BackendChoice::new(*m, *m, None))
-            .collect();
+        return [
+            "claude-opus-4-8",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5-20251001",
+        ]
+        .iter()
+        .map(|m| BackendChoice::new(*m, *m, None))
+        .collect();
     }
     if p == "grok" || p == "xai" {
         return vec![BackendChoice::new("grok-build", "grok-build", None)];
@@ -86,7 +90,10 @@ fn normalize_entry(e: &Value) -> Option<BackendChoice> {
         if model.is_empty() {
             return None;
         }
-        let effort = obj.get("effort").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+        let effort = obj
+            .get("effort")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
         let id = obj
             .get("id")
             .and_then(|v| v.as_str())
