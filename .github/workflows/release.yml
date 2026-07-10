@@ -142,18 +142,21 @@ jobs:
       - name: Smoke-test Unix archive
         if: matrix.smoke && matrix.archive == 'tar'
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
           mkdir smoke
           tar -xzf "${{ steps.package.outputs.tar }}" -C smoke
-          case "$(uname -s)-$(uname -m)-${{ matrix.target }}" in
-            Darwin-arm64-aarch64-apple-darwin|Darwin-x86_64-x86_64-apple-darwin|Linux-x86_64-x86_64-unknown-linux-musl)
-              smoke/aas --version
-              ;;
-            *)
-              echo "cross-built archive cannot execute on this runner; build validation only"
-              ;;
-          esac
+          host_os="$(uname -s)"
+          host_arch="$(uname -m)"
+          if { [ "$host_os" = Darwin ] && [ "$host_arch" = arm64 ] && [ "$TARGET" = aarch64-apple-darwin ]; } ||
+             { [ "$host_os" = Darwin ] && [ "$host_arch" = x86_64 ] && [ "$TARGET" = x86_64-apple-darwin ]; } ||
+             { [ "$host_os" = Linux ] && [ "$host_arch" = x86_64 ] && [ "$TARGET" = x86_64-unknown-linux-musl ]; }; then
+            smoke/aas --version
+          else
+            echo "cross-built archive cannot execute on this runner; build validation only"
+          fi
       - name: Smoke-test Windows archive
         if: matrix.smoke && matrix.archive == 'zip'
         shell: pwsh
