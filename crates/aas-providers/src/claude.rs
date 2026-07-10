@@ -367,19 +367,23 @@ pub(crate) async fn usage(account: &str) -> Usage {
         };
     }
     if status == 429 {
-        // Persist the Retry-After window so subsequent fetches back off instead of re-hitting.
-        // Anthropic sends Retry-After as delta-seconds; if it's absent or an HTTP-date we
-        // can't parse, fall back to a short, conservative window rather than a long ban.
-        let secs: i64 = retry
+        // Record the 429 with client-side escalation (see aas_core::backoff): the window doubles
+        // on every consecutive hit and is honored by *all* callers, so repeated retries widen the
+        // gap and converge instead of re-arming a short window forever. Anthropic sends Retry-After
+        // as delta-seconds; if it's absent/an HTTP-date we can't parse, pass 0 and let the backoff
+        // floor apply.
+        let hint_ms: i64 = retry
             .as_deref()
             .and_then(|r| r.trim().parse().ok())
             .filter(|&s: &i64| s > 0)
-            .unwrap_or(60);
-        aas_core::backoff::set_rate_limited(&backoff_key, chrono::Utc::now().timestamp_millis() + secs * 1000);
+            .unwrap_or(0)
+            * 1000;
+        let until = aas_core::backoff::record_rate_limit(&backoff_key, hint_ms);
+        let secs = ((until - chrono::Utc::now().timestamp_millis()) / 1000).max(0);
         return Usage {
             headline,
             plan,
-            error: Some(format!("rate limited (HTTP 429), retry after {secs}s.")),
+            error: Some(format!("rate limited (HTTP 429) — backing off {secs}s to recover.")),
             ..Default::default()
         };
     }

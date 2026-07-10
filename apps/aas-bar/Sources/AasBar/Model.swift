@@ -210,6 +210,11 @@ final class UsageModel: ObservableObject {
     @Published var loadError: String?
 
     private var started = false
+    /// When we last *attempted* a fetch (success or failure). Guards against re-polling the
+    /// rate-limited usage API on every incidental trigger — repeated refreshes inside this window
+    /// coalesce to the cached snapshot. Complements the CLI's shared on-disk escalating backoff.
+    private var lastFetchAt: Date?
+    private static let minFetchInterval: TimeInterval = 30
 
     /// On first appearance: show the cached snapshot immediately (no network). Only bootstrap
     /// a fetch if there's nothing cached yet — otherwise we never hit the API on our own; the
@@ -230,12 +235,19 @@ final class UsageModel: ObservableObject {
         // two `aas usage` subprocesses that double-hit the rate-limited API. `loading` is set
         // synchronously here (this runs on the main actor) before any await.
         guard !loading else { return }
+        // Min-interval guard: within `minFetchInterval` of the last attempt, keep showing the
+        // cached snapshot instead of re-polling. Usage moves slowly; this stops rapid Refresh /
+        // incidental re-opens from re-hitting (and re-arming) the rate-limited endpoint.
+        if let last = lastFetchAt, Date().timeIntervalSince(last) < Self.minFetchInterval {
+            return
+        }
         loading = true
         Task { await fetch() }
     }
 
     private func fetch() async {
         defer { loading = false }
+        lastFetchAt = Date() // stamp the attempt (success or failure) before awaiting
         do {
             let data = try await Self.runAas()
             let decoded = try JSONDecoder().decode(UsageResponse.self, from: data)
