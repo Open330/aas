@@ -115,7 +115,9 @@ all in the common case), and additionally provide an explicit adopt/import path:
   `AccountRecord`). Write back in the same shape so `asx` and `aas` can coexist during
   migration.
 - **Profile homes:** reuse `profiles/<safeProfileDirName(provider,name)>/` unchanged — the
-  native auth files (`auth.json`, `.credentials.json`) inside stay put.
+  native auth files (`auth.json`, `.credentials.json`) inside stay put. Because the legacy
+  sanitizer is not injective, every add/import/rename reserves the logical name under the
+  account-store lock and rejects a second name that resolves to the same home.
 - **macOS Keychain:** reproduce `asx`'s exact service-name derivation
   (`Claude Code-credentials-<sha256(CLAUDE_CONFIG_DIR)[:8]>`) so stored Claude credentials
   are found without re-login. *(Exact scheme + `security` argv: from §Keychain mapping.)*
@@ -178,8 +180,10 @@ operation-level detail is in [`PARITY_SPEC.md`](./PARITY_SPEC.md); the essential
   "share": ["sessions","skills"] // absent = share all, [] = fully isolated
 } ] }
 ```
-Written pretty, `0600`. `add_account` enforces **global name uniqueness** (same name under a
-different provider → error). This is exactly the constraint we hit during migration
+Written pretty, `0600`, through an fsynced same-directory temp file and atomic replacement while
+holding a cross-process lock; malformed/version-incompatible stores fail closed and a last-valid
+backup is retained. `add_account` enforces **global name uniqueness** (same name under a
+different provider → error) plus unique resolved profile homes. This is exactly the constraint we hit during migration
 (`e-ed@callabo` claude vs codex) — keep it, and keep `asx`'s provider-scoped auto-name
 `deriveAccountName` = `<email-local>.<providerShort>` (e.g. `e-ed.codex`) to avoid collisions.
 
@@ -190,6 +194,8 @@ different provider → error). This is exactly the constraint we hit during migr
 `safeProfileDirName(provider,name) = "{normKey}-{name}"` with `[^A-Za-z0-9_.-] → _`
 (normKey: contains `claude`→`claude`, `xai`→`grok`). Native cred file inside:
 claude `.credentials.json`, codex/grok `auth.json`, else `credential`.
+The sanitizer stays byte-compatible with asx, so aas rejects any logical-name pair that maps to
+the same result and commits account identity before credential creation.
 
 Rust: model as serde structs; `Store { version, accounts: Vec<AccountRecord> }`,
 `AccountRecord { provider, name, label: Option, email: Option, added_at, profile_type:
@@ -275,7 +281,9 @@ upstream SSE  ─[backend.parse_chunk]──▶ COMMON events ─[agent.format_c
   raw JSON **strings** to round-trip losslessly.
 
 Rust mapping: **axum** on hyper/tokio. Server = a `TcpListener` bound to `127.0.0.1:0` (keep it —
-avoids `asx`'s free-port TOCTOU race). Streaming uses `reqwest`'s byte stream → an SSE framer
+avoids `asx`'s free-port TOCTOU race) and requires a random per-run token on every route.
+Inference bodies are capped at 16 MiB and at most 32 requests may be in flight. Streaming uses
+`reqwest`'s byte stream → an SSE framer
 (split on `\n\n` over the accumulated, CRLF-normalized buffer) → `parse_stream_chunk` →
 tokio channel → axum `Sse`/`Body` back to the frontend.
 
@@ -288,8 +296,8 @@ tokio channel → axum `Sse`/`Body` back to the frontend.
    terminator, always cancel the upstream body. Never write raw JSON into an open SSE stream.
 4. Client disconnect (`res.on('close')` → in Rust, the axum connection-drop / a `CancellationToken`)
    aborts upstream reads; all writers early-return.
-5. **Upstream errors surface as HTTP 200** in the frontend's own wire format (text + done, or
-   `format_response`) — never a 4xx/5xx to the agent. Only a *pre-stream* proxy failure returns 500.
+5. Upstream failures preserve their non-2xx status with a structured error body until streaming
+   has begun. A mid-stream failure must use the already-open SSE response as described above.
 6. Retry: ≤5 attempts; retry on network error (except auth/cert/invalid-url), on
    `{408,429,500,502,503,504}`, and on `backend.is_retryable(status, body)` (z.ai overload codes
    `1301/1302/1304/1305` even at HTTP 200). Never retry `{400,401,403,404,405,410,422}`. Backoff
@@ -307,8 +315,10 @@ picker filter.
 **Injection** (`aas-proxy::inject`, per frontend, so the launched binary talks to the proxy and
 skips its own auth): codex → write `config.toml` (`model_provider="asx-proxy"`, `base_url=<url>/v1`,
 `wire_api="responses"`) + `models.json`, set `CODEX_HOME`/`ASX_PROXY_API_KEY`; claude → env only
-(`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN=asx-proxy-token`, slot→model remap, drop gateway
-discovery); grok → `config.toml` per-model blocks + `GROK_HOME`. Model registry
+(`ANTHROPIC_BASE_URL`, per-run `ANTHROPIC_AUTH_TOKEN`, slot→model remap, drop gateway
+discovery); grok → `config.toml` per-model blocks + `GROK_HOME`. All frontends use the same
+per-run proxy token. Explicit scratch homes override inherited agent-home variables, and Grok's
+`always-approve` mode is emitted only for an explicit `--bypass`. Model registry
 (`aas-proxy::models`) resolves picker `id` → real `{model, effort}`, override precedence
 `env(ASX_<PROV>_MODELS) > <config>/models.json > defaults`.
 

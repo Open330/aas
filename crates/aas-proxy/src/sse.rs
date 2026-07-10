@@ -21,7 +21,10 @@ impl Default for SseFramer {
 
 impl SseFramer {
     pub fn new() -> Self {
-        SseFramer { pending: Vec::new(), buf: String::new() }
+        SseFramer {
+            pending: Vec::new(),
+            buf: String::new(),
+        }
     }
 
     /// Decode the valid UTF-8 prefix of `pending` into `buf`. When `flush`, decode the remainder
@@ -35,7 +38,8 @@ impl SseFramer {
             Err(e) => {
                 let valid = e.valid_up_to();
                 // Safe: bytes [..valid] are valid UTF-8 by definition of valid_up_to.
-                self.buf.push_str(unsafe { std::str::from_utf8_unchecked(&self.pending[..valid]) });
+                self.buf
+                    .push_str(unsafe { std::str::from_utf8_unchecked(&self.pending[..valid]) });
                 let rest = self.pending.split_off(valid);
                 self.pending = rest;
                 if flush {
@@ -102,7 +106,13 @@ impl ToolAccumulator {
 
     /// Merge one `CommonEvent::ToolCallDelta` (non-delta events are ignored).
     pub fn push(&mut self, ev: &CommonEvent) {
-        if let CommonEvent::ToolCallDelta { index, id, name, args_delta } = ev {
+        if let CommonEvent::ToolCallDelta {
+            index,
+            id,
+            name,
+            args_delta,
+        } = ev
+        {
             if !self.by_index.contains_key(index) {
                 self.by_index.insert(*index, ToolAcc::default());
                 self.order.push(*index);
@@ -132,7 +142,11 @@ impl ToolAccumulator {
             .iter()
             .map(|i| {
                 let t = &self.by_index[i];
-                CommonEvent::ToolCall { id: t.id.clone(), name: t.name.clone(), arguments: t.args.clone() }
+                CommonEvent::ToolCall {
+                    id: t.id.clone(),
+                    name: t.name.clone(),
+                    arguments: t.args.clone(),
+                }
             })
             .collect()
     }

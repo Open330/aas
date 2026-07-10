@@ -5,7 +5,10 @@ use serde_json::{json, Value};
 
 /// SSE line builders.
 pub fn sse_data(obj: &Value) -> String {
-    format!("data: {}\n\n", serde_json::to_string(obj).unwrap_or_default())
+    format!(
+        "data: {}\n\n",
+        serde_json::to_string(obj).unwrap_or_default()
+    )
 }
 
 pub fn sse_event(event: &str, data: &Value) -> String {
@@ -133,14 +136,26 @@ pub fn chat_messages_to_common(messages: &[Value]) -> Vec<CommonMessage> {
             out.push(CommonMessage {
                 role: "tool".to_string(),
                 content: to_text(m.get("content").unwrap_or(&Value::Null)),
-                tool_call_id: Some(m.get("tool_call_id").and_then(|v| v.as_str()).unwrap_or("").to_string()),
-                tool_name: m.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                tool_call_id: Some(
+                    m.get("tool_call_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                ),
+                tool_name: m
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
                 ..Default::default()
             });
             continue;
         }
         if role == "assistant" {
-            if let Some(tcs) = m.get("tool_calls").and_then(|v| v.as_array()).filter(|a| !a.is_empty()) {
+            if let Some(tcs) = m
+                .get("tool_calls")
+                .and_then(|v| v.as_array())
+                .filter(|a| !a.is_empty())
+            {
                 out.push(CommonMessage {
                     role: "assistant".to_string(),
                     content: to_text(m.get("content").unwrap_or(&Value::Null)),
@@ -168,8 +183,16 @@ fn chat_tool_call_to_common(tc: &Value) -> crate::types::CommonToolCall {
         None => "{}".to_string(),
     };
     crate::types::CommonToolCall {
-        id: tc.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        name: function.and_then(|f| f.get("name")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        id: tc
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        name: function
+            .and_then(|f| f.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         arguments,
     }
 }
@@ -190,7 +213,10 @@ pub fn chat_tools_to_common(tools: Option<&Value>) -> Option<Vec<CommonToolDef>>
         };
         out.push(CommonToolDef {
             name: name.to_string(),
-            description: fnv.get("description").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            description: fnv
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
             parameters: fnv.get("parameters").cloned(),
             strict: fnv.get("strict").and_then(|v| v.as_bool()),
             builtin_type: None,
@@ -218,7 +244,10 @@ pub fn parse_chat_tool_deltas(tool_calls: &[Value]) -> Vec<CommonEvent> {
         out.push(CommonEvent::ToolCallDelta {
             index: tc.get("index").and_then(|v| v.as_i64()).unwrap_or(0),
             id: tc.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            name: function.and_then(|f| f.get("name")).and_then(|v| v.as_str()).map(|s| s.to_string()),
+            name: function
+                .and_then(|f| f.get("name"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
             args_delta,
         });
     }

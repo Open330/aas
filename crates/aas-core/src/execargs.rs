@@ -143,8 +143,16 @@ mod tests {
         assert_eq!(r.share.value, Some(vec![]));
         assert_eq!(r.forward_args, v(&["hello"]));
 
-        let r = parse_exec_args(&v(&["--share", "sessions,skills", "do", "it"]), true, Some("claude")).unwrap();
-        assert_eq!(r.share.value, Some(vec!["sessions".into(), "skills".into()]));
+        let r = parse_exec_args(
+            &v(&["--share", "sessions,skills", "do", "it"]),
+            true,
+            Some("claude"),
+        )
+        .unwrap();
+        assert_eq!(
+            r.share.value,
+            Some(vec!["sessions".into(), "skills".into()])
+        );
         assert_eq!(r.forward_args, v(&["do", "it"]));
 
         let r = parse_exec_args(&v(&["--keep-context", "run"]), true, Some("codex")).unwrap();
@@ -154,7 +162,12 @@ mod tests {
 
     #[test]
     fn double_dash_passthrough() {
-        let r = parse_exec_args(&v(&["-b", "--", "-s", "-i", "--share"]), true, Some("claude")).unwrap();
+        let r = parse_exec_args(
+            &v(&["-b", "--", "-s", "-i", "--share"]),
+            true,
+            Some("claude"),
+        )
+        .unwrap();
         assert!(r.bypass);
         assert_eq!(r.forward_args, v(&["-s", "-i", "--share"]));
         assert!(!r.share.provided);

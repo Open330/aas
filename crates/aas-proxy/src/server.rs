@@ -9,11 +9,13 @@ use crate::adapters::{pick_agent, pick_backend};
 use crate::models::backend_choices;
 use crate::retry::{fetch_upstream_with_retry, UpstreamOutcome};
 use crate::sse::{SseFramer, ToolAccumulator};
-use crate::types::{AgentAdapter, BackendAdapter, CommonEvent, CommonResponse, CommonToolCall, StreamCtx};
+use crate::types::{
+    AgentAdapter, BackendAdapter, CommonEvent, CommonResponse, CommonToolCall, StreamCtx,
+};
 use axum::{
     body::Body,
     extract::{Request, State},
-    http::{Method, StatusCode},
+    http::{header::AUTHORIZATION, Method, StatusCode},
     response::{IntoResponse, Json, Response},
     Router,
 };
@@ -22,7 +24,10 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Semaphore};
+
+const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_IN_FLIGHT_REQUESTS: usize = 32;
 
 /// Credential passed to the backend (raw stored secret preferred over an extracted api key).
 #[derive(Clone, Default)]
@@ -44,6 +49,8 @@ pub struct ProxyStartOptions {
 pub struct ProxyHandle {
     pub url: String,
     pub port: u16,
+    /// Per-run bearer/API-key token required by every proxy route.
+    pub auth_token: String,
     shutdown: Option<oneshot::Sender<()>>,
     join: Option<tokio::task::JoinHandle<()>>,
 }
@@ -66,6 +73,8 @@ struct ProxyState {
     backend_provider: String,
     cred: String,
     client: reqwest::Client,
+    auth_token: String,
+    request_slots: Arc<Semaphore>,
 }
 
 /// `targetCredential?.raw || targetCredential?.apiKey || ''` (empty string treated as falsy).
@@ -83,6 +92,11 @@ pub async fn start_proxy(options: ProxyStartOptions) -> anyhow::Result<ProxyHand
     let agent_provider = options.source_provider.to_lowercase();
     let backend_provider = options.target_provider.to_lowercase();
     let cred = pick_cred(&options.target_credential);
+    let auth_token = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
 
     let state = Arc::new(ProxyState {
         agent: pick_agent(&agent_provider),
@@ -91,6 +105,8 @@ pub async fn start_proxy(options: ProxyStartOptions) -> anyhow::Result<ProxyHand
         backend_provider,
         cred,
         client: reqwest::Client::builder().build()?,
+        auth_token: auth_token.clone(),
+        request_slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT_REQUESTS)),
     });
 
     let app = Router::new().fallback(handle).with_state(state);
@@ -114,6 +130,7 @@ pub async fn start_proxy(options: ProxyStartOptions) -> anyhow::Result<ProxyHand
     Ok(ProxyHandle {
         url,
         port,
+        auth_token,
         shutdown: Some(shutdown_tx),
         join: Some(join),
     })
@@ -135,7 +152,24 @@ fn json_response(status: StatusCode, value: Value) -> Response {
     (status, Json(value)).into_response()
 }
 
+fn is_authorized(req: &Request, expected: &str) -> bool {
+    let bearer = req
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    let api_key = req.headers().get("x-api-key").and_then(|v| v.to_str().ok());
+    bearer == Some(expected) || api_key == Some(expected)
+}
+
 async fn handle(State(st): State<Arc<ProxyState>>, req: Request) -> Response {
+    if !is_authorized(&req, &st.auth_token) {
+        return json_response(
+            StatusCode::UNAUTHORIZED,
+            json!({ "error": { "message": "invalid or missing proxy authorization" } }),
+        );
+    }
+
     let method = req.method().clone();
     let path = req.uri().path().to_string();
 
@@ -156,20 +190,56 @@ async fn handle(State(st): State<Arc<ProxyState>>, req: Request) -> Response {
 
     // Non-inference startup checkpoints (auth/status/billing). Real auth is the backend cred.
     if !is_inference(&method, &path) {
-        return json_response(StatusCode::OK, json!({ "ok": true, "authenticated": true, "via": "asx-proxy" }));
+        return json_response(
+            StatusCode::OK,
+            json!({ "ok": true, "authenticated": true, "via": "asx-proxy" }),
+        );
     }
 
     let (agent, backend) = match (&st.agent, &st.backend) {
         (Some(a), Some(b)) => (a.clone(), b.clone()),
-        (None, _) => return json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": { "message": format!("no agent adapter for '{}'", st.agent_provider) } })),
-        (_, None) => return json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": { "message": format!("no backend adapter for '{}'", st.backend_provider) } })),
+        (None, _) => {
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({ "error": { "message": format!("no agent adapter for '{}'", st.agent_provider) } }),
+            )
+        }
+        (_, None) => {
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({ "error": { "message": format!("no backend adapter for '{}'", st.backend_provider) } }),
+            )
+        }
     };
 
-    let body_bytes = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
-        Ok(b) => b,
-        Err(_) => Bytes::new(),
+    let request_slot = match st.request_slots.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return json_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                json!({ "error": { "message": "too many concurrent proxy requests" } }),
+            )
+        }
     };
-    let body_json: Value = serde_json::from_slice(&body_bytes).unwrap_or_else(|_| Value::Object(Default::default()));
+
+    let body_bytes = match axum::body::to_bytes(req.into_body(), MAX_REQUEST_BODY_BYTES).await {
+        Ok(b) => b,
+        Err(_) => {
+            return json_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                json!({ "error": { "message": format!("request body exceeds {MAX_REQUEST_BODY_BYTES} bytes") } }),
+            )
+        }
+    };
+    let body_json: Value = match serde_json::from_slice(&body_bytes) {
+        Ok(value) => value,
+        Err(e) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                json!({ "error": { "message": format!("invalid JSON request body: {e}") } }),
+            )
+        }
+    };
 
     let common = agent.parse_request(&path, &body_json);
     let up = backend.build_request(&common, &st.cred);
@@ -177,26 +247,30 @@ async fn handle(State(st): State<Arc<ProxyState>>, req: Request) -> Response {
     let outcome = match fetch_upstream_with_retry(&st.client, &up, backend.as_ref()).await {
         Ok(o) => o,
         Err(e) => {
-            // Pre-stream failure (only network errors with no Response reach here): safe 500.
-            return json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": { "message": e.to_string() } }));
+            return json_response(
+                StatusCode::BAD_GATEWAY,
+                json!({ "error": { "message": e.to_string() } }),
+            );
         }
     };
 
     let req_id = short_id();
-    let mut ctx = StreamCtx::new(format!("chatcmpl-asx-{req_id}"), now_secs(), common.model.clone(), common.tool_namespaces.clone());
+    let ctx = StreamCtx::new(
+        format!("chatcmpl-asx-{req_id}"),
+        now_secs(),
+        common.model.clone(),
+        common.tool_namespaces.clone(),
+    );
 
     match outcome {
         UpstreamOutcome::Error { status, detail } => {
             let detail300: String = detail.chars().take(300).collect();
-            let msg = format!("[asx-proxy] backend {} error {}: {}", st.backend_provider, status, detail300);
-            if common.stream {
-                let mut s = String::new();
-                s.push_str(&agent.format_stream_chunk(&CommonEvent::Text { text: msg }, &mut ctx));
-                s.push_str(&agent.format_stream_chunk(&CommonEvent::Done { finish_reason: None }, &mut ctx));
-                build_stream_response(&agent, Body::from(s))
-            } else {
-                json_response(StatusCode::OK, agent.format_response(&CommonResponse { text: msg, ..Default::default() }, &common))
-            }
+            let msg = format!(
+                "[asx-proxy] backend {} error {}: {}",
+                st.backend_provider, status, detail300
+            );
+            let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+            json_response(status, json!({ "error": { "message": msg } }))
         }
         UpstreamOutcome::Stream(res) => {
             if common.stream {
@@ -204,6 +278,7 @@ async fn handle(State(st): State<Arc<ProxyState>>, req: Request) -> Response {
                 let agent2 = agent.clone();
                 let backend2 = backend.clone();
                 tokio::spawn(async move {
+                    let _request_slot = request_slot;
                     stream_producer(res, agent2, backend2, ctx, tx).await;
                 });
                 let body = channel_body(rx);
@@ -221,27 +296,44 @@ fn build_stream_response(agent: &Arc<dyn AgentAdapter>, body: Body) -> Response 
     for (k, v) in agent.stream_headers() {
         resp = resp.header(k, v);
     }
-    resp.body(body).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    resp.body(body)
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 /// Wrap an mpsc receiver of Bytes as an axum streaming body.
 fn channel_body(rx: mpsc::Receiver<Bytes>) -> Body {
     let stream = futures_util::stream::unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|b| (Ok::<Bytes, std::convert::Infallible>(b), rx))
+        rx.recv()
+            .await
+            .map(|b| (Ok::<Bytes, std::convert::Infallible>(b), rx))
     });
     Body::from_stream(stream)
 }
 
 /// Flush accumulated tool calls into formatted chunks and clear the accumulator.
-pub(crate) fn flush_tools(agent: &dyn AgentAdapter, ctx: &mut StreamCtx, acc: &mut ToolAccumulator) -> Vec<String> {
-    let chunks: Vec<String> = acc.list().iter().map(|t| agent.format_stream_chunk(t, ctx)).collect();
+pub(crate) fn flush_tools(
+    agent: &dyn AgentAdapter,
+    ctx: &mut StreamCtx,
+    acc: &mut ToolAccumulator,
+) -> Vec<String> {
+    let chunks: Vec<String> = acc
+        .list()
+        .iter()
+        .map(|t| agent.format_stream_chunk(t, ctx))
+        .collect();
     acc.clear();
     chunks
 }
 
 /// Route one COMMON event to zero or more frontend SSE chunks. `tool_call_delta` is held in the
 /// accumulator; `done` flushes held tool calls first, then emits the done chunk.
-pub(crate) fn process_event(agent: &dyn AgentAdapter, ctx: &mut StreamCtx, acc: &mut ToolAccumulator, saw_done: &mut bool, ev: CommonEvent) -> Vec<String> {
+pub(crate) fn process_event(
+    agent: &dyn AgentAdapter,
+    ctx: &mut StreamCtx,
+    acc: &mut ToolAccumulator,
+    saw_done: &mut bool,
+    ev: CommonEvent,
+) -> Vec<String> {
     match &ev {
         CommonEvent::ToolCallDelta { .. } => {
             acc.push(&ev);
@@ -284,7 +376,9 @@ async fn stream_producer(
             Some(Ok(bytes)) => {
                 for block in framer.feed(&bytes) {
                     for ev in backend.parse_stream_chunk(&block) {
-                        for chunk in process_event(agent.as_ref(), &mut ctx, &mut acc, &mut saw_done, ev) {
+                        for chunk in
+                            process_event(agent.as_ref(), &mut ctx, &mut acc, &mut saw_done, ev)
+                        {
                             if tx.send(Bytes::from(chunk)).await.is_err() {
                                 client_closed = true;
                                 break 'outer;
@@ -300,7 +394,9 @@ async fn stream_producer(
             None => {
                 for block in framer.finish() {
                     for ev in backend.parse_stream_chunk(&block) {
-                        for chunk in process_event(agent.as_ref(), &mut ctx, &mut acc, &mut saw_done, ev) {
+                        for chunk in
+                            process_event(agent.as_ref(), &mut ctx, &mut acc, &mut saw_done, ev)
+                        {
                             if tx.send(Bytes::from(chunk)).await.is_err() {
                                 client_closed = true;
                                 break 'outer;
@@ -329,24 +425,57 @@ async fn stream_producer(
 ///  - mid-stream error → error-text chunk + done;
 ///  - clean end without a `done` → synthetic warning + done;
 ///  - otherwise nothing (a real `done` was already emitted).
-pub(crate) fn finalize_stream(agent: &dyn AgentAdapter, ctx: &mut StreamCtx, acc: &mut ToolAccumulator, saw_done: bool, stream_err: Option<String>) -> Vec<String> {
+pub(crate) fn finalize_stream(
+    agent: &dyn AgentAdapter,
+    ctx: &mut StreamCtx,
+    acc: &mut ToolAccumulator,
+    saw_done: bool,
+    stream_err: Option<String>,
+) -> Vec<String> {
     let mut tail: Vec<String> = flush_tools(agent, ctx, acc);
     if let Some(err) = stream_err {
         // Mid-stream break: surface a readable error as SSE text, then a clean done.
-        let msg = format!("\n[asx-proxy] stream interrupted: {}", if err.is_empty() { "connection lost".to_string() } else { err });
+        let msg = format!(
+            "\n[asx-proxy] stream interrupted: {}",
+            if err.is_empty() {
+                "connection lost".to_string()
+            } else {
+                err
+            }
+        );
         tail.push(agent.format_stream_chunk(&CommonEvent::Text { text: msg }, ctx));
-        tail.push(agent.format_stream_chunk(&CommonEvent::Done { finish_reason: None }, ctx));
+        tail.push(agent.format_stream_chunk(
+            &CommonEvent::Done {
+                finish_reason: None,
+            },
+            ctx,
+        ));
     } else if !saw_done {
         // Stream ended without an explicit done — synthetic warning + done.
         let warn = "\n[asx-proxy] upstream stream ended unexpectedly (connection may have been interrupted)";
-        tail.push(agent.format_stream_chunk(&CommonEvent::Text { text: warn.to_string() }, ctx));
-        tail.push(agent.format_stream_chunk(&CommonEvent::Done { finish_reason: None }, ctx));
+        tail.push(agent.format_stream_chunk(
+            &CommonEvent::Text {
+                text: warn.to_string(),
+            },
+            ctx,
+        ));
+        tail.push(agent.format_stream_chunk(
+            &CommonEvent::Done {
+                finish_reason: None,
+            },
+            ctx,
+        ));
     }
     tail
 }
 
 /// Agent wanted non-stream but the backend streams — accumulate text/tools, then format once.
-async fn accumulate_non_stream(res: reqwest::Response, agent: &dyn AgentAdapter, backend: &dyn BackendAdapter, common: &crate::types::CommonRequest) -> Response {
+async fn accumulate_non_stream(
+    res: reqwest::Response,
+    agent: &dyn AgentAdapter,
+    backend: &dyn BackendAdapter,
+    common: &crate::types::CommonRequest,
+) -> Response {
     let mut text = String::new();
     let mut finish_reason: Option<String> = None;
     let mut acc = ToolAccumulator::new();
@@ -378,21 +507,45 @@ async fn accumulate_non_stream(res: reqwest::Response, agent: &dyn AgentAdapter,
         }
     }
     if let Some(e) = stream_err {
-        text.push_str(&format!("\n[asx-proxy] stream interrupted: {}", if e.is_empty() { "connection lost".to_string() } else { e }));
+        text.push_str(&format!(
+            "\n[asx-proxy] stream interrupted: {}",
+            if e.is_empty() {
+                "connection lost".to_string()
+            } else {
+                e
+            }
+        ));
     }
     let tool_calls: Vec<CommonToolCall> = acc
         .list()
         .into_iter()
         .filter_map(|ev| match ev {
-            CommonEvent::ToolCall { id, name, arguments } => Some(CommonToolCall { id, name, arguments }),
+            CommonEvent::ToolCall {
+                id,
+                name,
+                arguments,
+            } => Some(CommonToolCall {
+                id,
+                name,
+                arguments,
+            }),
             _ => None,
         })
         .collect();
-    let resp = CommonResponse { text, tool_calls, finish_reason };
+    let resp = CommonResponse {
+        text,
+        tool_calls,
+        finish_reason,
+    };
     json_response(StatusCode::OK, agent.format_response(&resp, common))
 }
 
-fn apply_accumulate(ev: &CommonEvent, text: &mut String, finish_reason: &mut Option<String>, acc: &mut ToolAccumulator) {
+fn apply_accumulate(
+    ev: &CommonEvent,
+    text: &mut String,
+    finish_reason: &mut Option<String>,
+    acc: &mut ToolAccumulator,
+) {
     match ev {
         CommonEvent::Text { text: t } => text.push_str(t),
         CommonEvent::ToolCallDelta { .. } => acc.push(ev),

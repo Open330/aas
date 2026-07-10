@@ -41,7 +41,7 @@ The engine stays the `aas` CLI — the app just runs `aas usage --json` and rend
 
 - **macOS 14** (Sonoma) or later
 - The **`aas`** CLI, built with `aas usage --json` support and reachable at
-  `$AAS_BIN`, `~/.cargo/bin/aas`, or on your `PATH`:
+  `$AAS_BIN`, `~/.local/bin/aas`, `~/bin/aas`, `~/.cargo/bin/aas`, or on your `PATH`:
   ```bash
   # from the repo root
   cargo install --path crates/aas-cli
@@ -72,8 +72,9 @@ add `AasBar.app`.)
 |---|---|
 | `AAS_BIN` | Absolute path to the `aas` binary (overrides the search). |
 
-The app looks for `aas` at `$AAS_BIN` → `~/.cargo/bin/aas` → `/opt/homebrew/bin` →
-`/usr/local/bin` → `/usr/bin` → `PATH`. GUI apps inherit a minimal `PATH`, hence the search.
+The app looks for `aas` at `$AAS_BIN` → `~/.local/bin/aas` → `~/bin/aas` →
+`~/.cargo/bin/aas` → `/opt/homebrew/bin` → `/usr/local/bin` → `/usr/bin` → `PATH`.
+GUI apps inherit a minimal `PATH`, hence the search.
 
 ## 🧩 How it works
 
@@ -84,7 +85,7 @@ MenuBarExtra (SwiftUI)
         ▲
         │  Process
   aas usage --json ........... {"accounts":[{provider,name,active,plan,planLabel,
-                                              error,meters:[{label,usedPct,resetMs}]}]}
+                                              error,notes,meters:[{label,usedPct,resetMs}]}]}
 ```
 
 Results are cached to `~/Library/Application Support/aas-bar/usage-cache.json` and shown on

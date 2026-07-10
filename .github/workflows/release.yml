@@ -2,59 +2,229 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["v[0-9]+.*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to build (e.g. v0.1.0)"
+        description: "Existing tag to build (for example v0.1.4)"
         required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  RELEASE_REF: ${{ format('refs/tags/{0}', github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name) }}
 
 jobs:
-  # Create the GitHub Release first so the parallel upload jobs never race to create it
-  # (that race is what "release not found" was).
-  create-release:
+  validate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: taiki-e/create-gh-release-action@v1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ env.RELEASE_REF }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate tag and package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]
+          git rev-parse --verify "$RELEASE_REF^{commit}"
+          cargo_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
+          test "$RELEASE_TAG" = "v$cargo_version"
 
-  release:
-    name: ${{ matrix.target }}
-    needs: create-release
+  quality-rust:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ env.RELEASE_REF }}
+          persist-credentials: false
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --workspace --all-targets --all-features --locked
+      - name: Strict rustdoc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --all-features --no-deps --locked
+      - name: Dependency policy
+        run: |
+          cargo install cargo-deny --version 0.19.9 --locked
+          cargo deny check advisories bans licenses sources
+      - run: sh -n install.sh apps/aas-bar/build-app.sh
+
+  quality-swift:
+    needs: validate
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: apps/aas-bar
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ env.RELEASE_REF }}
+          persist-credentials: false
+      - run: swift test -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
+      - run: swift build -c release -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
+      - name: Verify app bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build-app.sh
+          mv .build .build-hidden
+          trap 'mv .build-hidden .build' EXIT
+          AAS_BAR_SNAPSHOT="$RUNNER_TEMP/aas-bar.png" AAS_BAR_SNAPSHOT_LARGE=1 ./AasBar.app/Contents/MacOS/AasBar
+          test -s "$RUNNER_TEMP/aas-bar.png"
+          codesign --verify --deep --strict --verbose=2 AasBar.app
+
+  package:
+    needs: [validate, quality-rust, quality-swift]
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - target: aarch64-apple-darwin
             os: macos-latest
+            archive: tar
+            smoke: true
           - target: x86_64-apple-darwin
             os: macos-latest
+            archive: tar
+            smoke: true
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
+            archive: tar
+            smoke: true
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
+            archive: tar
+            smoke: false
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+            archive: zip
+            smoke: true
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-
-      # Builds `aas` for the target (auto-installs the toolchain + cross tooling for
-      # musl / aarch64), packages it as aas-<target>.{tar.gz|zip}, and uploads it to the
-      # GitHub Release for the pushed tag. No Node/runtime — a single static binary.
-      - name: Build & upload
-        uses: taiki-e/upload-rust-binary-action@v1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ env.RELEASE_REF }}
+          persist-credentials: false
+      - name: Parse PowerShell installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path ./install.ps1), [ref]$tokens, [ref]$errors
+          )
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            exit 1
+          }
+      - name: Build and package without publishing
+        id: package
+        uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1.30.2
         with:
           bin: aas
           target: ${{ matrix.target }}
           archive: aas-$target
           checksum: sha256
-          token: ${{ secrets.GITHUB_TOKEN }}
+          locked: true
+          dry-run: true
+          dry-run-intended: true
+          ref: ${{ env.RELEASE_REF }}
         env:
-          # Keep the release profile from Cargo.toml (lto, strip, opt-level=z).
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+      - name: Smoke-test Unix archive
+        if: matrix.smoke && matrix.archive == 'tar'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir smoke
+          tar -xzf "${{ steps.package.outputs.tar }}" -C smoke
+          case "$(uname -s)-$(uname -m)-${{ matrix.target }}" in
+            Darwin-arm64-aarch64-apple-darwin|Darwin-x86_64-x86_64-apple-darwin|Linux-x86_64-x86_64-unknown-linux-musl)
+              smoke/aas --version
+              ;;
+            *)
+              echo "cross-built archive cannot execute on this runner; build validation only"
+              ;;
+          esac
+      - name: Smoke-test Windows archive
+        if: matrix.smoke && matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          Expand-Archive -Path '${{ steps.package.outputs.zip }}' -DestinationPath smoke
+          & ./smoke/aas.exe --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload Unix release candidate
+        if: matrix.archive == 'tar'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            ${{ steps.package.outputs.tar }}
+            ${{ steps.package.outputs.sha256 }}
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload Windows release candidate
+        if: matrix.archive == 'zip'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            ${{ steps.package.outputs.zip }}
+            ${{ steps.package.outputs.sha256 }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ env.RELEASE_REF }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Verify complete candidate set and checksums
+        shell: bash
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          test "$(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l | tr -d ' ')" = 5
+          test "$(find . -maxdepth 1 -type f -name '*.sha256' | wc -l | tr -d ' ')" = 5
+          for checksum in *.sha256; do sha256sum -c "$checksum"; done
+      - name: Attest release archives
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+      - name: Publish only after every platform succeeds
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "release $RELEASE_TAG already exists" >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" dist/* \
+            --verify-tag \
+            --title "$RELEASE_TAG" \
+            --generate-notes

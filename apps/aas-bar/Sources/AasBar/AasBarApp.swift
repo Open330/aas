@@ -33,7 +33,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor private func renderSnapshot(to path: String, scheme: ColorScheme) {
         let model = UsageModel()
-        model.accounts = Account.samples
+        model.accounts = ProcessInfo.processInfo.environment["AAS_BAR_SNAPSHOT_LARGE"] == "1"
+            ? Account.largeSamples
+            : Account.samples
         model.updated = Date()
         let bg = scheme == .light
             ? Color(red: 0.96, green: 0.96, blue: 0.97)

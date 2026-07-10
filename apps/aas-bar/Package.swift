@@ -9,6 +9,10 @@ let package = Package(
             name: "AasBar",
             path: "Sources/AasBar",
             resources: [.process("Resources")]
-        )
+        ),
+        .testTarget(
+            name: "AasBarTests",
+            dependencies: ["AasBar"]
+        ),
     ]
 )

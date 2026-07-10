@@ -37,7 +37,11 @@ pub struct Meter {
 
 impl Meter {
     pub fn new(label: impl Into<String>, used_pct: f64, reset_ms: Option<i64>) -> Self {
-        Meter { label: label.into(), used_pct, reset_ms }
+        Meter {
+            label: label.into(),
+            used_pct,
+            reset_ms,
+        }
     }
     pub fn remaining_pct(&self) -> f64 {
         (100.0 - self.used_pct).clamp(0.0, 100.0)
@@ -85,7 +89,11 @@ pub fn format_reset(reset_ms: i64) -> String {
     }
     let mins = ((diff as f64) / 60000.0).round() as i64;
     let (h, m) = (mins / 60, mins % 60);
-    let left = if h > 0 { format!("{h}h {m}m") } else { format!("{m}m") };
+    let left = if h > 0 {
+        format!("{h}h {m}m")
+    } else {
+        format!("{m}m")
+    };
     format!("resets {stamp} ({left} left)")
 }
 
@@ -97,7 +105,10 @@ mod tests {
     fn bar_widths_and_levels() {
         assert_eq!(render_bar_plain(100.0, 20), format!("[{}]", "█".repeat(20)));
         assert_eq!(render_bar_plain(0.0, 20), format!("[{}]", "░".repeat(20)));
-        assert_eq!(render_bar_plain(50.0, 20), format!("[{}{}]", "█".repeat(10), "░".repeat(10)));
+        assert_eq!(
+            render_bar_plain(50.0, 20),
+            format!("[{}{}]", "█".repeat(10), "░".repeat(10))
+        );
         assert_eq!(bar_level(95.0), BarLevel::Good);
         assert_eq!(bar_level(75.0), BarLevel::Warn);
         assert_eq!(bar_level(10.0), BarLevel::Bad);

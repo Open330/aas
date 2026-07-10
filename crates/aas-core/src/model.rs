@@ -53,7 +53,10 @@ pub struct Store {
 
 impl Default for Store {
     fn default() -> Self {
-        Self { version: 1, accounts: Vec::new() }
+        Self {
+            version: 1,
+            accounts: Vec::new(),
+        }
     }
 }
 

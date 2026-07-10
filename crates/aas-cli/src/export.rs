@@ -74,7 +74,9 @@ pub fn cmd_export(store: &AccountStore, name: &str, shell: Shell) -> anyhow::Res
     };
     let key = normalize_provider_key(&acct.provider);
     let system = acct.profile_type == Some(ProfileType::System);
-    let home = profile_home(&acct.provider, &acct.name).display().to_string();
+    let home = profile_home(&acct.provider, &acct.name)
+        .display()
+        .to_string();
     let secret = secure_store::get_secret(&acct.provider, &acct.name);
 
     let mut vars: Vec<(&str, String)> = Vec::new();
@@ -115,7 +117,10 @@ pub fn cmd_export(store: &AccountStore, name: &str, shell: Shell) -> anyhow::Res
                 acct.provider, acct.name
             ));
         } else {
-            ui::warn(format!("Nothing to export for {}/{}.", acct.provider, acct.name));
+            ui::warn(format!(
+                "Nothing to export for {}/{}.",
+                acct.provider, acct.name
+            ));
         }
         return Ok(());
     }
@@ -140,20 +145,25 @@ fn set_0600(_p: &Path) {}
 
 /// Export every account + credential as a portable JSON bundle (for host-to-host migration).
 fn export_all(out: Option<&Path>) -> anyhow::Result<()> {
-    let bundle = aas_import::export_bundle();
+    let bundle = aas_import::export_bundle()?;
     let n = bundle.accounts.len();
     let json = serde_json::to_string_pretty(&bundle)?;
     match out {
         Some(path) => {
             std::fs::write(path, format!("{json}\n"))?;
             set_0600(path);
-            ui::success(format!("Exported {n} accounts (with credentials) → {}", path.display()));
+            ui::success(format!(
+                "Exported {n} accounts (with credentials) → {}",
+                path.display()
+            ));
             ui::warn("this file holds plaintext credentials — transfer securely, then delete it.");
         }
         None => {
             println!("{json}");
             if std::io::stdout().is_terminal() {
-                ui::warn("this bundle holds plaintext credentials — pipe it, don't leave it on screen.");
+                ui::warn(
+                    "this bundle holds plaintext credentials — pipe it, don't leave it on screen.",
+                );
                 ui::hint("migrate:  aas export --all | ssh other-host aas import -");
             }
         }
@@ -165,14 +175,30 @@ fn export_all(out: Option<&Path>) -> anyhow::Result<()> {
 pub fn run(
     store: &AccountStore,
     name: Option<String>,
+    account: Option<String>,
     all: bool,
     shell: Shell,
     out: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     if all {
+        if name.is_some() || account.is_some() {
+            anyhow::bail!("--all cannot be combined with an account name");
+        }
         return export_all(out.as_deref());
     }
-    match name {
+    let resolved = match (name, account) {
+        (Some(provider), Some(account)) => {
+            let provider = normalize_provider_key(&provider);
+            if store.get(&provider, &account)?.is_none() {
+                anyhow::bail!("Account not found: {provider}/{account}");
+            }
+            Some(account)
+        }
+        (Some(name), None) => Some(name),
+        (None, Some(_)) => unreachable!("clap cannot populate the second positional alone"),
+        (None, None) => None,
+    };
+    match resolved {
         Some(n) => cmd_export(store, &n, shell),
         None => {
             ui::error("specify an account, or --all to export every account");

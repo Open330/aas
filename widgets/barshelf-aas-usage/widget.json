@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "id": "dev.barshelf.aas-usage",
   "name": "aas Usage",
-  "version": "0.1.0",
+  "version": "0.1.4",
   "icon": "gauge",
   "bucket": { "group": "Agents", "order": 20, "size": "M" },
 
@@ -11,7 +11,7 @@
   "source": {
     "kind": "exec",
     "command": ["aas", "usage", "--json"],
-    "discover": ["$AAS_BIN", "~/.cargo/bin/aas", "/opt/homebrew/bin/aas", "/usr/local/bin/aas", "PATH"],
+    "discover": ["$AAS_BIN", "~/.local/bin/aas", "~/bin/aas", "~/.cargo/bin/aas", "/opt/homebrew/bin/aas", "/usr/local/bin/aas", "PATH"],
     "timeoutMs": 25000,
     "output": "data",
     "adapter": "aas-usage"

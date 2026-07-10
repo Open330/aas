@@ -40,12 +40,20 @@ fn anth_messages_to_common(messages: &Value) -> Vec<CommonMessage> {
     let empty: Vec<Value> = Vec::new();
     let arr = messages.as_array().unwrap_or(&empty);
     for m in arr {
-        let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let role = m
+            .get("role")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let content = m.get("content");
         match content {
             Some(Value::String(s)) => {
                 if !s.is_empty() {
-                    out.push(CommonMessage { role, content: s.clone(), ..Default::default() });
+                    out.push(CommonMessage {
+                        role,
+                        content: s.clone(),
+                        ..Default::default()
+                    });
                 }
                 continue;
             }
@@ -58,17 +66,36 @@ fn anth_messages_to_common(messages: &Value) -> Vec<CommonMessage> {
                         continue;
                     }
                     match b.get("type").and_then(|v| v.as_str()) {
-                        Some("text") => text.push_str(b.get("text").and_then(|v| v.as_str()).unwrap_or("")),
+                        Some("text") => {
+                            text.push_str(b.get("text").and_then(|v| v.as_str()).unwrap_or(""))
+                        }
                         Some("tool_use") => tool_calls.push(CommonToolCall {
-                            id: b.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                            name: b.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                            id: b
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            name: b
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
                             arguments: input_json(b),
                         }),
                         Some("tool_result") => tool_results.push(CommonMessage {
                             role: "tool".to_string(),
                             content: to_text(b.get("content").unwrap_or(&Value::Null)),
-                            tool_call_id: Some(b.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("").to_string()),
-                            is_error: if b.get("is_error").and_then(|v| v.as_bool()) == Some(true) { Some(true) } else { None },
+                            tool_call_id: Some(
+                                b.get("tool_use_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                            ),
+                            is_error: if b.get("is_error").and_then(|v| v.as_bool()) == Some(true) {
+                                Some(true)
+                            } else {
+                                None
+                            },
                             ..Default::default()
                         }),
                         _ => {}
@@ -79,7 +106,11 @@ fn anth_messages_to_common(messages: &Value) -> Vec<CommonMessage> {
                         out.push(CommonMessage {
                             role: "assistant".to_string(),
                             content: text,
-                            tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+                            tool_calls: if tool_calls.is_empty() {
+                                None
+                            } else {
+                                Some(tool_calls)
+                            },
                             ..Default::default()
                         });
                     }
@@ -88,7 +119,11 @@ fn anth_messages_to_common(messages: &Value) -> Vec<CommonMessage> {
                         out.push(tr);
                     }
                     if !text.is_empty() {
-                        out.push(CommonMessage { role: "user".to_string(), content: text, ..Default::default() });
+                        out.push(CommonMessage {
+                            role: "user".to_string(),
+                            content: text,
+                            ..Default::default()
+                        });
                     }
                 }
                 continue;
@@ -96,7 +131,11 @@ fn anth_messages_to_common(messages: &Value) -> Vec<CommonMessage> {
             other => {
                 let t = to_text(other.unwrap_or(&Value::Null));
                 if !t.is_empty() {
-                    out.push(CommonMessage { role, content: t, ..Default::default() });
+                    out.push(CommonMessage {
+                        role,
+                        content: t,
+                        ..Default::default()
+                    });
                 }
                 continue;
             }
@@ -126,12 +165,27 @@ impl AgentAdapter for ClaudeAgent {
     fn parse_request(&self, _path: &str, body: &Value) -> CommonRequest {
         let tools = body.get("tools").and_then(|v| v.as_array()).map(|arr| {
             arr.iter()
-                .filter(|t| t.get("name").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false))
+                .filter(|t| {
+                    t.get("name")
+                        .and_then(|v| v.as_str())
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false)
+                })
                 .map(|t| CommonToolDef {
-                    name: t.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                    description: t.get("description").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    name: t
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    description: t
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
                     parameters: t.get("input_schema").cloned(),
-                    builtin_type: t.get("type").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    builtin_type: t
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
                     strict: None,
                 })
                 .collect::<Vec<_>>()
@@ -141,7 +195,10 @@ impl AgentAdapter for ClaudeAgent {
             Some(v @ Value::Array(_)) => Some(to_text(v)),
             _ => None,
         };
-        let parallel = if body.get("tool_choice").and_then(|tc| tc.get("disable_parallel_tool_use")).and_then(|v| v.as_bool())
+        let parallel = if body
+            .get("tool_choice")
+            .and_then(|tc| tc.get("disable_parallel_tool_use"))
+            .and_then(|v| v.as_bool())
             == Some(true)
         {
             Some(false)
@@ -149,13 +206,20 @@ impl AgentAdapter for ClaudeAgent {
             None
         };
         CommonRequest {
-            model: unwrap_model_id(body.get("model").and_then(|v| v.as_str()).unwrap_or("claude")),
+            model: unwrap_model_id(
+                body.get("model")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("claude"),
+            ),
             system,
             messages: anth_messages_to_common(body.get("messages").unwrap_or(&Value::Null)),
             tools: tools.filter(|t| !t.is_empty()),
             tool_choice: body.get("tool_choice").cloned(),
             parallel_tool_calls: parallel,
-            stream: body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false),
+            stream: body
+                .get("stream")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             max_tokens: body.get("max_tokens").and_then(|v| v.as_i64()),
             temperature: body.get("temperature").and_then(|v| v.as_f64()),
             ..Default::default()
@@ -214,12 +278,20 @@ impl AgentAdapter for ClaudeAgent {
                 );
                 out
             }
-            CommonEvent::ToolCall { id, name, arguments } => {
+            CommonEvent::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
                 out += &close_text!();
                 let index = ctx.next_index;
                 ctx.next_index += 1;
                 ctx.items.push(Value::String(id.clone()));
-                let args = if arguments.is_empty() { "{}" } else { arguments.as_str() };
+                let args = if arguments.is_empty() {
+                    "{}"
+                } else {
+                    arguments.as_str()
+                };
                 out += &anth_event(
                     "content_block_start",
                     &json!({ "type": "content_block_start", "index": index, "content_block": { "type": "tool_use", "id": id, "name": name, "input": {} } }),
@@ -228,7 +300,10 @@ impl AgentAdapter for ClaudeAgent {
                     "content_block_delta",
                     &json!({ "type": "content_block_delta", "index": index, "delta": { "type": "input_json_delta", "partial_json": args } }),
                 );
-                out += &anth_event("content_block_stop", &json!({ "type": "content_block_stop", "index": index }));
+                out += &anth_event(
+                    "content_block_stop",
+                    &json!({ "type": "content_block_stop", "index": index }),
+                );
                 out
             }
             other => {
@@ -244,7 +319,11 @@ impl AgentAdapter for ClaudeAgent {
                     out += &open_text!();
                 }
                 out += &close_text!();
-                let stop_reason = if ctx.items.is_empty() { "end_turn" } else { "tool_use" };
+                let stop_reason = if ctx.items.is_empty() {
+                    "end_turn"
+                } else {
+                    "tool_use"
+                };
                 out += &anth_event(
                     "message_delta",
                     &json!({ "type": "message_delta", "delta": { "stop_reason": stop_reason }, "usage": { "output_tokens": 0 } }),
@@ -281,8 +360,16 @@ impl AgentAdapter for ClaudeAgent {
             .iter()
             .map(|c| json!({ "id": wrap_model_id(&c.id), "type": "model", "display_name": c.id, "created_at": "2025-01-01T00:00:00Z" }))
             .collect();
-        let first = data.first().and_then(|d| d.get("id")).cloned().unwrap_or(Value::Null);
-        let last = data.last().and_then(|d| d.get("id")).cloned().unwrap_or(Value::Null);
+        let first = data
+            .first()
+            .and_then(|d| d.get("id"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let last = data
+            .last()
+            .and_then(|d| d.get("id"))
+            .cloned()
+            .unwrap_or(Value::Null);
         json!({ "data": data, "has_more": false, "first_id": first, "last_id": last })
     }
 }
@@ -306,7 +393,12 @@ fn common_to_anth_messages(messages: &[CommonMessage]) -> Vec<Value> {
             let mut merged = false;
             if let Some(last) = out.last_mut() {
                 let is_tool_result_user = last.get("role").and_then(|v| v.as_str()) == Some("user")
-                    && last.get("content").and_then(|v| v.as_array()).and_then(|a| a.first()).and_then(|b| b.get("type")).and_then(|v| v.as_str())
+                    && last
+                        .get("content")
+                        .and_then(|v| v.as_array())
+                        .and_then(|a| a.first())
+                        .and_then(|b| b.get("type"))
+                        .and_then(|v| v.as_str())
                         == Some("tool_result");
                 if is_tool_result_user {
                     if let Some(arr) = last.get_mut("content").and_then(|v| v.as_array_mut()) {
@@ -333,7 +425,11 @@ fn common_to_anth_messages(messages: &[CommonMessage]) -> Vec<Value> {
                 continue;
             }
         }
-        let role = if m.role == "assistant" { "assistant" } else { "user" };
+        let role = if m.role == "assistant" {
+            "assistant"
+        } else {
+            "user"
+        };
         out.push(json!({ "role": role, "content": m.content }));
     }
     out
@@ -353,7 +449,12 @@ fn anth_tool_choice(tc: Option<&Value>) -> Option<Value> {
         };
     }
     if tc.is_object() {
-        if tc.get("name").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false) {
+        if tc
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+        {
             return Some(json!({ "type": "tool", "name": tc.get("name").unwrap() }));
         }
         if tc.get("type").is_some() {
@@ -366,9 +467,17 @@ fn anth_tool_choice(tc: Option<&Value>) -> Option<Value> {
 fn claude_token(cred: &str) -> String {
     if let Ok(d) = serde_json::from_str::<Value>(cred) {
         if d.get("type").and_then(|v| v.as_str()) == Some("claude-code-oauth-token") {
-            return d.get("token").and_then(|v| v.as_str()).unwrap_or(cred).to_string();
+            return d
+                .get("token")
+                .and_then(|v| v.as_str())
+                .unwrap_or(cred)
+                .to_string();
         }
-        if let Some(t) = d.get("claudeAiOauth").and_then(|o| o.get("accessToken")).and_then(|v| v.as_str()) {
+        if let Some(t) = d
+            .get("claudeAiOauth")
+            .and_then(|o| o.get("accessToken"))
+            .and_then(|v| v.as_str())
+        {
             return t.to_string();
         }
         if let Some(t) = d.get("accessToken").and_then(|v| v.as_str()) {
@@ -424,8 +533,13 @@ impl BackendAdapter for ClaudeBackend {
             .unwrap_or_default();
         if !tools.is_empty() {
             body["tools"] = json!(tools);
-            let base = anth_tool_choice(req.tool_choice.as_ref())
-                .or(if req.parallel_tool_calls == Some(false) { Some(json!({ "type": "auto" })) } else { None });
+            let base = anth_tool_choice(req.tool_choice.as_ref()).or(
+                if req.parallel_tool_calls == Some(false) {
+                    Some(json!({ "type": "auto" }))
+                } else {
+                    None
+                },
+            );
             if let Some(mut tc) = base {
                 if req.parallel_tool_calls == Some(false) {
                     if let Some(obj) = tc.as_object_mut() {
@@ -441,8 +555,14 @@ impl BackendAdapter for ClaudeBackend {
                 ("content-type".to_string(), "application/json".to_string()),
                 ("authorization".to_string(), format!("Bearer {token}")),
                 ("anthropic-version".to_string(), "2023-06-01".to_string()),
-                ("anthropic-beta".to_string(), "claude-code-20250219,oauth-2025-04-20".to_string()),
-                ("anthropic-dangerous-direct-browser-access".to_string(), "true".to_string()),
+                (
+                    "anthropic-beta".to_string(),
+                    "claude-code-20250219,oauth-2025-04-20".to_string(),
+                ),
+                (
+                    "anthropic-dangerous-direct-browser-access".to_string(),
+                    "true".to_string(),
+                ),
             ],
             body: body.to_string(),
         }
@@ -451,28 +571,52 @@ impl BackendAdapter for ClaudeBackend {
     fn parse_stream_chunk(&self, block: &str) -> Vec<CommonEvent> {
         let mut out = Vec::new();
         for line in block.split('\n') {
-            let Some(rest) = line.strip_prefix("data:") else { continue };
+            let Some(rest) = line.strip_prefix("data:") else {
+                continue;
+            };
             let payload = rest.trim();
             if payload.is_empty() {
                 continue;
             }
-            let Ok(j) = serde_json::from_str::<Value>(payload) else { continue };
+            let Ok(j) = serde_json::from_str::<Value>(payload) else {
+                continue;
+            };
             let jtype = j.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            let delta_type = j.get("delta").and_then(|d| d.get("type")).and_then(|v| v.as_str());
-            if jtype == "content_block_start" && j.get("content_block").and_then(|c| c.get("type")).and_then(|v| v.as_str()) == Some("tool_use") {
+            let delta_type = j
+                .get("delta")
+                .and_then(|d| d.get("type"))
+                .and_then(|v| v.as_str());
+            if jtype == "content_block_start"
+                && j.get("content_block")
+                    .and_then(|c| c.get("type"))
+                    .and_then(|v| v.as_str())
+                    == Some("tool_use")
+            {
                 let cb = j.get("content_block").unwrap();
                 out.push(CommonEvent::ToolCallDelta {
                     index: j.get("index").and_then(|v| v.as_i64()).unwrap_or(0),
                     id: cb.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                    name: cb.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    name: cb
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
                     args_delta: None,
                 });
             } else if jtype == "content_block_delta" && delta_type == Some("text_delta") {
                 out.push(CommonEvent::Text {
-                    text: j.get("delta").and_then(|d| d.get("text")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    text: j
+                        .get("delta")
+                        .and_then(|d| d.get("text"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                 });
             } else if jtype == "content_block_delta" && delta_type == Some("input_json_delta") {
-                if let Some(pj) = j.get("delta").and_then(|d| d.get("partial_json")).and_then(|v| v.as_str()) {
+                if let Some(pj) = j
+                    .get("delta")
+                    .and_then(|d| d.get("partial_json"))
+                    .and_then(|v| v.as_str())
+                {
                     out.push(CommonEvent::ToolCallDelta {
                         index: j.get("index").and_then(|v| v.as_i64()).unwrap_or(0),
                         id: None,
@@ -481,10 +625,17 @@ impl BackendAdapter for ClaudeBackend {
                     });
                 }
             } else if jtype == "message_stop" {
-                out.push(CommonEvent::Done { finish_reason: Some("stop".to_string()) });
+                out.push(CommonEvent::Done {
+                    finish_reason: Some("stop".to_string()),
+                });
             } else if jtype == "error" {
                 out.push(CommonEvent::Error {
-                    message: j.get("error").and_then(|e| e.get("message")).and_then(|v| v.as_str()).unwrap_or("anthropic error").to_string(),
+                    message: j
+                        .get("error")
+                        .and_then(|e| e.get("message"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("anthropic error")
+                        .to_string(),
                 });
             }
         }

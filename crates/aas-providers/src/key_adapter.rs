@@ -4,11 +4,11 @@
 //! `~/.grok/auth.json` (`{key}` or `{<issuer>:{key}}`) and JWT subscription tokens. The two
 //! providers share this module; `provider` is `"grok"` or `"zai"`.
 
-use crate::common::{add_account, http_client, num_alt, set_0600, set_active, value_display};
+use crate::common::{http_client, num_alt, set_active, store_account_secret, value_display};
 use crate::RefreshOutcome;
 use aas_core::jwt::decode_jwt_claims;
 use aas_core::platform::grok_auth_path;
-use aas_core::secure_store::{get_secret, set_secret};
+use aas_core::secure_store::{get_secret, write_restricted_file};
 use aas_core::usage::{Meter, Usage};
 use serde_json::{json, Value};
 
@@ -25,7 +25,11 @@ fn get_env_key(provider: &str) -> Option<String> {
     std::env::var(format!("{pfx}_API_KEY"))
         .ok()
         .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var(format!("{pfx}_KEY")).ok().filter(|s| !s.is_empty()))
+        .or_else(|| {
+            std::env::var(format!("{pfx}_KEY"))
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
         .or_else(|| {
             if provider == "grok" {
                 std::env::var("XAI_API_KEY").ok().filter(|s| !s.is_empty())
@@ -176,7 +180,10 @@ pub(crate) fn parse_grok_billing(binfo: &Value) -> (Option<Meter>, Vec<String>) 
                 .and_then(|m| m.get("val"))
                 .and_then(|v| v.as_f64())
         });
-    let used = config.and_then(|c| c.get("used")).and_then(|m| m.get("val")).and_then(|v| v.as_f64());
+    let used = config
+        .and_then(|c| c.get("used"))
+        .and_then(|m| m.get("val"))
+        .and_then(|v| v.as_f64());
 
     let mut meter = None;
     if let (Some(limit), Some(used)) = (monthly, used) {
@@ -225,20 +232,20 @@ fn try_extract_grok_email() -> Option<String> {
     get_grok_auth().and_then(|a| a.get("email").and_then(|v| v.as_str()).map(String::from))
 }
 
-fn write_grok_auth(raw: &str) {
+fn write_grok_auth(raw: &str) -> std::io::Result<()> {
     let p = grok_auth_path();
-    if let Some(parent) = p.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(&p, grok_auth_file_from_credential(raw).to_string());
-    set_0600(&p);
+    write_restricted_file(&p, &grok_auth_file_from_credential(raw).to_string())
 }
 
 // ---------------------------------------------------------------------------
 // Usage.
 // ---------------------------------------------------------------------------
 
-async fn grok_rate_limit_note(client: &reqwest::Client, bearer: &str, probe: bool) -> Option<String> {
+async fn grok_rate_limit_note(
+    client: &reqwest::Client,
+    bearer: &str,
+    probe: bool,
+) -> Result<Option<String>, String> {
     let res = if probe {
         let body = json!({
             "model": "grok-4.20-non-reasoning",
@@ -252,26 +259,36 @@ async fn grok_rate_limit_note(client: &reqwest::Client, bearer: &str, probe: boo
             .json(&body)
             .send()
             .await
-            .ok()?
+            .map_err(|e| format!("rate-limit probe network error: {e}"))?
     } else {
-        let res = client
+        client
             .get("https://api.x.ai/v1/models")
             .header("Authorization", format!("Bearer {bearer}"))
             .send()
             .await
-            .ok()?;
-        if !res.status().is_success() {
-            return None;
-        }
-        res
+            .map_err(|e| format!("models network error: {e}"))?
     };
+    if !res.status().is_success() {
+        return Err(format!(
+            "rate-limit endpoint returned HTTP {}",
+            res.status()
+        ));
+    }
     let h = res.headers();
-    let req = h.get("x-ratelimit-remaining-requests").and_then(|v| v.to_str().ok());
-    let tok = h.get("x-ratelimit-remaining-tokens").and_then(|v| v.to_str().ok());
+    let req = h
+        .get("x-ratelimit-remaining-requests")
+        .and_then(|v| v.to_str().ok());
+    let tok = h
+        .get("x-ratelimit-remaining-tokens")
+        .and_then(|v| v.to_str().ok());
     if req.is_some() || tok.is_some() {
-        Some(format!("rate remaining req={} tok={}", req.unwrap_or("?"), tok.unwrap_or("?")))
+        Ok(Some(format!(
+            "rate remaining req={} tok={}",
+            req.unwrap_or("?"),
+            tok.unwrap_or("?")
+        )))
     } else {
-        None
+        Ok(None)
     }
 }
 
@@ -281,11 +298,15 @@ async fn grok_usage(account: &str) -> Usage {
     if key.is_none() {
         key = std::env::var("XAI_API_KEY").ok().filter(|s| !s.is_empty());
         if key.is_none() {
-            key = get_grok_auth().and_then(|a| a.get("key").and_then(|v| v.as_str()).map(String::from));
+            key = get_grok_auth()
+                .and_then(|a| a.get("key").and_then(|v| v.as_str()).map(String::from));
         }
     }
     let Some(key) = key else {
-        return Usage { headline: "API key (no live quota data)".into(), ..Default::default() };
+        return Usage {
+            headline: "API key (no live quota data)".into(),
+            ..Default::default()
+        };
     };
     let bearer = grok_bearer(&key);
     let client = http_client();
@@ -293,49 +314,60 @@ async fn grok_usage(account: &str) -> Usage {
     let mut meters: Vec<Meter> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
     let mut key_name: Option<String> = None;
+    let mut successful_responses = 0usize;
+    let mut errors: Vec<String> = Vec::new();
 
     if bearer.starts_with("ey") {
         // Subscription / CLI token → billing + settings.
-        if let Ok(res) = client
+        match client
             .get("https://cli-chat-proxy.grok.com/v1/billing")
             .header("Authorization", format!("Bearer {bearer}"))
             .send()
             .await
         {
-            if res.status().is_success() {
-                if let Ok(binfo) = res.json::<Value>().await {
+            Ok(res) if res.status().is_success() => match res.json::<Value>().await {
+                Ok(binfo) => {
+                    successful_responses += 1;
                     let (m, ns) = parse_grok_billing(&binfo);
                     meters.extend(m);
                     notes.extend(ns);
                 }
-            }
+                Err(e) => errors.push(format!("billing returned invalid JSON: {e}")),
+            },
+            Ok(res) => errors.push(format!("billing returned HTTP {}", res.status())),
+            Err(e) => errors.push(format!("billing network error: {e}")),
         }
-        if let Ok(res) = client
+        match client
             .get("https://cli-chat-proxy.grok.com/v1/settings")
             .header("Authorization", format!("Bearer {bearer}"))
             .send()
             .await
         {
-            if res.status().is_success() {
-                if let Ok(sinfo) = res.json::<Value>().await {
+            Ok(res) if res.status().is_success() => match res.json::<Value>().await {
+                Ok(sinfo) => {
+                    successful_responses += 1;
                     key_name = sinfo
                         .get("plan")
                         .and_then(|v| v.as_str())
                         .or_else(|| sinfo.get("subscription").and_then(|v| v.as_str()))
                         .map(String::from);
                 }
-            }
+                Err(e) => errors.push(format!("settings returned invalid JSON: {e}")),
+            },
+            Ok(res) => errors.push(format!("settings returned HTTP {}", res.status())),
+            Err(e) => errors.push(format!("settings network error: {e}")),
         }
     } else {
         // Pure xAI API key → /api-key credits.
-        if let Ok(res) = client
+        match client
             .get("https://api.x.ai/v1/api-key")
             .header("Authorization", format!("Bearer {bearer}"))
             .send()
             .await
         {
-            if res.status().is_success() {
-                if let Ok(kinfo) = res.json::<Value>().await {
+            Ok(res) if res.status().is_success() => match res.json::<Value>().await {
+                Ok(kinfo) => {
+                    successful_responses += 1;
                     let (m, ns, kn) = parse_grok_apikey(&kinfo);
                     meters.extend(m);
                     notes.extend(ns);
@@ -343,14 +375,32 @@ async fn grok_usage(account: &str) -> Usage {
                         key_name = kn;
                     }
                 }
-            }
+                Err(e) => errors.push(format!("api-key returned invalid JSON: {e}")),
+            },
+            Ok(res) => errors.push(format!("api-key returned HTTP {}", res.status())),
+            Err(e) => errors.push(format!("api-key network error: {e}")),
         }
     }
 
     // Rate limits: header probe via /models, else a tiny chat/completions probe.
-    let mut rate = grok_rate_limit_note(&client, &bearer, false).await;
+    let mut rate = match grok_rate_limit_note(&client, &bearer, false).await {
+        Ok(note) => {
+            successful_responses += 1;
+            note
+        }
+        Err(e) => {
+            errors.push(e);
+            None
+        }
+    };
     if rate.is_none() {
-        rate = grok_rate_limit_note(&client, &bearer, true).await;
+        match grok_rate_limit_note(&client, &bearer, true).await {
+            Ok(note) => {
+                successful_responses += 1;
+                rate = note;
+            }
+            Err(e) => errors.push(e),
+        }
     }
     if let Some(rn) = rate {
         notes.push(rn);
@@ -358,7 +408,11 @@ async fn grok_usage(account: &str) -> Usage {
 
     // Tier/team from the JWT, if any.
     if let Some(info) = parse_grok_token_info(&bearer) {
-        let tier = info.get("tier").map(value_display).filter(|s| !s.is_empty()).unwrap_or_else(|| "?".into());
+        let tier = info
+            .get("tier")
+            .map(value_display)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "?".into());
         let team = info
             .get("team_id")
             .and_then(|v| v.as_str())
@@ -367,16 +421,42 @@ async fn grok_usage(account: &str) -> Usage {
         notes.push(format!("tier={tier}{team}"));
     }
 
+    if let Some(failure) = grok_failure_if_no_success(successful_responses, &errors) {
+        return failure;
+    }
+
     let headline = match &key_name {
         Some(kn) => format!("Grok {kn}"),
         None => "Grok key".into(),
     };
-    Usage { headline, plan: key_name, meters, notes, ..Default::default() }
+    Usage {
+        headline,
+        plan: key_name,
+        meters,
+        notes,
+        ..Default::default()
+    }
+}
+
+fn grok_failure_if_no_success(successful_responses: usize, errors: &[String]) -> Option<Usage> {
+    (successful_responses == 0).then(|| {
+        Usage::error(
+            "Grok",
+            if errors.is_empty() {
+                "Grok usage endpoints were unavailable".to_string()
+            } else {
+                errors.join("; ")
+            },
+        )
+    })
 }
 
 async fn zai_usage(account: &str) -> Usage {
     let Some(key) = get_secret("zai", account) else {
-        return Usage { headline: "API key (no live quota data)".into(), ..Default::default() };
+        return Usage {
+            headline: "API key (no live quota data)".into(),
+            ..Default::default()
+        };
     };
     let client = http_client();
     // ⚠ Z.AI quota uses `Authorization: <raw key>` with NO `Bearer` prefix.
@@ -421,12 +501,25 @@ async fn test_zai_key(key: &str) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("ZAI endpoint test failed: {e}"))?;
     if !res.status().is_success() {
         let status = res.status();
-        let detail: String = res.text().await.unwrap_or_default().chars().take(240).collect();
+        let detail: String = res
+            .text()
+            .await
+            .unwrap_or_default()
+            .chars()
+            .take(240)
+            .collect();
         anyhow::bail!(
             "ZAI endpoint test failed ({}{}{})",
             status.as_u16(),
-            status.canonical_reason().map(|r| format!(" {r}")).unwrap_or_default(),
-            if detail.is_empty() { String::new() } else { format!(": {detail}") }
+            status
+                .canonical_reason()
+                .map(|r| format!(" {r}"))
+                .unwrap_or_default(),
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
         );
     }
     Ok(())
@@ -460,36 +553,78 @@ pub(crate) async fn current_email(provider: &str) -> Option<String> {
     }
 }
 
-pub(crate) async fn load_current(provider: &str, account: &str, label: Option<&str>) -> anyhow::Result<()> {
+pub(crate) async fn load_current(
+    provider: &str,
+    account: &str,
+    label: Option<&str>,
+) -> anyhow::Result<()> {
     let mut val = get_env_key(provider);
     if val.is_none() && provider == "grok" {
         if let Some(auth) = get_grok_auth_file() {
             val = Some(auth.to_string());
         }
     }
-    let val = val.unwrap_or_else(|| format!("demo-key-{account}"));
-    let email = if provider == "grok" { try_extract_grok_email() } else { None };
-    set_secret(provider, account, &val)?;
-    add_account(provider, account, label, email)?;
+    let val = val.ok_or_else(|| {
+        anyhow::anyhow!(
+            "No live {provider} credential found. Set the provider API key or log in first."
+        )
+    })?;
+    let email = if provider == "grok" {
+        try_extract_grok_email()
+    } else {
+        None
+    };
+    store_account_secret(provider, account, label, email, &val)?;
     Ok(())
 }
 
 pub(crate) async fn switch_to(provider: &str, account: &str) -> anyhow::Result<()> {
     let v = get_secret(provider, account)
         .ok_or_else(|| anyhow::anyhow!("No key for {provider}/{account}"))?;
+    let env_name = if provider == "grok" {
+        "XAI_API_KEY".to_string()
+    } else {
+        format!("{}_API_KEY", provider.to_uppercase())
+    };
+    let previous_env = std::env::var_os(&env_name);
+    let previous_grok = (provider == "grok").then(get_grok_auth_file).flatten();
     if provider == "grok" {
-        write_grok_auth(&v);
+        write_grok_auth(&v)?;
         std::env::set_var("XAI_API_KEY", grok_bearer(&v));
     } else {
-        std::env::set_var(format!("{}_API_KEY", provider.to_uppercase()), &v);
+        std::env::set_var(&env_name, &v);
     }
-    set_active(provider, account)?;
+    if let Err(error) = set_active(provider, account) {
+        match previous_env {
+            Some(previous) => std::env::set_var(&env_name, previous),
+            None => std::env::remove_var(&env_name),
+        }
+        let rollback = if provider == "grok" {
+            match previous_grok {
+                Some(previous) => write_restricted_file(&grok_auth_path(), &previous.to_string()),
+                None => match std::fs::remove_file(grok_auth_path()) {
+                    Ok(()) => Ok(()),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(e) => Err(e),
+                },
+            }
+        } else {
+            Ok(())
+        };
+        anyhow::bail!(
+            "could not update active {provider} marker: {error}; native rollback={rollback:?}"
+        );
+    }
     Ok(())
 }
 
 pub(crate) async fn clear_current(provider: &str) -> anyhow::Result<()> {
     if provider == "grok" {
-        let _ = std::fs::remove_file(grok_auth_path());
+        match std::fs::remove_file(grok_auth_path()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
     }
     Ok(())
 }
@@ -503,7 +638,11 @@ pub(crate) fn login_command(provider: &str) -> Option<Vec<String>> {
 }
 
 /// asx key-adapter `login` (Z.AI only): validate the key, then store + activate.
-pub(crate) async fn validate_and_store_key(provider: &str, account: &str, key: &str) -> anyhow::Result<()> {
+pub(crate) async fn validate_and_store_key(
+    provider: &str,
+    account: &str,
+    key: &str,
+) -> anyhow::Result<()> {
     if provider != "zai" {
         anyhow::bail!("validate_and_store_key is only supported for zai");
     }
@@ -512,15 +651,18 @@ pub(crate) async fn validate_and_store_key(provider: &str, account: &str, key: &
         anyhow::bail!("No Z.AI API key provided.");
     }
     test_zai_key(key).await?;
-    set_secret(provider, account, key)?;
-    add_account(provider, account, None, None)?;
+    store_account_secret(provider, account, None, None, key)?;
     set_active(provider, account)?;
     Ok(())
 }
 
 pub(crate) fn refresh_outcome(provider: &str) -> RefreshOutcome {
     // Key providers have no OAuth refresh; nothing to do.
-    RefreshOutcome { ok: true, message: format!("{provider} does not require refresh"), needs_relogin: false }
+    RefreshOutcome {
+        ok: true,
+        message: format!("{provider} does not require refresh"),
+        needs_relogin: false,
+    }
 }
 
 #[cfg(test)]
@@ -571,7 +713,10 @@ mod tests {
             json!({"issuer": {"key": "k"}})
         );
         // raw string becomes asx.key
-        assert_eq!(grok_auth_file_from_credential("raw"), json!({"asx": {"key": "raw"}}));
+        assert_eq!(
+            grok_auth_file_from_credential("raw"),
+            json!({"asx": {"key": "raw"}})
+        );
     }
 
     #[test]
@@ -584,7 +729,9 @@ mod tests {
         let m = meter.unwrap();
         assert_eq!(m.label, "credits");
         assert!((m.used_pct - 25.0).abs() < 1e-9);
-        assert!(notes.iter().any(|n| n.contains("billingPeriodEnd=2026-08-01")));
+        assert!(notes
+            .iter()
+            .any(|n| n.contains("billingPeriodEnd=2026-08-01")));
     }
 
     #[test]
@@ -602,5 +749,14 @@ mod tests {
         let (meter2, notes2, _) = parse_grok_apikey(&kinfo2);
         assert!(meter2.is_none());
         assert!(notes2.iter().any(|n| n == "credits_remaining=$3"));
+    }
+
+    #[test]
+    fn grok_all_endpoint_failures_are_not_reported_healthy() {
+        let errors = vec!["api-key returned HTTP 401 Unauthorized".to_string()];
+        let usage = grok_failure_if_no_success(0, &errors).unwrap();
+        assert!(usage.meters.is_empty());
+        assert!(usage.error.as_deref().unwrap().contains("401"));
+        assert!(grok_failure_if_no_success(1, &errors).is_none());
     }
 }

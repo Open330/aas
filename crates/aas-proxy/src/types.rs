@@ -137,7 +137,12 @@ pub struct StreamCtx {
 }
 
 impl StreamCtx {
-    pub fn new(id: String, created: i64, model: String, tool_namespaces: Option<Vec<String>>) -> Self {
+    pub fn new(
+        id: String,
+        created: i64,
+        model: String,
+        tool_namespaces: Option<Vec<String>>,
+    ) -> Self {
         StreamCtx {
             id,
             created,

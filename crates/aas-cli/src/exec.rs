@@ -5,7 +5,8 @@
 use aas_core::execargs::parse_exec_args;
 use aas_core::model::ProfileType;
 use aas_core::naming::{
-    is_known_provider, normalize_provider, normalize_provider_key, profile_home, safe_profile_dir_name,
+    is_known_provider, normalize_provider, normalize_provider_key, profile_home,
+    safe_profile_dir_name,
 };
 use aas_core::store::AccountStore;
 use aas_core::{platform, secure_store, share};
@@ -23,13 +24,20 @@ struct AgentSpec {
 }
 
 fn agent_spec(provider: &str) -> Option<AgentSpec> {
-    let key = if provider.contains("claude") { "claude" } else { provider };
+    let key = if provider.contains("claude") {
+        "claude"
+    } else {
+        provider
+    };
     match key {
         "codex" => Some(AgentSpec {
             bin: "codex",
             home_env: "CODEX_HOME",
             file: "auth.json",
-            bypass: &["--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust"],
+            bypass: &[
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--dangerously-bypass-hook-trust",
+            ],
             stub: None,
         }),
         "claude" => Some(AgentSpec {
@@ -106,7 +114,10 @@ fn seed_agent_home(provider_key: &str, dir: &Path) {
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .unwrap_or_else(|| serde_json::json!({}));
     if let Some(obj) = json.as_object_mut() {
-        obj.insert("hasCompletedOnboarding".into(), serde_json::Value::Bool(true));
+        obj.insert(
+            "hasCompletedOnboarding".into(),
+            serde_json::Value::Bool(true),
+        );
     }
     if std::fs::write(&p, serde_json::to_string(&json).unwrap_or_default()).is_ok() {
         set_0600(&p);
@@ -151,7 +162,9 @@ pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyh
         }
     }
     let after = &rest[idx..];
-    let agent_provider = specified.clone().unwrap_or_else(|| profile_provider.clone());
+    let agent_provider = specified
+        .clone()
+        .unwrap_or_else(|| profile_provider.clone());
     let is_cross = specified
         .as_ref()
         .map(|s| normalize_provider_key(s) != normalize_provider_key(&profile_provider))
@@ -187,7 +200,8 @@ pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyh
 
     if !is_cross {
         if system_profile {
-            if let (Some(stored), Some(live)) = (&secret, live_credential(&profile_provider).await) {
+            if let (Some(stored), Some(live)) = (&secret, live_credential(&profile_provider).await)
+            {
                 if stored != &live {
                     anyhow::bail!(
                         "{profile_provider}/{account_name} is a system profile but is not current in system. Run: aas switch {account_name}"
@@ -224,12 +238,23 @@ pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyh
         let handle = start_proxy(ProxyStartOptions {
             source_provider: agent_provider.clone(),
             target_provider: profile_provider.clone(),
-            target_credential: Credential { raw: Some(backend_cred), api_key: None },
+            target_credential: Credential {
+                raw: Some(backend_cred),
+                api_key: None,
+            },
             tmp_dir: Some(home.clone()),
             port: None,
         })
         .await?;
-        inject_proxy_endpoint(&agent_provider, &mut env, &handle.url, Some(&home), Some(&profile_provider))?;
+        inject_proxy_endpoint(
+            &agent_provider,
+            &mut env,
+            &handle.url,
+            &handle.auth_token,
+            Some(&home),
+            Some(&profile_provider),
+            exec_args.bypass,
+        )?;
         proxy_handle = Some(handle);
     }
 
@@ -250,8 +275,17 @@ pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyh
     let code = match cmd.spawn() {
         Ok(mut child) => {
             tokio::select! {
-                s = child.wait() => s.ok().and_then(|s| s.code()).unwrap_or(0),
-                _ = tokio::signal::ctrl_c() => { let _ = child.wait().await; 130 }
+                status = child.wait() => status.map(exit_status_code).unwrap_or(1),
+                _ = tokio::signal::ctrl_c() => {
+                    match tokio::time::timeout(std::time::Duration::from_secs(3), child.wait()).await {
+                        Ok(Ok(status)) => exit_status_code(status),
+                        _ => {
+                            let _ = child.kill().await;
+                            let _ = child.wait().await;
+                            130
+                        }
+                    }
+                }
             }
         }
         Err(e) => {
@@ -265,6 +299,21 @@ pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyh
         std::process::exit(code);
     }
     Ok(())
+}
+
+fn exit_status_code(status: std::process::ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal().map_or(1, |signal| 128 + signal)
+    }
+    #[cfg(not(unix))]
+    {
+        1
+    }
 }
 
 async fn cleanup(proxy: Option<aas_proxy::ProxyHandle>, cross_home: &Option<PathBuf>, keep: bool) {
@@ -303,7 +352,10 @@ pub async fn cmd_proxy(store: &AccountStore, name: &str, frontend: &str) -> anyh
     let handle = start_proxy(ProxyStartOptions {
         source_provider: frontend_norm.clone(),
         target_provider: backend_provider.clone(),
-        target_credential: Credential { raw: Some(backend_cred), api_key: None },
+        target_credential: Credential {
+            raw: Some(backend_cred),
+            api_key: None,
+        },
         tmp_dir: None,
         port: None,
     })
@@ -313,12 +365,23 @@ pub async fn cmd_proxy(store: &AccountStore, name: &str, frontend: &str) -> anyh
     ensure_700(&dir);
     let mut injected: HashMap<String, String> = std::env::vars().collect();
     let before = injected.clone();
-    inject_proxy_endpoint(&frontend_norm, &mut injected, &handle.url, Some(&dir), Some(&backend_provider))?;
+    inject_proxy_endpoint(
+        &frontend_norm,
+        &mut injected,
+        &handle.url,
+        &handle.auth_token,
+        Some(&dir),
+        Some(&backend_provider),
+        false,
+    )?;
 
     println!("ASX Proxy: {}", handle.url);
     println!("  backend:  {backend_provider}/{}", acct.name);
     println!("  frontend: {frontend_norm}");
-    let mut keys: Vec<&String> = injected.keys().filter(|k| before.get(*k) != injected.get(*k)).collect();
+    let mut keys: Vec<&String> = injected
+        .keys()
+        .filter(|k| before.get(*k) != injected.get(*k))
+        .collect();
     keys.sort();
     for k in keys {
         println!("  export {k}=\"{}\"", injected[k]);
@@ -327,4 +390,17 @@ pub async fn cmd_proxy(store: &AccountStore, name: &str, frontend: &str) -> anyh
     let _ = tokio::signal::ctrl_c().await;
     handle.stop().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn signal_exit_status_maps_to_shell_convention() {
+        use std::os::unix::process::ExitStatusExt;
+        let status = std::process::ExitStatus::from_raw(libc::SIGTERM);
+        assert_eq!(exit_status_code(status), 128 + libc::SIGTERM);
+    }
 }

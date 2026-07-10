@@ -182,7 +182,11 @@ pub fn plan_label(u: &Usage) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| u.headline.clone());
     // Pull `tier=default_claude_max_20x` out of the headline and shorten to `20x`.
-    if let Some(tier) = u.headline.split_whitespace().find_map(|w| w.strip_prefix("tier=")) {
+    if let Some(tier) = u
+        .headline
+        .split_whitespace()
+        .find_map(|w| w.strip_prefix("tier="))
+    {
         let short = tier.rsplit('_').next().unwrap_or(tier);
         if !short.is_empty() && short != "default" && short != base {
             return format!("{base} · {short}");

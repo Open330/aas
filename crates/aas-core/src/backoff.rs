@@ -9,16 +9,17 @@
 //! **Why escalation.** Merely mirroring the server's `Retry-After` and retrying once per window
 //! never converges when the server escalates: each retry-at-expiry earns a *longer* ban, so a
 //! user who "waits then checks" loops forever. Instead we keep a per-key backoff *duration* and
-//! **double it on every consecutive 429** (honoring a larger server hint), capped at [`CAP_MS`].
+//! **double it on every consecutive 429** (honoring a larger server hint), capped at `CAP_MS`.
 //! Repeated failures therefore widen the gap geometrically and settle at the cap, and a stray
 //! `aas usage` can't keep re-arming a short window. The escalation memory **decays**: once a key
-//! has gone [`CAP_MS`] without a fresh 429 (a genuine hands-off cooldown), it resets to the
+//! has gone `CAP_MS` without a fresh 429 (a genuine hands-off cooldown), it resets to the
 //! server hint, and a *successful* fetch clears it outright.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::platform::asx_config_dir;
 
@@ -45,7 +46,7 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-fn load() -> HashMap<String, Entry> {
+fn load_unlocked() -> HashMap<String, Entry> {
     // A parse failure (missing file, or the pre-escalation `{"key": <i64>}` format) is benign —
     // we start empty and re-record on the next 429.
     std::fs::read_to_string(path())
@@ -54,19 +55,42 @@ fn load() -> HashMap<String, Entry> {
         .unwrap_or_default()
 }
 
-fn store(map: &HashMap<String, Entry>) {
+fn store_unlocked(map: &HashMap<String, Entry>) -> io::Result<()> {
+    let body = serde_json::to_string(map).map_err(io::Error::other)?;
+    crate::secure_store::write_restricted_file(&path(), &body)
+}
+
+fn open_lock() -> io::Result<File> {
     let dir = asx_config_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    let Ok(s) = serde_json::to_string(map) else { return };
-    // Atomic replace: write a uniquely-named temp file, then rename it over the target. This
-    // keeps concurrent readers (parallel fetches, aas-bar subprocesses) from ever seeing a
-    // half-written or truncated file. A lost update between two simultaneous 429s is benign —
-    // the dropped account just re-records its window on the next fetch.
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let uniq = format!("{}.{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed));
-    let tmp = dir.join(format!("usage-backoff.{uniq}.tmp"));
-    if std::fs::write(&tmp, s).is_ok() && std::fs::rename(&tmp, path()).is_err() {
-        let _ = std::fs::remove_file(&tmp);
+    std::fs::create_dir_all(&dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(dir.join(".usage-backoff.lock"))
+}
+
+fn with_lock<T>(exclusive: bool, f: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    use fs2::FileExt;
+    let lock = open_lock()?;
+    if exclusive {
+        FileExt::lock_exclusive(&lock)?;
+    } else {
+        FileExt::lock_shared(&lock)?;
+    }
+    let result = f();
+    let unlock = FileExt::unlock(&lock);
+    match (result, unlock) {
+        (Err(e), _) | (Ok(_), Err(e)) => Err(e),
+        (Ok(value), Ok(())) => Ok(value),
     }
 }
 
@@ -80,27 +104,41 @@ fn store(map: &HashMap<String, Entry>) {
 fn next_backoff(prev: Option<Entry>, hint_ms: i64, now: i64) -> Entry {
     let hint = hint_ms.max(0);
     let escalated = match prev {
-        Some(p) if now.saturating_sub(p.last_ms) <= CAP_MS => p.backoff_ms.saturating_mul(2).max(hint),
+        Some(p) if now.saturating_sub(p.last_ms) <= CAP_MS => {
+            p.backoff_ms.saturating_mul(2).max(hint)
+        }
         _ => hint.max(BASE_MS),
     };
     let backoff = escalated.clamp(0, CAP_MS);
-    Entry { until_ms: now + backoff, backoff_ms: backoff, last_ms: now }
+    Entry {
+        until_ms: now + backoff,
+        backoff_ms: backoff,
+        last_ms: now,
+    }
 }
 
 fn record_at(key: &str, hint_ms: i64, now: i64) -> i64 {
-    let mut map = load();
-    // Decay: forget escalation for any key untouched for CAP_MS (also keeps the file small).
-    map.retain(|_, e| now.saturating_sub(e.last_ms) <= CAP_MS);
-    let entry = next_backoff(map.get(key).copied(), hint_ms, now);
-    let until = entry.until_ms;
-    map.insert(key.to_string(), entry);
-    store(&map);
-    until
+    with_lock(true, || {
+        let mut map = load_unlocked();
+        // Decay: forget escalation for any key untouched for CAP_MS (also keeps the file small).
+        map.retain(|_, e| now.saturating_sub(e.last_ms) <= CAP_MS);
+        let entry = next_backoff(map.get(key).copied(), hint_ms, now);
+        map.insert(key.to_string(), entry);
+        store_unlocked(&map)?;
+        Ok(entry.until_ms)
+    })
+    .unwrap_or_else(|_| next_backoff(None, hint_ms, now).until_ms)
 }
 
 /// Unix-ms until which `key` (e.g. `"claude/work"`) is rate-limited, if still in the future.
 pub fn rate_limited_until(key: &str) -> Option<i64> {
-    load().get(key).map(|e| e.until_ms).filter(|&until| until > now_ms())
+    with_lock(false, || {
+        Ok(load_unlocked()
+            .get(key)
+            .map(|e| e.until_ms)
+            .filter(|&until| until > now_ms()))
+    })
+    .unwrap_or(None)
 }
 
 /// Record a 429 for `key`, escalating the backoff on consecutive hits. `server_hint_ms` is the
@@ -111,10 +149,13 @@ pub fn record_rate_limit(key: &str, server_hint_ms: i64) -> i64 {
 
 /// Clear a key's backoff after a successful fetch — resets escalation to zero.
 pub fn clear(key: &str) {
-    let mut map = load();
-    if map.remove(key).is_some() {
-        store(&map);
-    }
+    let _ = with_lock(true, || {
+        let mut map = load_unlocked();
+        if map.remove(key).is_some() {
+            store_unlocked(&map)?;
+        }
+        Ok(())
+    });
 }
 
 #[cfg(test)]
@@ -168,7 +209,7 @@ mod tests {
     #[test]
     fn decays_after_long_silence() {
         let e1 = next_backoff(None, 1_000_000, 0); // 1000s
-        // A genuine hands-off cooldown longer than CAP_MS resets to the server hint, not ×2.
+                                                   // A genuine hands-off cooldown longer than CAP_MS resets to the server hint, not ×2.
         let long_gap = e1.last_ms + CAP_MS + 1;
         let e2 = next_backoff(Some(e1), 300_000, long_gap);
         assert_eq!(e2.backoff_ms, 300_000); // fresh, escalation forgotten

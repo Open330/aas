@@ -9,6 +9,14 @@ use aas_core::usage::Usage;
 
 use crate::{all_providers, get_adapter, Provider};
 
+type PendingUsage = (
+    String,
+    String,
+    Option<String>,
+    bool,
+    tokio::task::JoinHandle<Usage>,
+);
+
 /// One account's live usage plus the bits a UI needs to group and mark it.
 #[derive(Debug)]
 pub struct AccountUsage {
@@ -30,7 +38,10 @@ async fn ensure_fresh(p: Provider, name: &str) {
 /// Resolve `filter` (a provider id, an account name, or `None` for everything) to the
 /// providers to scan and an optional single-account restriction. Shared by `snapshot()` and
 /// the CLI's `list`/`usage` so the two never drift.
-pub fn resolve_scope(store: &AccountStore, filter: Option<&str>) -> anyhow::Result<(Vec<Provider>, Option<String>)> {
+pub fn resolve_scope(
+    store: &AccountStore,
+    filter: Option<&str>,
+) -> anyhow::Result<(Vec<Provider>, Option<String>)> {
     match filter {
         Some(p) => {
             if let Some(a) = get_adapter(p) {
@@ -52,14 +63,17 @@ pub fn resolve_scope(store: &AccountStore, filter: Option<&str>) -> anyhow::Resu
 ///
 /// Tasks are spawned up front and awaited in order, so the network calls overlap while the
 /// returned `Vec` stays in a stable, deterministic order.
-pub async fn snapshot(store: &AccountStore, filter: Option<&str>) -> anyhow::Result<Vec<AccountUsage>> {
+pub async fn snapshot(
+    store: &AccountStore,
+    filter: Option<&str>,
+) -> anyhow::Result<Vec<AccountUsage>> {
     let (provs, single_name) = resolve_scope(store, filter)?;
 
-    let mut pending: Vec<(String, String, Option<String>, bool, tokio::task::JoinHandle<Usage>)> = Vec::new();
+    let mut pending: Vec<PendingUsage> = Vec::new();
     for p in provs {
-        let active = store.get_active(p.id());
+        let active = store.get_active(p.id())?;
         let accts: Vec<_> = store
-            .list(Some(p.id()))
+            .list(Some(p.id()))?
             .into_iter()
             .filter(|a| single_name.as_ref().is_none_or(|n| &a.name == n))
             .collect();
@@ -76,8 +90,16 @@ pub async fn snapshot(store: &AccountStore, filter: Option<&str>) -> anyhow::Res
 
     let mut out = Vec::with_capacity(pending.len());
     for (provider, name, email, active, handle) in pending {
-        let usage = handle.await.unwrap_or_else(|_| Usage::error("", "usage fetch task failed"));
-        out.push(AccountUsage { provider, name, email, active, usage });
+        let usage = handle
+            .await
+            .unwrap_or_else(|_| Usage::error("", "usage fetch task failed"));
+        out.push(AccountUsage {
+            provider,
+            name,
+            email,
+            active,
+            usage,
+        });
     }
     Ok(out)
 }

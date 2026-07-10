@@ -17,6 +17,8 @@ struct PopoverView: View {
     @ObservedObject var model: UsageModel
     var showFooter = true
     @State private var loginEnabled = SMAppService.mainApp.status == .enabled
+    @State private var loginError: String?
+    @State private var showingLoginError = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,6 +31,11 @@ struct PopoverView: View {
             }
         }
         .frame(width: 300)
+        .alert("Launch at Login failed", isPresented: $showingLoginError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(loginError ?? "The setting could not be changed.")
+        }
     }
 
     // MARK: Header
@@ -73,25 +80,35 @@ struct PopoverView: View {
             .padding(.vertical, 40)
             .padding(.horizontal, 16)
         } else {
-            VStack(alignment: .leading, spacing: 11) {
-                ForEach(providerOrder, id: \.self) { provider in
-                    VStack(alignment: .leading, spacing: 5) {
-                        HStack(spacing: 5) {
-                            ProviderMark(provider: provider)
-                            Text(displayProvider(provider).uppercased())
-                                .font(.system(size: 10, weight: .semibold))
-                                .tracking(0.7)
-                                .foregroundStyle(.tertiary)
-                        }
-                        .padding(.leading, 2)
-                        ForEach(accounts(for: provider)) { account in
-                            AccountRow(account: account)
+            VStack(spacing: 0) {
+                if let error = model.loadError {
+                    StatusBanner(text: "Refresh failed · \(error)", color: .red)
+                } else if let notice = model.refreshNotice {
+                    StatusBanner(text: notice, color: .secondary)
+                }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 11) {
+                        ForEach(providerOrder, id: \.self) { provider in
+                            VStack(alignment: .leading, spacing: 5) {
+                                HStack(spacing: 5) {
+                                    ProviderMark(provider: provider)
+                                    Text(displayProvider(provider).uppercased())
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .tracking(0.7)
+                                        .foregroundStyle(.tertiary)
+                                }
+                                .padding(.leading, 2)
+                                ForEach(accounts(for: provider)) { account in
+                                    AccountRow(account: account)
+                                }
+                            }
                         }
                     }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
                 }
+                .frame(maxHeight: 480)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
         }
     }
 
@@ -115,17 +132,15 @@ struct PopoverView: View {
 
     private var footer: some View {
         HStack(spacing: 8) {
-            Button(action: { model.refresh() }) {
+            Button(action: { model.loading ? model.cancelRefresh() : model.refresh() }) {
                 HStack(spacing: 5) {
-                    Image(systemName: "arrow.clockwise")
-                    Text("Refresh")
+                    Image(systemName: model.loading ? "xmark" : "arrow.clockwise")
+                    Text(model.loading ? "Cancel" : "Refresh")
                 }
                 .font(.system(size: 11.5))
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
-            .disabled(model.loading)
-
             if model.loading { ProgressView().controlSize(.small) }
             Spacer()
             Menu {
@@ -158,9 +173,26 @@ struct PopoverView: View {
                 try SMAppService.mainApp.register()
             }
         } catch {
-            NSLog("aas-bar: couldn't toggle Launch at Login — \(error.localizedDescription)")
+            loginError = error.localizedDescription
+            showingLoginError = true
         }
         loginEnabled = SMAppService.mainApp.status == .enabled
+    }
+}
+
+struct StatusBanner: View {
+    let text: String
+    let color: Color
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 10.5, weight: .medium))
+            .foregroundStyle(color)
+            .lineLimit(2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .background(color.opacity(0.08))
     }
 }
 

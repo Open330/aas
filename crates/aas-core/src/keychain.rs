@@ -1,12 +1,12 @@
-//! macOS Keychain **service-name derivation** (pure). The `security` CLI read/write/delete
-//! lives in `aas-providers` (it shells out); this module only reproduces asx's
-//! `getClaudeKeychainService` so the same entries are found byte-for-byte.
+//! macOS Keychain service-name derivation and serialized `security` CLI access. The naming
+//! reproduces asx's `getClaudeKeychainService` so existing entries remain discoverable.
 //!
 //! service = `"Claude Code-credentials"` when no config dir, else
 //! `"Claude Code-credentials-" + hex(sha256(configDir))[..8]`.
 
 use sha2::{Digest, Sha256};
 use std::io;
+use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
@@ -26,10 +26,17 @@ fn with_keychain_lock<T>(f: impl FnOnce() -> T) -> T {
     let _inproc = SECURITY_CLI_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     #[cfg(unix)]
     {
+        use std::os::unix::fs::OpenOptionsExt;
         use std::os::unix::io::AsRawFd;
         let dir = crate::platform::asx_config_dir();
         let _ = std::fs::create_dir_all(&dir);
-        if let Ok(file) = std::fs::OpenOptions::new().create(true).write(true).open(dir.join(".keychain.lock")) {
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(dir.join(".keychain.lock"))
+        {
             // Advisory cross-process lock; auto-released when `file`'s fd closes at scope end.
             unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
             let out = f();
@@ -59,7 +66,7 @@ pub fn current_user() -> String {
     std::env::var("USER")
         .ok()
         .filter(|s| !s.is_empty())
-        .or_else(|| {
+        .or({
             #[cfg(unix)]
             {
                 // best-effort fallback via getlogin-equivalent is not in std; USER covers macOS.
@@ -94,30 +101,57 @@ pub fn read_credential(service: &str) -> Option<String> {
 pub fn write_credential(service: &str, raw: &str) -> io::Result<()> {
     let user = current_user();
     with_keychain_lock(|| {
-        let status = Command::new("security")
-            .args(["add-generic-password", "-s", service, "-a", &user, "-w", raw, "-U"])
-            .stdin(Stdio::null())
+        // `security` documents `-w` without an argv value as its safe prompted mode. Feed the
+        // value over stdin so OAuth JSON/API keys never appear in process metadata.
+        let mut child = Command::new("security")
+            .args([
+                "add-generic-password",
+                "-s",
+                service,
+                "-a",
+                &user,
+                "-U",
+                "-w",
+            ])
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status()?;
+            .spawn()?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("security stdin was not available"))?;
+        stdin.write_all(raw.as_bytes())?;
+        stdin.write_all(b"\n")?;
+        drop(stdin);
+        let status = child.wait()?;
         if status.success() {
             Ok(())
         } else {
-            Err(io::Error::other(format!("security add-generic-password failed for {service}")))
+            Err(io::Error::other(format!(
+                "security add-generic-password failed for {service}"
+            )))
         }
     })
 }
 
-/// Delete a generic-password credential (errors ignored, matching asx).
-pub fn delete_credential(service: &str) {
+/// Delete a generic-password credential and surface failures to the caller.
+pub fn delete_credential(service: &str) -> io::Result<()> {
     let user = current_user();
     with_keychain_lock(|| {
-        let _ = Command::new("security")
+        let status = Command::new("security")
             .args(["delete-generic-password", "-s", service, "-a", &user])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status();
+            .status()?;
+        if status.success() || status.code() == Some(44) {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "security delete-generic-password failed for {service}"
+            )))
+        }
     })
 }
 
@@ -138,6 +172,9 @@ mod tests {
         assert_eq!(suffix.len(), 8);
         assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()));
         // deterministic
-        assert_eq!(s, claude_keychain_service(Some(Path::new("/some/config/dir"))));
+        assert_eq!(
+            s,
+            claude_keychain_service(Some(Path::new("/some/config/dir")))
+        );
     }
 }

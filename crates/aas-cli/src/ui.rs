@@ -63,8 +63,16 @@ pub fn hint(msg: impl Display) {
 // ---- inline string styling (stdout) ----
 
 pub fn heading(s: &str) -> String {
-    if out() { s.bold().to_string() } else { s.to_string() }
+    if out() {
+        s.bold().to_string()
+    } else {
+        s.to_string()
+    }
 }
 pub fn dim(s: &str) -> String {
-    if out() { s.dimmed().to_string() } else { s.to_string() }
+    if out() {
+        s.dimmed().to_string()
+    } else {
+        s.to_string()
+    }
 }

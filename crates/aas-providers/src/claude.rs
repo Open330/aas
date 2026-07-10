@@ -4,11 +4,13 @@
 //! rateLimitTier,expiresAt(ms)}}` or long-lived `{type:"claude-code-oauth-token",token}`.
 //! Live credential lives in the macOS Keychain (or `~/.claude/.credentials.json` off mac).
 
-use crate::common::{add_account, http_client, now_ms, set_0600, set_active};
+use crate::common::{http_client, now_ms, set_active, store_account_secret};
 use crate::RefreshOutcome;
-use aas_core::keychain::{claude_keychain_service, delete_credential, read_credential, write_credential};
+use aas_core::keychain::{
+    claude_keychain_service, delete_credential, read_credential, write_credential,
+};
 use aas_core::platform::{claude_config_dir, claude_credentials_path};
-use aas_core::secure_store::{get_secret, set_secret};
+use aas_core::secure_store::{get_secret, set_secret, write_restricted_file};
 use aas_core::usage::{Meter, Usage};
 use chrono::{SecondsFormat, TimeZone, Utc};
 use serde_json::{json, Value};
@@ -56,7 +58,11 @@ pub(crate) fn normalize_claude_code_oauth_token(input: &str) -> String {
 pub(crate) fn is_long_lived(raw: &str) -> bool {
     serde_json::from_str::<Value>(raw)
         .ok()
-        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(|s| s == LONG_LIVED_TOKEN_TYPE))
+        .and_then(|v| {
+            v.get("type")
+                .and_then(|t| t.as_str())
+                .map(|s| s == LONG_LIVED_TOKEN_TYPE)
+        })
         .unwrap_or(false)
 }
 
@@ -87,7 +93,8 @@ pub(crate) fn get_claude_code_oauth_token(raw: &str) -> Option<String> {
 }
 
 fn make_long_lived_token_credential(token: &str) -> String {
-    json!({"type": LONG_LIVED_TOKEN_TYPE, "token": normalize_claude_code_oauth_token(token)}).to_string()
+    json!({"type": LONG_LIVED_TOKEN_TYPE, "token": normalize_claude_code_oauth_token(token)})
+        .to_string()
 }
 
 /// The stored `claudeAiOauth.expiresAt` (ms) if present as a number; `None` for long-lived
@@ -103,7 +110,9 @@ pub(crate) fn claude_expires_at(raw: &str) -> Option<i64> {
 
 /// asx `isExpired`: `expiresAt < now + 60_000`.
 pub(crate) fn is_expired_at(raw: &str, now: i64) -> bool {
-    claude_expires_at(raw).map(|e| e < now + 60_000).unwrap_or(false)
+    claude_expires_at(raw)
+        .map(|e| e < now + 60_000)
+        .unwrap_or(false)
 }
 
 fn is_truthy(v: Option<&Value>) -> bool {
@@ -132,7 +141,10 @@ pub(crate) fn claude_base_info(
         let org_type = org
             .and_then(|o| o.get("organization_type"))
             .and_then(|v| v.as_str())
-            .or_else(|| org.and_then(|o| o.get("billing_type")).and_then(|v| v.as_str()))
+            .or_else(|| {
+                org.and_then(|o| o.get("billing_type"))
+                    .and_then(|v| v.as_str())
+            })
             .unwrap_or("");
         let has_max = if is_truthy(acc.and_then(|a| a.get("has_claude_max")))
             || is_truthy(org.and_then(|o| o.get("has_claude_max")))
@@ -169,9 +181,10 @@ pub(crate) fn parse_flexible_reset_ms(v: &Value) -> Option<i64> {
 /// asx claude usage windows → meters. `five_hour|fiveHour` → "5h", `seven_day|sevenDay` → "7d".
 pub(crate) fn build_claude_usage_meters(usage: &Value) -> Vec<Meter> {
     let mut meters = Vec::new();
-    for (snake, camel, label) in
-        [("five_hour", "fiveHour", "5h"), ("seven_day", "sevenDay", "7d")]
-    {
+    for (snake, camel, label) in [
+        ("five_hour", "fiveHour", "5h"),
+        ("seven_day", "sevenDay", "7d"),
+    ] {
         let Some(w) = usage.get(snake).or_else(|| usage.get(camel)) else {
             continue;
         };
@@ -189,7 +202,9 @@ pub(crate) fn build_claude_usage_meters(usage: &Value) -> Vec<Meter> {
 // ---------------------------------------------------------------------------
 
 fn scoped_config() -> bool {
-    std::env::var("CLAUDE_CONFIG_DIR").map(|v| !v.is_empty()).unwrap_or(false)
+    std::env::var("CLAUDE_CONFIG_DIR")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
 }
 
 /// asx `readCurrentCredentials`.
@@ -204,7 +219,11 @@ fn read_current_credentials() -> Option<String> {
             return std::fs::read_to_string(&file_path).ok();
         }
         let svc0 = claude_keychain_service(None);
-        for svc in [svc0.as_str(), "Claude Code - credentials", "claude-code-credentials"] {
+        for svc in [
+            svc0.as_str(),
+            "Claude Code - credentials",
+            "claude-code-credentials",
+        ] {
             if let Some(s) = read_credential(svc) {
                 return Some(s);
             }
@@ -225,12 +244,7 @@ fn write_active_credentials(raw: &str) -> anyhow::Result<()> {
         write_credential(&svc, raw)?;
         return Ok(());
     }
-    let p = claude_credentials_path();
-    if let Some(parent) = p.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&p, raw)?;
-    set_0600(&p);
+    write_restricted_file(&claude_credentials_path(), raw)?;
     Ok(())
 }
 
@@ -241,7 +255,8 @@ fn read_scoped_account_email() -> Option<String> {
     }
     let cred = claude_credentials_path();
     let dir = cred.parent()?;
-    let data: Value = serde_json::from_str(&std::fs::read_to_string(dir.join(".claude.json")).ok()?).ok()?;
+    let data: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join(".claude.json")).ok()?).ok()?;
     let oa = data.get("oauthAccount")?;
     oa.get("emailAddress")
         .and_then(|v| v.as_str())
@@ -292,8 +307,16 @@ async fn extract_claude_email(cred_json: &str) -> Option<String> {
     d.get("email_address")
         .and_then(|v| v.as_str())
         .or_else(|| d.get("email").and_then(|v| v.as_str()))
-        .or_else(|| d.get("account").and_then(|a| a.get("email_address")).and_then(|v| v.as_str()))
-        .or_else(|| d.get("account").and_then(|a| a.get("email")).and_then(|v| v.as_str()))
+        .or_else(|| {
+            d.get("account")
+                .and_then(|a| a.get("email_address"))
+                .and_then(|v| v.as_str())
+        })
+        .or_else(|| {
+            d.get("account")
+                .and_then(|a| a.get("email"))
+                .and_then(|v| v.as_str())
+        })
         .map(String::from)
 }
 
@@ -330,8 +353,14 @@ pub(crate) async fn usage(account: &str) -> Usage {
         let secs = ((until - chrono::Utc::now().timestamp_millis()) / 1000).max(0);
         return Usage {
             headline: claude_base_info(long_lived, &sub_type, &tier, None),
-            plan: if long_lived { None } else { Some(sub_type.clone()) },
-            error: Some(format!("rate limited (HTTP 429) — backing off {secs}s to recover.")),
+            plan: if long_lived {
+                None
+            } else {
+                Some(sub_type.clone())
+            },
+            error: Some(format!(
+                "rate limited (HTTP 429) — backing off {secs}s to recover."
+            )),
             ..Default::default()
         };
     }
@@ -383,12 +412,18 @@ pub(crate) async fn usage(account: &str) -> Usage {
         return Usage {
             headline,
             plan,
-            error: Some(format!("rate limited (HTTP 429) — backing off {secs}s to recover.")),
+            error: Some(format!(
+                "rate limited (HTTP 429) — backing off {secs}s to recover."
+            )),
             ..Default::default()
         };
     }
     let Some(usage_data) = usage_data else {
-        let why = if status == 0 { "network error".to_string() } else { format!("HTTP {status}") };
+        let why = if status == 0 {
+            "network error".to_string()
+        } else {
+            format!("HTTP {status}")
+        };
         return Usage {
             headline,
             plan,
@@ -407,7 +442,12 @@ pub(crate) async fn usage(account: &str) -> Usage {
         };
     }
     aas_core::backoff::clear(&backoff_key); // recovered — drop any stale backoff
-    Usage { headline, plan, meters, ..Default::default() }
+    Usage {
+        headline,
+        plan,
+        meters,
+        ..Default::default()
+    }
 }
 
 pub(crate) async fn current_credential() -> Option<String> {
@@ -449,8 +489,7 @@ pub(crate) async fn load_current(account: &str, label: Option<&str>) -> anyhow::
             );
         }
     }
-    set_secret(PROVIDER, account, &current)?;
-    add_account(PROVIDER, account, label, email)?;
+    store_account_secret(PROVIDER, account, label, email, &current)?;
     Ok(())
 }
 
@@ -458,10 +497,24 @@ pub(crate) async fn switch_to(account: &str) -> anyhow::Result<()> {
     let stored = get_secret(PROVIDER, account).ok_or_else(|| {
         anyhow::anyhow!("No credentials stored for {PROVIDER}/{account}. Use 'aas load' first.")
     })?;
+    let previous = read_current_credentials();
     if !is_long_lived(&stored) {
         write_active_credentials(&stored)?;
     }
-    set_active(PROVIDER, account)?;
+    if let Err(error) = set_active(PROVIDER, account) {
+        let rollback = if is_long_lived(&stored) {
+            Ok(())
+        } else if let Some(previous) = previous {
+            write_active_credentials(&previous).map_err(|e| std::io::Error::other(e.to_string()))
+        } else {
+            clear_current()
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))
+        };
+        anyhow::bail!(
+            "could not update active Claude marker: {error}; native rollback={rollback:?}"
+        );
+    }
     Ok(())
 }
 
@@ -477,11 +530,15 @@ pub(crate) async fn clear_current() -> anyhow::Result<()> {
             ]
         };
         for svc in services {
-            delete_credential(&svc);
+            delete_credential(&svc)?;
         }
         return Ok(());
     }
-    let _ = std::fs::remove_file(claude_credentials_path());
+    match std::fs::remove_file(claude_credentials_path()) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
     Ok(())
 }
 
@@ -493,8 +550,16 @@ pub(crate) async fn is_expired(account: &str) -> bool {
 }
 
 pub(crate) async fn refresh(account: &str) -> RefreshOutcome {
-    let fail = |m: String| RefreshOutcome { ok: false, message: m, needs_relogin: false };
-    let done = |m: String| RefreshOutcome { ok: true, message: m, needs_relogin: false };
+    let fail = |m: String| RefreshOutcome {
+        ok: false,
+        message: m,
+        needs_relogin: false,
+    };
+    let done = |m: String| RefreshOutcome {
+        ok: true,
+        message: m,
+        needs_relogin: false,
+    };
 
     let Some(raw) = get_secret(PROVIDER, account) else {
         return fail("no stored credential".into());
@@ -508,7 +573,11 @@ pub(crate) async fn refresh(account: &str) -> RefreshOutcome {
     let Some(o) = parsed.get("claudeAiOauth").cloned() else {
         return fail("stored credential is not valid JSON".into());
     };
-    let Some(refresh_token) = o.get("refreshToken").and_then(|v| v.as_str()).map(String::from) else {
+    let Some(refresh_token) = o
+        .get("refreshToken")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+    else {
         return RefreshOutcome {
             ok: false,
             message: "no refresh token stored".into(),
@@ -549,7 +618,11 @@ pub(crate) async fn refresh(account: &str) -> RefreshOutcome {
         Ok(v) => v,
         Err(e) => return fail(format!("invalid refresh response: {e}")),
     };
-    let access_token = j.get("access_token").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let access_token = j
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let new_refresh = j
         .get("refresh_token")
         .and_then(|v| v.as_str())
@@ -569,7 +642,9 @@ pub(crate) async fn refresh(account: &str) -> RefreshOutcome {
     }
 
     let mut synced = false;
-    if read_current_credentials().as_deref() == Some(raw.as_str()) && write_active_credentials(&new_raw).is_ok() {
+    if read_current_credentials().as_deref() == Some(raw.as_str())
+        && write_active_credentials(&new_raw).is_ok()
+    {
         synced = true;
     }
     let iso = Utc
@@ -577,7 +652,10 @@ pub(crate) async fn refresh(account: &str) -> RefreshOutcome {
         .single()
         .map(|d| d.to_rfc3339_opts(SecondsFormat::Millis, true))
         .unwrap_or_default();
-    done(format!("refreshed (expires {iso}){}", if synced { " [native synced]" } else { "" }))
+    done(format!(
+        "refreshed (expires {iso}){}",
+        if synced { " [native synced]" } else { "" }
+    ))
 }
 
 pub(crate) fn login_command() -> Option<Vec<String>> {
@@ -587,8 +665,7 @@ pub(crate) fn login_command() -> Option<Vec<String>> {
 pub(crate) async fn load_long_lived_token(account: &str, token: &str) -> anyhow::Result<()> {
     let raw = make_long_lived_token_credential(token);
     let email = extract_claude_email(&raw).await;
-    set_secret(PROVIDER, account, &raw)?;
-    add_account(PROVIDER, account, Some(account), email)?;
+    store_account_secret(PROVIDER, account, Some(account), email, &raw)?;
     Ok(())
 }
 
@@ -599,19 +676,31 @@ mod tests {
     #[test]
     fn oauth_token_extraction() {
         let oauth = r#"{"claudeAiOauth":{"accessToken":"acc-123","refreshToken":"ref","subscriptionType":"max","rateLimitTier":"default","expiresAt":1750000000000}}"#;
-        assert_eq!(get_claude_code_oauth_token(oauth).as_deref(), Some("acc-123"));
+        assert_eq!(
+            get_claude_code_oauth_token(oauth).as_deref(),
+            Some("acc-123")
+        );
 
         let ll = r#"{"type":"claude-code-oauth-token","token":"sk-ll-token"}"#;
-        assert_eq!(get_claude_code_oauth_token(ll).as_deref(), Some("sk-ll-token"));
+        assert_eq!(
+            get_claude_code_oauth_token(ll).as_deref(),
+            Some("sk-ll-token")
+        );
         assert!(is_long_lived(ll));
         assert!(!is_long_lived(oauth));
 
         // bare `accessToken`
         let bare = r#"{"accessToken":"top-level"}"#;
-        assert_eq!(get_claude_code_oauth_token(bare).as_deref(), Some("top-level"));
+        assert_eq!(
+            get_claude_code_oauth_token(bare).as_deref(),
+            Some("top-level")
+        );
 
         // non-JSON → returned verbatim
-        assert_eq!(get_claude_code_oauth_token("raw-token").as_deref(), Some("raw-token"));
+        assert_eq!(
+            get_claude_code_oauth_token("raw-token").as_deref(),
+            Some("raw-token")
+        );
         assert_eq!(get_claude_code_oauth_token(""), None);
     }
 
@@ -626,7 +715,10 @@ mod tests {
             normalize_claude_code_oauth_token("CLAUDE_CODE_OAUTH_TOKEN=\"sk-quoted\""),
             "sk-quoted"
         );
-        assert_eq!(normalize_claude_code_oauth_token("'sk-single'"), "sk-single");
+        assert_eq!(
+            normalize_claude_code_oauth_token("'sk-single'"),
+            "sk-single"
+        );
     }
 
     #[test]
@@ -639,7 +731,10 @@ mod tests {
         let raw2 = format!(r#"{{"claudeAiOauth":{{"expiresAt":{}}}}}"#, now + 120_000);
         assert!(!is_expired_at(&raw2, now));
         // long-lived → never expired
-        assert!(!is_expired_at(r#"{"type":"claude-code-oauth-token","token":"x"}"#, now));
+        assert!(!is_expired_at(
+            r#"{"type":"claude-code-oauth-token","token":"x"}"#,
+            now
+        ));
         // no expiresAt → not expired
         assert!(!is_expired_at(r#"{"claudeAiOauth":{}}"#, now));
     }
@@ -667,7 +762,10 @@ mod tests {
 
     #[test]
     fn reset_iso_and_ms() {
-        assert_eq!(parse_flexible_reset_ms(&json!(1750000000000i64)), Some(1750000000000));
+        assert_eq!(
+            parse_flexible_reset_ms(&json!(1750000000000i64)),
+            Some(1750000000000)
+        );
         let iso = parse_flexible_reset_ms(&json!("2026-07-06T00:00:00Z"));
         assert!(iso.is_some());
         assert!(parse_flexible_reset_ms(&json!(true)).is_none());
@@ -687,6 +785,9 @@ mod tests {
             claude_base_info(false, "max", "default", Some(&prof)),
             "subscription=max tier=default org=business has_max=yes"
         );
-        assert_eq!(claude_base_info(true, "max", "default", None), "long-lived token");
+        assert_eq!(
+            claude_base_info(true, "max", "default", None),
+            "long-lived token"
+        );
     }
 }

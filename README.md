@@ -108,7 +108,7 @@ aas export --all -o creds.json                     # …or a file (0600); scp it
 | `load [provider] [name]` | Snapshot the **currently logged-in** credential as a **system** profile (auto-scans providers if none given). |
 | `switch <provider> <name>` (alias `s`) | Make a stored account the active credential. |
 | `exec <name> [target] [args…]` (alias `e`) | Run the native CLI under a profile. If `target` ≠ the profile's provider, requests route through the local **ASX Proxy** (cross-provider). `-b` full-access bypass; cross-run share flags `-s/-i/--share/--isolate/--keep-context`; `--` passes the rest to the agent. |
-| `export [name]` `--all`, `-o <file>`, `--shell posix\|fish\|powershell` | Print shell env to use a profile in the current shell (`eval "$(aas export <name>)"`), or `--all` for a portable JSON bundle of **every account + credential** (to `-o <file>` or stdout) for host-to-host migration. |
+| `export [name]` or `export <provider> <name>` `--all`, `-o <file>`, `--shell posix\|fish\|powershell` | Print shell env to use a profile in the current shell (`eval "$(aas export <name>)"`), or `--all` for a portable JSON bundle of **every account + credential** (to `-o <file>` or stdout) for host-to-host migration. |
 | `sharing <name>` *share flags* | Show or change which state (sessions/skills/agents/hooks/settings) an isolated profile shares from the provider's home. |
 | `rename <from> <to>` | Rename an account (moves its profile home + markers). |
 | `remove [provider] <name>` (alias `rm`) | Remove a stored account. |
@@ -139,18 +139,22 @@ See [`widgets/barshelf-aas-usage/`](widgets/barshelf-aas-usage/) for details
 
 ## Status
 
-Functionally complete port of `asx` (P1–P5): storage/keychain/import, all provider adapters +
-parallel `usage`, every CLI command, same- and cross-provider `exec`, the translating proxy,
-and static-binary releases. **90 tests** across the workspace. See
+The port covers the `asx` P1–P5 surface: storage/keychain/import, provider adapters,
+parallel `usage`, account management, same- and cross-provider `exec`, the translating proxy,
+and staged static-binary releases. Rust and Swift tests, strict lint/docs checks, installer
+parsing, and portable app-bundle verification run in CI. See
 [`docs/DESIGN.md`](docs/DESIGN.md) and [`docs/PARITY_SPEC.md`](docs/PARITY_SPEC.md).
 
 ## Develop
 
 ```bash
 cargo build
-cargo test
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-targets --all-features
 ```
 
 ## License
 
-MIT
+[MIT](LICENSE). Bundled provider logos are trademarks of their respective owners and are used
+only for identification.

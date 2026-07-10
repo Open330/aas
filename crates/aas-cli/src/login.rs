@@ -2,17 +2,22 @@
 //! key, and native OAuth login into an isolated (or system) profile home.
 
 use crate::ui;
-use aas_core::naming::{derive_account_name, native_cred_file, normalize_provider_key, profile_home};
+use aas_core::naming::{
+    derive_account_name, native_cred_file, normalize_provider_key, profile_home,
+};
+use aas_core::store::AccountStore;
 use aas_providers::Provider;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Native login argv, with the provider's headless/device flag appended when requested.
 fn build_login_command(provider: Provider, device_auth: bool) -> anyhow::Result<Vec<String>> {
-    let mut cmd = provider
-        .login_command()
-        .ok_or_else(|| anyhow::anyhow!("Login flow is not supported for provider '{}'.", provider.id()))?;
+    let mut cmd = provider.login_command().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Login flow is not supported for provider '{}'.",
+            provider.id()
+        )
+    })?;
     if device_auth && provider == Provider::Codex {
         cmd.push("--device-auth".to_string());
     }
@@ -58,22 +63,24 @@ fn seed_agent_home(provider_key: &str, dir: &Path) {
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .unwrap_or_else(|| serde_json::json!({}));
     if let Some(obj) = json.as_object_mut() {
-        obj.insert("hasCompletedOnboarding".into(), serde_json::Value::Bool(true));
+        obj.insert(
+            "hasCompletedOnboarding".into(),
+            serde_json::Value::Bool(true),
+        );
     }
     if std::fs::write(&p, serde_json::to_string(&json).unwrap_or_default()).is_ok() {
         set_0600(&p);
     }
 }
 
-fn prompt(msg: &str) -> anyhow::Result<String> {
-    print!("{msg}");
-    std::io::stdout().flush()?;
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    Ok(line.trim().to_string())
+fn prompt_secret(msg: &str) -> anyhow::Result<String> {
+    Ok(rpassword::prompt_password(msg)?.trim().to_string())
 }
 
-fn run_native(cmd: &[String], env: Option<(&str, &Path)>) -> anyhow::Result<i32> {
+fn run_native(
+    cmd: &[String],
+    env: Option<(&str, &Path)>,
+) -> anyhow::Result<std::process::ExitStatus> {
     let mut c = Command::new(&cmd[0]);
     c.args(&cmd[1..]);
     if let Some((k, v)) = env {
@@ -81,7 +88,7 @@ fn run_native(cmd: &[String], env: Option<(&str, &Path)>) -> anyhow::Result<i32>
     }
     // stdio inherited by default → interactive login works.
     let status = c.status()?;
-    Ok(status.code().unwrap_or(0))
+    Ok(status)
 }
 
 async fn login_in_home(
@@ -108,9 +115,13 @@ async fn login_in_home(
     } else {
         ui::hint("a browser will open — finish the sign-in there");
     }
-    let code = run_native(&cmd, env)?;
-    if code != 0 {
-        ui::warn(format!("native login exited with code {code}"));
+    let status = run_native(&cmd, env)?;
+    if !status.success() {
+        ui::warn(match status.code() {
+            Some(code) => format!("native login exited with code {code}"),
+            None => "native login was terminated by a signal".to_string(),
+        });
+        return Ok(None);
     }
 
     // Load the newly logged-in session, with the home env var pointed at the profile home.
@@ -142,6 +153,7 @@ pub async fn run_login_flow(
     let target = name
         .map(String::from)
         .unwrap_or_else(|| derive_account_name(None, provider.id()));
+    AccountStore::open_default().validate_account_identity(provider.id(), &target)?;
 
     if device_auth && provider == Provider::Claude && !long_lived {
         ui::hint("claude has no device flow — use `--long-lived` for headless setups.");
@@ -150,15 +162,20 @@ pub async fn run_login_flow(
     // 1. Claude long-lived token (claude setup-token).
     if long_lived && provider == Provider::Claude {
         let cmd = vec!["claude".to_string(), "setup-token".to_string()];
-        ui::step(format!("Setting up a long-lived token for claude as \"{target}\""));
-        let code = run_native(&cmd, None)?;
-        if code != 0 {
-            ui::warn(format!("setup-token exited with code {code}"));
+        ui::step(format!(
+            "Setting up a long-lived token for claude as \"{target}\""
+        ));
+        let status = run_native(&cmd, None)?;
+        if !status.success() {
+            ui::warn(match status.code() {
+                Some(code) => format!("setup-token exited with code {code}"),
+                None => "setup-token was terminated by a signal".to_string(),
+            });
             return Ok(None);
         }
         let token = match std::env::var("ASX_CLAUDE_CODE_OAUTH_TOKEN") {
             Ok(t) if !t.trim().is_empty() => t.trim().to_string(),
-            _ => prompt("Paste the long-lived token (CLAUDE_CODE_OAUTH_TOKEN): ")?,
+            _ => prompt_secret("Paste the long-lived token (CLAUDE_CODE_OAUTH_TOKEN): ")?,
         };
         if token.is_empty() {
             anyhow::bail!("No token provided.");
@@ -171,7 +188,7 @@ pub async fn run_login_flow(
     if provider == Provider::Zai {
         let key_val = match std::env::var("ASX_ZAI_API_KEY") {
             Ok(k) if !k.trim().is_empty() => k.trim().to_string(),
-            _ => prompt("Paste Z.AI API key: ")?,
+            _ => prompt_secret("Paste Z.AI API key: ")?,
         };
         if key_val.is_empty() {
             anyhow::bail!("No API key provided.");
@@ -182,7 +199,10 @@ pub async fn run_login_flow(
 
     // 3. Providers without a native login flow.
     if provider.login_command().is_none() {
-        eprintln!("Login flow is not supported for provider '{}'.", provider.id());
+        eprintln!(
+            "Login flow is not supported for provider '{}'.",
+            provider.id()
+        );
         return Ok(None);
     }
 
@@ -197,4 +217,21 @@ pub async fn run_login_flow(
     seed_agent_home(&key, &dir);
     let _ = std::fs::remove_file(dir.join(native_cred_file(provider.id())));
     login_in_home(provider, &target, Some(&dir), device_auth).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_device_login_adds_headless_flag() {
+        let command = build_login_command(Provider::Codex, true).unwrap();
+        assert_eq!(command, ["codex", "login", "--device-auth"]);
+    }
+
+    #[test]
+    fn grok_login_does_not_invent_a_device_flag() {
+        let command = build_login_command(Provider::Grok, true).unwrap();
+        assert_eq!(command, ["grok", "login"]);
+    }
 }

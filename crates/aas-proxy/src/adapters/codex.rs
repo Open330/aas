@@ -20,7 +20,11 @@ fn extract_auth(cred: &str) -> (String, String) {
             .or_else(|| t.get("id_token").and_then(|v| v.as_str()))
             .unwrap_or("")
             .to_string();
-        let account = t.get("account_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let account = t
+            .get("account_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         return (token, account);
     }
     (cred.to_string(), String::new())
@@ -112,7 +116,10 @@ impl BackendAdapter for CodexBackend {
             headers: vec![
                 ("Authorization".to_string(), format!("Bearer {token}")),
                 ("chatgpt-account-id".to_string(), account),
-                ("OpenAI-Beta".to_string(), "responses=experimental".to_string()),
+                (
+                    "OpenAI-Beta".to_string(),
+                    "responses=experimental".to_string(),
+                ),
                 ("originator".to_string(), "codex_cli_rs".to_string()),
                 ("content-type".to_string(), "application/json".to_string()),
                 ("accept".to_string(), "text/event-stream".to_string()),
@@ -125,21 +132,32 @@ impl BackendAdapter for CodexBackend {
     fn parse_stream_chunk(&self, block: &str) -> Vec<CommonEvent> {
         let mut out = Vec::new();
         for line in block.split('\n') {
-            let Some(rest) = line.strip_prefix("data:") else { continue };
+            let Some(rest) = line.strip_prefix("data:") else {
+                continue;
+            };
             let payload = rest.trim();
             if payload.is_empty() || payload == "[DONE]" {
                 continue;
             }
-            let Ok(j) = serde_json::from_str::<Value>(payload) else { continue };
+            let Ok(j) = serde_json::from_str::<Value>(payload) else {
+                continue;
+            };
             let jtype = j.get("type").and_then(|v| v.as_str()).unwrap_or("");
             let output_index = j.get("output_index").and_then(|v| v.as_i64()).unwrap_or(0);
             match jtype {
                 "response.output_text.delta" => {
                     if let Some(d) = j.get("delta").and_then(|v| v.as_str()) {
-                        out.push(CommonEvent::Text { text: d.to_string() });
+                        out.push(CommonEvent::Text {
+                            text: d.to_string(),
+                        });
                     }
                 }
-                "response.output_item.added" if j.get("item").and_then(|i| i.get("type")).and_then(|v| v.as_str()) == Some("function_call") => {
+                "response.output_item.added"
+                    if j.get("item")
+                        .and_then(|i| i.get("type"))
+                        .and_then(|v| v.as_str())
+                        == Some("function_call") =>
+                {
                     let item = j.get("item").unwrap();
                     let id = item
                         .get("call_id")
@@ -154,16 +172,26 @@ impl BackendAdapter for CodexBackend {
                     out.push(CommonEvent::ToolCallDelta {
                         index: output_index,
                         id,
-                        name: item.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                        name: item
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
                         args_delta,
                     });
                 }
                 "response.function_call_arguments.delta" => {
                     if let Some(d) = j.get("delta").and_then(|v| v.as_str()) {
-                        out.push(CommonEvent::ToolCallDelta { index: output_index, id: None, name: None, args_delta: Some(d.to_string()) });
+                        out.push(CommonEvent::ToolCallDelta {
+                            index: output_index,
+                            id: None,
+                            name: None,
+                            args_delta: Some(d.to_string()),
+                        });
                     }
                 }
-                "response.completed" => out.push(CommonEvent::Done { finish_reason: Some("stop".to_string()) }),
+                "response.completed" => out.push(CommonEvent::Done {
+                    finish_reason: Some("stop".to_string()),
+                }),
                 "response.failed" | "error" => {
                     let msg = j
                         .get("response")
@@ -193,7 +221,10 @@ fn item_content_string(it: &Value) -> String {
             None => c.to_string(),
         },
         _ => match it.get("text") {
-            Some(t) if !t.is_null() => t.as_str().map(|s| s.to_string()).unwrap_or_else(|| t.to_string()),
+            Some(t) if !t.is_null() => t
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| t.to_string()),
             _ => String::new(),
         },
     }
@@ -208,7 +239,11 @@ fn responses_input_to_messages(input: &Value) -> Vec<CommonMessage> {
     let mut out: Vec<CommonMessage> = Vec::new();
     for it in &items {
         if let Some(s) = it.as_str() {
-            out.push(CommonMessage { role: "user".to_string(), content: s.to_string(), ..Default::default() });
+            out.push(CommonMessage {
+                role: "user".to_string(),
+                content: s.to_string(),
+                ..Default::default()
+            });
             continue;
         }
         if it.is_null() {
@@ -237,7 +272,11 @@ fn responses_input_to_messages(input: &Value) -> Vec<CommonMessage> {
                 out.push(CommonMessage {
                     role: "assistant".to_string(),
                     content: String::new(),
-                    tool_calls: Some(vec![CommonToolCall { id, name, arguments }]),
+                    tool_calls: Some(vec![CommonToolCall {
+                        id,
+                        name,
+                        arguments,
+                    }]),
                     ..Default::default()
                 });
             }
@@ -264,10 +303,18 @@ fn responses_input_to_messages(input: &Value) -> Vec<CommonMessage> {
             }
             _ => {
                 let raw_role = it.get("role").and_then(|v| v.as_str()).unwrap_or("user");
-                let role = if raw_role == "developer" { "system" } else { raw_role };
+                let role = if raw_role == "developer" {
+                    "system"
+                } else {
+                    raw_role
+                };
                 let content = item_content_string(it);
                 if !content.is_empty() {
-                    out.push(CommonMessage { role: role.to_string(), content, ..Default::default() });
+                    out.push(CommonMessage {
+                        role: role.to_string(),
+                        content,
+                        ..Default::default()
+                    });
                 }
             }
         }
@@ -291,10 +338,19 @@ fn parse_tools(tools: Option<&Value>) -> (Option<Vec<CommonToolDef>>, Option<Vec
             if let (Some(ns_name), Some(ns_tools)) = (ns_name, ns_tools) {
                 namespaces.push(ns_name.to_string());
                 for nt in ns_tools {
-                    let Some(nt_name) = nt.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) else { continue };
+                    let Some(nt_name) = nt
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                    else {
+                        continue;
+                    };
                     defs.push(CommonToolDef {
                         name: format!("{ns_name}__{nt_name}"),
-                        description: nt.get("description").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                        description: nt
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
                         parameters: nt.get("parameters").cloned(),
                         strict: nt.get("strict").and_then(|v| v.as_bool()),
                         builtin_type: None,
@@ -304,11 +360,23 @@ fn parse_tools(tools: Option<&Value>) -> (Option<Vec<CommonToolDef>>, Option<Vec
             }
         }
         let fnv = t.get("function").unwrap_or(t);
-        let Some(name) = fnv.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) else { continue };
-        let strict = t.get("strict").and_then(|v| v.as_bool()).or_else(|| fnv.get("strict").and_then(|v| v.as_bool()));
+        let Some(name) = fnv
+            .get("name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let strict = t
+            .get("strict")
+            .and_then(|v| v.as_bool())
+            .or_else(|| fnv.get("strict").and_then(|v| v.as_bool()));
         defs.push(CommonToolDef {
             name: name.to_string(),
-            description: fnv.get("description").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            description: fnv
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
             parameters: fnv.get("parameters").cloned(),
             strict,
             builtin_type: None,
@@ -316,7 +384,11 @@ fn parse_tools(tools: Option<&Value>) -> (Option<Vec<CommonToolDef>>, Option<Vec
     }
     (
         if defs.is_empty() { None } else { Some(defs) },
-        if namespaces.is_empty() { None } else { Some(namespaces) },
+        if namespaces.is_empty() {
+            None
+        } else {
+            Some(namespaces)
+        },
     )
 }
 
@@ -338,20 +410,37 @@ pub struct CodexAgent;
 impl AgentAdapter for CodexAgent {
     fn parse_request(&self, _path: &str, body: &Value) -> CommonRequest {
         let all = responses_input_to_messages(body.get("input").unwrap_or(&Value::Null));
-        let messages: Vec<CommonMessage> = all.iter().filter(|m| m.role != "system").cloned().collect();
-        let sys_from_input: Vec<String> = all.iter().filter(|m| m.role == "system").map(|m| m.content.clone()).collect();
+        let messages: Vec<CommonMessage> =
+            all.iter().filter(|m| m.role != "system").cloned().collect();
+        let sys_from_input: Vec<String> = all
+            .iter()
+            .filter(|m| m.role == "system")
+            .map(|m| m.content.clone())
+            .collect();
         let sys_from_input = sys_from_input.join("\n");
         let (tools, namespaces) = parse_tools(body.get("tools"));
         let mut sys_parts: Vec<String> = Vec::new();
-        if let Some(instr) = body.get("instructions").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        if let Some(instr) = body
+            .get("instructions")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
             sys_parts.push(instr.to_string());
         }
         if !sys_from_input.is_empty() {
             sys_parts.push(sys_from_input);
         }
-        let system = if sys_parts.is_empty() { None } else { Some(sys_parts.join("\n")) };
+        let system = if sys_parts.is_empty() {
+            None
+        } else {
+            Some(sys_parts.join("\n"))
+        };
         CommonRequest {
-            model: body.get("model").and_then(|v| v.as_str()).unwrap_or("codex").to_string(),
+            model: body
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("codex")
+                .to_string(),
             system,
             messages,
             tools,
@@ -361,7 +450,11 @@ impl AgentAdapter for CodexAgent {
             stream: body.get("stream").and_then(|v| v.as_bool()) != Some(false),
             max_tokens: body.get("max_output_tokens").and_then(|v| v.as_i64()),
             temperature: body.get("temperature").and_then(|v| v.as_f64()),
-            reasoning_effort: body.get("reasoning").and_then(|r| r.get("effort")).and_then(|v| v.as_str()).map(|s| s.to_string()),
+            reasoning_effort: body
+                .get("reasoning")
+                .and_then(|r| r.get("effort"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
         }
     }
 
@@ -422,13 +515,29 @@ impl AgentAdapter for CodexAgent {
                 );
                 out
             }
-            CommonEvent::ToolCall { id, name, arguments } => {
+            CommonEvent::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
                 out += &close_text!();
                 let idx = ctx.next_index;
                 ctx.next_index += 1;
-                let item_id = if id.is_empty() { format!("fc_{idx}") } else { format!("fc_{id}") };
-                let call_id = if id.is_empty() { item_id.clone() } else { id.clone() };
-                let args = if arguments.is_empty() { "{}".to_string() } else { arguments.clone() };
+                let item_id = if id.is_empty() {
+                    format!("fc_{idx}")
+                } else {
+                    format!("fc_{id}")
+                };
+                let call_id = if id.is_empty() {
+                    item_id.clone()
+                } else {
+                    id.clone()
+                };
+                let args = if arguments.is_empty() {
+                    "{}".to_string()
+                } else {
+                    arguments.clone()
+                };
                 let (name, namespace) = split_namespaced(name, ctx.tool_namespaces.as_ref());
                 let mut item = Map::new();
                 item.insert("id".to_string(), json!(item_id));
@@ -443,10 +552,22 @@ impl AgentAdapter for CodexAgent {
                 ctx.items.push(item_full.clone());
                 let mut added_item = item.clone();
                 added_item.insert("arguments".to_string(), json!(""));
-                out += &resp("response.output_item.added", &json!({ "type": "response.output_item.added", "output_index": idx, "item": Value::Object(added_item) }));
-                out += &resp("response.function_call_arguments.delta", &json!({ "type": "response.function_call_arguments.delta", "item_id": item_id, "output_index": idx, "delta": args }));
-                out += &resp("response.function_call_arguments.done", &json!({ "type": "response.function_call_arguments.done", "item_id": item_id, "output_index": idx, "arguments": args }));
-                out += &resp("response.output_item.done", &json!({ "type": "response.output_item.done", "output_index": idx, "item": item_full }));
+                out += &resp(
+                    "response.output_item.added",
+                    &json!({ "type": "response.output_item.added", "output_index": idx, "item": Value::Object(added_item) }),
+                );
+                out += &resp(
+                    "response.function_call_arguments.delta",
+                    &json!({ "type": "response.function_call_arguments.delta", "item_id": item_id, "output_index": idx, "delta": args }),
+                );
+                out += &resp(
+                    "response.function_call_arguments.done",
+                    &json!({ "type": "response.function_call_arguments.done", "item_id": item_id, "output_index": idx, "arguments": args }),
+                );
+                out += &resp(
+                    "response.output_item.done",
+                    &json!({ "type": "response.output_item.done", "output_index": idx, "item": item_full }),
+                );
                 out
             }
             other => {
@@ -482,7 +603,14 @@ impl AgentAdapter for CodexAgent {
             if let Some(ns) = namespace {
                 item.insert("namespace".to_string(), json!(ns));
             }
-            item.insert("arguments".to_string(), json!(if tc.arguments.is_empty() { "{}".to_string() } else { tc.arguments.clone() }));
+            item.insert(
+                "arguments".to_string(),
+                json!(if tc.arguments.is_empty() {
+                    "{}".to_string()
+                } else {
+                    tc.arguments.clone()
+                }),
+            );
             output.push(Value::Object(item));
         }
         if output.is_empty() {
@@ -510,7 +638,13 @@ fn reasoning_levels() -> Value {
 }
 
 /// Full codex ModelInfo (codex 0.142.x deserializes GET /models into `{ models: ModelInfo[] }`).
-pub fn codex_model_info(slug: &str, priority: i64, effort: Option<&str>, provider: Option<&str>, hidden: Option<bool>) -> Value {
+pub fn codex_model_info(
+    slug: &str,
+    priority: i64,
+    effort: Option<&str>,
+    provider: Option<&str>,
+    hidden: Option<bool>,
+) -> Value {
     let mut m = json!({
         "slug": slug,
         "display_name": slug,

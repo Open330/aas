@@ -5,12 +5,12 @@
 //! binary via the `codex doctor --summary` trick (the profile home *is* that account's
 //! `CODEX_HOME`, so the tokens refresh in place).
 
-use crate::common::{add_account, http_client, now_ms, set_0600, set_active, value_display};
+use crate::common::{http_client, now_ms, set_active, store_account_secret, value_display};
 use crate::RefreshOutcome;
 use aas_core::jwt::decode_jwt_claims;
 use aas_core::naming::profile_home;
 use aas_core::platform::codex_auth_path;
-use aas_core::secure_store::{get_secret, set_secret};
+use aas_core::secure_store::{get_secret, write_restricted_file};
 use aas_core::usage::{Meter, Usage};
 use serde_json::Value;
 use std::path::Path;
@@ -26,10 +26,17 @@ const PROVIDER: &str = "codex";
 /// asx `extractCodexEmail`: `email` else `jwt(id_token).email|email_address`.
 pub(crate) fn extract_codex_email(auth_json: &str) -> Option<String> {
     let data: Value = serde_json::from_str(auth_json).ok()?;
-    if let Some(e) = data.get("email").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+    if let Some(e) = data
+        .get("email")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         return Some(e.to_string());
     }
-    let id_token = data.get("tokens").and_then(|t| t.get("id_token")).and_then(|v| v.as_str())?;
+    let id_token = data
+        .get("tokens")
+        .and_then(|t| t.get("id_token"))
+        .and_then(|v| v.as_str())?;
     let claims = decode_jwt_claims(id_token)?;
     claims
         .get("email")
@@ -39,7 +46,9 @@ pub(crate) fn extract_codex_email(auth_json: &str) -> Option<String> {
 }
 
 /// asx `extractPlanFromIdToken`: `(plan_type, active_until)` from the OpenAI auth claim.
-pub(crate) fn extract_plan_from_id_token(id_token: &str) -> Option<(Option<String>, Option<String>)> {
+pub(crate) fn extract_plan_from_id_token(
+    id_token: &str,
+) -> Option<(Option<String>, Option<String>)> {
     let claims = decode_jwt_claims(id_token)?;
     let auth = claims.get("https://api.openai.com/auth");
     let plan = auth
@@ -82,7 +91,9 @@ pub(crate) fn codex_access_exp_ms(raw: &str) -> Option<i64> {
 }
 
 pub(crate) fn is_expired_at(raw: &str, now: i64) -> bool {
-    codex_access_exp_ms(raw).map(|e| e < now + 60_000).unwrap_or(false)
+    codex_access_exp_ms(raw)
+        .map(|e| e < now + 60_000)
+        .unwrap_or(false)
 }
 
 fn codex_account_id(data: &Value) -> Option<String> {
@@ -99,7 +110,9 @@ pub(crate) fn parse_codex_usage(
     id_token: Option<&str>,
     now: i64,
 ) -> (String, Option<String>, Vec<Meter>) {
-    let rl = payload.get("rate_limit").or_else(|| payload.get("rate_limits"));
+    let rl = payload
+        .get("rate_limit")
+        .or_else(|| payload.get("rate_limits"));
     let primary = rl.and_then(|r| r.get("primary_window").or_else(|| r.get("primary")));
     let secondary = rl.and_then(|r| r.get("secondary_window").or_else(|| r.get("secondary")));
 
@@ -107,8 +120,16 @@ pub(crate) fn parse_codex_usage(
         .get("plan_type")
         .and_then(|v| v.as_str())
         .map(String::from)
-        .or_else(|| rl.and_then(|r| r.get("plan_type")).and_then(|v| v.as_str()).map(String::from))
-        .or_else(|| id_token.and_then(extract_plan_from_id_token).and_then(|(p, _)| p));
+        .or_else(|| {
+            rl.and_then(|r| r.get("plan_type"))
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
+        .or_else(|| {
+            id_token
+                .and_then(extract_plan_from_id_token)
+                .and_then(|(p, _)| p)
+        });
 
     let headline = match &plan_type {
         Some(p) => format!("plan={p}"),
@@ -137,13 +158,9 @@ fn read_codex_auth_native() -> Option<String> {
     std::fs::read_to_string(codex_auth_path()).ok()
 }
 
-fn write_codex_auth_native(raw: &str) {
+fn write_codex_auth_native(raw: &str) -> std::io::Result<()> {
     let p = codex_auth_path();
-    if let Some(parent) = p.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(&p, raw);
-    set_0600(&p);
+    write_restricted_file(&p, raw)
 }
 
 /// Run `codex <args>` with `CODEX_HOME` set, killing it after `timeout_secs`. Returns whether
@@ -185,17 +202,22 @@ fn codex_native_refresh_blocking(account: &str) -> bool {
     let home = profile_home(PROVIDER, account);
     let auth_path = home.join("auth.json");
 
-    if !run_codex_command(&home, &["doctor", "--summary"], 20) {
-        let _ = run_codex_command(&home, &["login", "status"], 8);
+    let command_succeeded = run_codex_command(&home, &["doctor", "--summary"], 20)
+        || run_codex_command(&home, &["login", "status"], 8);
+    if !command_succeeded {
+        return false;
     }
 
     let Some(fresh) = std::fs::read_to_string(&auth_path).ok() else {
         return false;
     };
-    let email = extract_codex_email(&fresh);
-    let _ = add_account(PROVIDER, account, Some(account), email);
-    if read_codex_auth_native().as_deref() == Some(stored.as_str()) {
-        write_codex_auth_native(&fresh);
+    if fresh == stored {
+        return false;
+    }
+    if read_codex_auth_native().as_deref() == Some(stored.as_str())
+        && write_codex_auth_native(&fresh).is_err()
+    {
+        return false;
     }
     true
 }
@@ -223,14 +245,31 @@ async fn fetch_codex_usage(token: &str, account_id: Option<&str>, data: &Value) 
             let status = res.status().as_u16();
             if !(200..300).contains(&status) {
                 let auth_fail = status == 401 || status == 403;
-                return (Usage::error("codex", format!("live usage fetch failed: {status}")), auth_fail);
+                return (
+                    Usage::error("codex", format!("live usage fetch failed: {status}")),
+                    auth_fail,
+                );
             }
             let payload = res.json::<Value>().await.unwrap_or(Value::Null);
-            let id_token = data.get("tokens").and_then(|t| t.get("id_token")).and_then(|v| v.as_str());
+            let id_token = data
+                .get("tokens")
+                .and_then(|t| t.get("id_token"))
+                .and_then(|v| v.as_str());
             let (headline, plan, meters) = parse_codex_usage(&payload, id_token, now_ms());
-            (Usage { headline, plan, meters, ..Default::default() }, false)
+            (
+                Usage {
+                    headline,
+                    plan,
+                    meters,
+                    ..Default::default()
+                },
+                false,
+            )
         }
-        Err(_) => (Usage::error("codex", "live usage fetch failed: network error"), false),
+        Err(_) => (
+            Usage::error("codex", "live usage fetch failed: network error"),
+            false,
+        ),
     }
 }
 
@@ -255,7 +294,10 @@ pub(crate) async fn usage(account: &str) -> Usage {
 
     let Some(token) = token else {
         // No access token → best-effort plan info from the id_token.
-        let id_token = data.get("tokens").and_then(|t| t.get("id_token")).and_then(|v| v.as_str());
+        let id_token = data
+            .get("tokens")
+            .and_then(|t| t.get("id_token"))
+            .and_then(|v| v.as_str());
         if let Some(idt) = id_token {
             if let Some((plan, until)) = extract_plan_from_id_token(idt) {
                 let p = plan.clone().unwrap_or_else(|| "unknown".into());
@@ -279,8 +321,10 @@ pub(crate) async fn usage(account: &str) -> Usage {
     if auth_fail && attempt_codex_native_refresh(account).await {
         if let Some(r2) = get_secret(PROVIDER, account) {
             if let Ok(d2) = serde_json::from_str::<Value>(&r2) {
-                if let Some(t2) =
-                    d2.get("tokens").and_then(|t| t.get("access_token")).and_then(|v| v.as_str())
+                if let Some(t2) = d2
+                    .get("tokens")
+                    .and_then(|t| t.get("access_token"))
+                    .and_then(|v| v.as_str())
                 {
                     let aid2 = codex_account_id(&d2);
                     let (retry, _) = fetch_codex_usage(t2, aid2.as_deref(), &d2).await;
@@ -304,21 +348,36 @@ pub(crate) async fn load_current(account: &str, label: Option<&str>) -> anyhow::
     let cur = read_codex_auth_native()
         .ok_or_else(|| anyhow::anyhow!("No ~/.codex/auth.json found. Login with `codex` first."))?;
     let email = extract_codex_email(&cur);
-    set_secret(PROVIDER, account, &cur)?;
-    add_account(PROVIDER, account, label, email)?;
+    store_account_secret(PROVIDER, account, label, email, &cur)?;
     Ok(())
 }
 
 pub(crate) async fn switch_to(account: &str) -> anyhow::Result<()> {
     let s = get_secret(PROVIDER, account).ok_or_else(|| anyhow::anyhow!("Account not found"))?;
-    write_codex_auth_native(&s);
-    set_active(PROVIDER, account)?;
+    let previous = read_codex_auth_native();
+    write_codex_auth_native(&s)?;
+    if let Err(error) = set_active(PROVIDER, account) {
+        let rollback = match previous {
+            Some(previous) => write_codex_auth_native(&previous),
+            None => match std::fs::remove_file(codex_auth_path()) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e),
+            },
+        };
+        anyhow::bail!(
+            "could not update active Codex marker: {error}; native rollback={rollback:?}"
+        );
+    }
     Ok(())
 }
 
 pub(crate) async fn clear_current() -> anyhow::Result<()> {
-    let _ = std::fs::remove_file(codex_auth_path());
-    Ok(())
+    match std::fs::remove_file(codex_auth_path()) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(crate) async fn is_expired(account: &str) -> bool {
@@ -330,9 +389,17 @@ pub(crate) async fn is_expired(account: &str) -> bool {
 
 pub(crate) async fn refresh(account: &str) -> RefreshOutcome {
     if attempt_codex_native_refresh(account).await {
-        RefreshOutcome { ok: true, message: "refreshed via native codex".into(), needs_relogin: false }
+        RefreshOutcome {
+            ok: true,
+            message: "refreshed via native codex".into(),
+            needs_relogin: false,
+        }
     } else {
-        RefreshOutcome { ok: false, message: "native refresh failed".into(), needs_relogin: true }
+        RefreshOutcome {
+            ok: false,
+            message: "native refresh failed".into(),
+            needs_relogin: true,
+        }
     }
 }
 
@@ -348,8 +415,8 @@ mod tests {
 
     fn make_jwt(payload: &Value) -> String {
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"{\"alg\":\"none\"}");
-        let body =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(payload).unwrap());
+        let body = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(payload).unwrap());
         format!("{header}.{body}.sig")
     }
 
@@ -381,7 +448,10 @@ mod tests {
     #[test]
     fn reset_absolute_and_relative() {
         let now = 1_000_000_000_000i64;
-        assert_eq!(codex_reset_ms(&json!({"reset_at": 1700}), now), Some(1_700_000));
+        assert_eq!(
+            codex_reset_ms(&json!({"reset_at": 1700}), now),
+            Some(1_700_000)
+        );
         assert_eq!(
             codex_reset_ms(&json!({"reset_after_seconds": 3600}), now),
             Some(now + 3_600_000)

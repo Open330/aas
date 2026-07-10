@@ -37,11 +37,14 @@ case "$os" in
 esac
 
 asset="${BIN}-${target}.tar.gz"
+checksum_asset="${BIN}-${target}.sha256"
 version="${AAS_VERSION:-latest}"
 if [ "$version" = "latest" ]; then
   url="https://github.com/${REPO}/releases/latest/download/${asset}"
+  checksum_url="https://github.com/${REPO}/releases/latest/download/${checksum_asset}"
 else
   url="https://github.com/${REPO}/releases/download/${version}/${asset}"
+  checksum_url="https://github.com/${REPO}/releases/download/${version}/${checksum_asset}"
 fi
 
 # Pick an install dir on PATH (writable), preferring user-local.
@@ -55,7 +58,8 @@ fi
 mkdir -p "$bindir"
 
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+stage="$bindir/.${BIN}.$$.tmp"
+trap 'rm -rf "$tmp"; rm -f "$stage"' EXIT HUP INT TERM
 
 log "Downloading $asset ..."
 if have curl; then
@@ -66,17 +70,34 @@ else
   die "need curl or wget"
 fi
 
+log "Downloading $checksum_asset ..."
+if have curl; then
+  curl -fsSL "$checksum_url" -o "$tmp/$checksum_asset" || die "checksum download failed: $checksum_url"
+else
+  wget -qO "$tmp/$checksum_asset" "$checksum_url" || die "checksum download failed: $checksum_url"
+fi
+
+if have sha256sum; then
+  (cd "$tmp" && sha256sum -c "$checksum_asset") || die "checksum verification failed"
+elif have shasum; then
+  (cd "$tmp" && shasum -a 256 -c "$checksum_asset") || die "checksum verification failed"
+else
+  die "need sha256sum or shasum to verify the release"
+fi
+
 tar -xzf "$tmp/$asset" -C "$tmp" || die "extract failed"
 # archive may contain the bare binary or a dir; find it.
 binpath="$(find "$tmp" -type f -name "$BIN" -perm -u+x 2>/dev/null | head -n1)"
 [ -z "$binpath" ] && binpath="$(find "$tmp" -type f -name "$BIN" | head -n1)"
 [ -z "$binpath" ] && die "binary '$BIN' not found in archive"
 
-install -m 0755 "$binpath" "$bindir/$BIN" 2>/dev/null || { cp "$binpath" "$bindir/$BIN"; chmod 0755 "$bindir/$BIN"; }
+install -m 0755 "$binpath" "$stage" 2>/dev/null || { cp "$binpath" "$stage"; chmod 0755 "$stage"; }
+"$stage" --version >&2 || die "downloaded binary failed its execution check"
+mv -f "$stage" "$bindir/$BIN" || die "could not replace $bindir/$BIN"
 
 log "Installed $BIN -> $bindir/$BIN"
 case ":$PATH:" in
   *":$bindir:"*) ;;
   *) log "note: $bindir is not on your PATH — add:  export PATH=\"$bindir:\$PATH\"" ;;
 esac
-"$bindir/$BIN" --version >&2 || true
+"$bindir/$BIN" --version >&2 || die "installed binary failed its execution check"

@@ -2,7 +2,7 @@
 //! and structured [`Usage`]. Ported from asx `src/providers/*`. See `docs/PARITY_SPEC.md` §F.
 //!
 //! Unlike asx (which returns a preformatted color string), `usage()` returns structured
-//! [`Usage`]/[`Meter`] data so the CLI can render bars/tables/colors and fan out `list -u`.
+//! [`Usage`]/[`aas_core::usage::Meter`] data so the CLI can render bars/tables/colors and fan out `list -u`.
 
 use aas_core::naming::normalize_provider;
 use aas_core::usage::Usage;
@@ -50,7 +50,13 @@ pub fn get_adapter(name: &str) -> Option<Provider> {
 
 /// asx `listKnownProviders()` order: `[claude, codex, zai, grok, cursor]`.
 pub fn all_providers() -> [Provider; 5] {
-    [Provider::Claude, Provider::Codex, Provider::Zai, Provider::Grok, Provider::Cursor]
+    [
+        Provider::Claude,
+        Provider::Codex,
+        Provider::Zai,
+        Provider::Grok,
+        Provider::Cursor,
+    ]
 }
 
 impl Provider {
@@ -207,7 +213,13 @@ mod tests {
 
     #[tokio::test]
     async fn long_lived_and_key_login_are_provider_gated() {
-        assert!(Provider::Codex.load_long_lived_token("x", "t").await.is_err());
-        assert!(Provider::Claude.validate_and_store_key("x", "k").await.is_err());
+        assert!(Provider::Codex
+            .load_long_lived_token("x", "t")
+            .await
+            .is_err());
+        assert!(Provider::Claude
+            .validate_and_store_key("x", "k")
+            .await
+            .is_err());
     }
 }
