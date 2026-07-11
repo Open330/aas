@@ -2,8 +2,9 @@
 //!
 //! Lifts what used to be inlined in `aas-cli`'s `cmd_list` so both the CLI table and the
 //! menubar app hit one code path — refresh expired creds, then fetch every account's
-//! [`Usage`] concurrently, preserving input order (provider order, then store order).
+//! [`Usage`] concurrently, preserving the requested deterministic display order.
 
+use aas_core::model::{sort_accounts, AccountSort};
 use aas_core::store::AccountStore;
 use aas_core::usage::Usage;
 
@@ -62,21 +63,31 @@ pub fn resolve_scope(
 /// Live usage for every stored account (optionally scoped by `filter`), fetched in parallel.
 ///
 /// Tasks are spawned up front and awaited in order, so the network calls overlap while the
-/// returned `Vec` stays in a stable, deterministic order.
+/// returned `Vec` stays in provider-registry order, then account-name order.
 pub async fn snapshot(
     store: &AccountStore,
     filter: Option<&str>,
+) -> anyhow::Result<Vec<AccountUsage>> {
+    snapshot_sorted(store, filter, AccountSort::Name).await
+}
+
+/// [`snapshot`] with an explicit per-provider account order.
+pub async fn snapshot_sorted(
+    store: &AccountStore,
+    filter: Option<&str>,
+    sort: AccountSort,
 ) -> anyhow::Result<Vec<AccountUsage>> {
     let (provs, single_name) = resolve_scope(store, filter)?;
 
     let mut pending: Vec<PendingUsage> = Vec::new();
     for p in provs {
         let active = store.get_active(p.id())?;
-        let accts: Vec<_> = store
+        let mut accts: Vec<_> = store
             .list(Some(p.id()))?
             .into_iter()
             .filter(|a| single_name.as_ref().is_none_or(|n| &a.name == n))
             .collect();
+        sort_accounts(&mut accts, sort);
         for a in accts {
             let is_active = active.as_deref() == Some(a.name.as_str());
             let task_name = a.name.clone();

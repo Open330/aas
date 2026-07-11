@@ -14,7 +14,7 @@ mod cursor;
 mod key_adapter;
 mod snapshot;
 
-pub use snapshot::{resolve_scope, snapshot, AccountUsage};
+pub use snapshot::{resolve_scope, snapshot, snapshot_sorted, AccountUsage};
 
 /// The five adapters the CLI drives. `Grok`/`Zai` share `key_adapter`; `Cursor` is a marker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

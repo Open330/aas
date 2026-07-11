@@ -7,14 +7,14 @@ mod login;
 mod render;
 mod ui;
 
-use aas_core::model::ProfileType;
+use aas_core::model::{sort_accounts, AccountSort, ProfileType};
 use aas_core::naming::{normalize_provider, normalize_provider_key};
 use aas_core::secure_store;
 use aas_core::share::{describe_share, resolve_share_selection, ShareOpts};
 use aas_core::store::AccountStore;
 use aas_providers::{all_providers, get_adapter, Provider};
 use clap::builder::styling::{AnsiColor, Styles};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use futures_util::future::join_all;
 use render::UsageRow;
 use std::collections::HashMap;
@@ -75,6 +75,27 @@ impl ShareArgs {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum SortMode {
+    /// Account name, case-insensitive (default).
+    #[default]
+    Name,
+    /// Account registration time, oldest first.
+    Added,
+    /// Preserve the accounts.json array order.
+    Stored,
+}
+
+impl From<SortMode> for AccountSort {
+    fn from(value: SortMode) -> Self {
+        match value {
+            SortMode::Name => Self::Name,
+            SortMode::Added => Self::Added,
+            SortMode::Stored => Self::Stored,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// List accounts per provider (or all). `-u` live usage table, `-d` dump credentials.
@@ -85,6 +106,9 @@ enum Command {
         usage: bool,
         #[arg(short, long)]
         debug: bool,
+        /// Account order within each provider.
+        #[arg(long, value_enum, default_value_t)]
+        sort: SortMode,
     },
     /// Live usage table for every account (shorthand for `list -u`).
     #[command(visible_alias = "u")]
@@ -93,6 +117,9 @@ enum Command {
         /// Emit machine-readable JSON (for aas-bar and other integrations).
         #[arg(long)]
         json: bool,
+        /// Account order within each provider.
+        #[arg(long, value_enum, default_value_t)]
+        sort: SortMode,
     },
     /// Show asx-tracked active account(s).
     Status { provider: Option<String> },
@@ -196,12 +223,17 @@ async fn main() {
             provider,
             usage,
             debug,
-        } => cmd_list(&store, provider.as_deref(), usage, debug).await,
-        Command::Usage { provider, json } => {
+            sort,
+        } => cmd_list(&store, provider.as_deref(), usage, debug, sort.into()).await,
+        Command::Usage {
+            provider,
+            json,
+            sort,
+        } => {
             if json {
-                cmd_usage_json(&store, provider.as_deref()).await
+                cmd_usage_json(&store, provider.as_deref(), sort.into()).await
             } else {
-                cmd_list(&store, provider.as_deref(), true, false).await
+                cmd_list(&store, provider.as_deref(), true, false, sort.into()).await
             }
         }
         Command::Status { provider } => cmd_status(&store, provider.as_deref()),
@@ -309,13 +341,14 @@ async fn cmd_list(
     provider: Option<&str>,
     usage: bool,
     debug: bool,
+    sort: AccountSort,
 ) -> anyhow::Result<()> {
     let (provs, single_name) = aas_providers::resolve_scope(store, provider)?;
     let live = live_credentials(&provs).await;
 
     if usage {
         // Shared fetch path (also used by aas-bar): parallel usage for every account.
-        let items = aas_providers::snapshot(store, provider).await?;
+        let items = aas_providers::snapshot_sorted(store, provider, sort).await?;
         let rows: Vec<UsageRow> = items
             .into_iter()
             .map(|it| {
@@ -343,11 +376,12 @@ async fn cmd_list(
     // `-d` keeps a plain text dump (raw credentials don't belong in a table).
     if debug {
         for p in &provs {
-            let accts: Vec<_> = store
+            let mut accts: Vec<_> = store
                 .list(Some(p.id()))?
                 .into_iter()
                 .filter(|a| single_name.as_ref().is_none_or(|n| &a.name == n))
                 .collect();
+            sort_accounts(&mut accts, sort);
             if accts.is_empty() {
                 continue;
             }
@@ -365,11 +399,12 @@ async fn cmd_list(
     let mut rows: Vec<render::ListRow> = Vec::new();
     let mut named_empty = false;
     for p in &provs {
-        let accts: Vec<_> = store
+        let mut accts: Vec<_> = store
             .list(Some(p.id()))?
             .into_iter()
             .filter(|a| single_name.as_ref().is_none_or(|n| &a.name == n))
             .collect();
+        sort_accounts(&mut accts, sort);
         if accts.is_empty() {
             if provider.is_some() && single_name.is_none() {
                 named_empty = true;
@@ -420,8 +455,12 @@ async fn cmd_list(
 /// Machine-readable usage for aas-bar / integrations: the same parallel fetch as the table,
 /// serialized as a typed `{"accounts":[{provider,name,email,active,plan,planLabel,headline,
 /// error,notes,meters:[…]}]}` contract.
-async fn cmd_usage_json(store: &AccountStore, provider: Option<&str>) -> anyhow::Result<()> {
-    let items = aas_providers::snapshot(store, provider).await?;
+async fn cmd_usage_json(
+    store: &AccountStore,
+    provider: Option<&str>,
+    sort: AccountSort,
+) -> anyhow::Result<()> {
+    let items = aas_providers::snapshot_sorted(store, provider, sort).await?;
     println!("{}", serde_json::to_string(&usage_json_response(&items))?);
     Ok(())
 }
@@ -901,6 +940,38 @@ mod tests {
             }
             _ => panic!("expected two-positional export"),
         }
+    }
+
+    #[test]
+    fn account_sort_defaults_to_name_and_accepts_alternatives() {
+        let parsed = Cli::try_parse_from(["aas", "list"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::List {
+                sort: SortMode::Name,
+                ..
+            }
+        ));
+
+        let parsed = Cli::try_parse_from(["aas", "usage", "--sort", "stored", "--json"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::Usage {
+                sort: SortMode::Stored,
+                json: true,
+                ..
+            }
+        ));
+
+        let parsed = Cli::try_parse_from(["aas", "list", "--sort", "added", "-u"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::List {
+                sort: SortMode::Added,
+                usage: true,
+                ..
+            }
+        ));
     }
 
     #[test]

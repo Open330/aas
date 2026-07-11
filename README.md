@@ -108,8 +108,8 @@ ssh -t jiun-mini 'aas import ~/aas-vault.age'
 
 | Command | Description |
 |---|---|
-| `list [provider]` (alias `ls`) `-u`,`-d` | List accounts per provider. `-u` shows the live usage table; `-d` dumps stored credentials. |
-| `usage [provider]` (alias `u`) | Live usage table for every account (shorthand for `list -u`). |
+| `list [provider]` (alias `ls`) `-u`,`-d`, `--sort name\|added\|stored` | List accounts per provider. The default is provider-registry order then account name; `stored` preserves the `accounts.json` array order. `-u` shows live usage; `-d` dumps stored credentials. |
+| `usage [provider]` (alias `u`) `--sort name\|added\|stored` | Live usage table for every account (shorthand for `list -u`), using the same deterministic order. |
 | `status [provider]` | Show the active account per provider. |
 | `login [provider] [name]` `--long-lived`, `--device-auth`/`--headless`, *share flags* | Login and store a new **isolated** profile. `--long-lived` uses Claude's `setup-token`; `--device-auth` uses a browserless device-code flow. |
 | `load [provider] [name]` | Snapshot the **currently logged-in** credential as a **system** profile (auto-scans providers if none given). |
