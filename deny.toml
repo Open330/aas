@@ -1,5 +1,11 @@
 [advisories]
 yanked = "deny"
+ignore = [
+    # Transitive build-time proc-macro dependency of age 0.11.3 via i18n-embed-fl.
+    # The advisory is maintenance-status-only (no vulnerability), and age has no
+    # upstream release that removes it yet. Revisit when age publishes an update.
+    { id = "RUSTSEC-2026-0173", reason = "transitive build-only dependency; no safe upstream upgrade is available" },
+]
 
 [licenses]
 confidence-threshold = 0.8
