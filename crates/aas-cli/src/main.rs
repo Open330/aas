@@ -103,17 +103,23 @@ enum Command {
         name: Option<String>,
         /// Optional account name for the `export <provider> <account>` form.
         account: Option<String>,
-        /// Export every account + credential as a JSON bundle (for `aas import`).
+        /// Export every account + credential as a portable bundle (for `aas import`).
         #[arg(short = 'a', long)]
         all: bool,
+        /// Encrypt the portable bundle with an age/scrypt passphrase.
+        #[arg(long, visible_alias = "encrypted")]
+        vault: bool,
         #[arg(long, value_enum, default_value_t = export::Shell::Posix)]
         shell: export::Shell,
         /// Write the bundle to a file (0600) instead of stdout.
         #[arg(short = 'o', long)]
         out: Option<std::path::PathBuf>,
     },
-    /// Adopt existing asx state, or restore a bundle from `aas export --all` (file, or `-` for stdin).
-    Import { file: Option<String> },
+    /// Adopt existing asx state, or restore a JSON/encrypted vault bundle (file, or `-` for stdin).
+    Import {
+        /// Bundle path; encrypted age vaults are detected automatically.
+        file: Option<String>,
+    },
     /// Snapshot the live credential as a system profile.
     Load {
         provider: Option<String>,
@@ -203,9 +209,10 @@ async fn main() {
             name,
             account,
             all,
+            vault,
             shell,
             out,
-        } => export::run(&store, name, account, all, shell, out),
+        } => export::run(&store, name, account, all, vault, shell, out),
         Command::Import { file } => cmd_import(file.as_deref()),
         Command::Load {
             provider,
@@ -523,13 +530,25 @@ fn cmd_import(file: Option<&str>) -> anyhow::Result<()> {
     // Restore a bundle produced by `aas export --all` (a file, or `-` for stdin).
     let data = if src == "-" {
         use std::io::Read;
-        let mut s = String::new();
-        std::io::stdin().read_to_string(&mut s)?;
-        s
+        let mut bytes = Vec::new();
+        std::io::stdin().read_to_end(&mut bytes)?;
+        bytes
     } else {
-        std::fs::read_to_string(src)?
+        std::fs::read(src)?
     };
-    let bundle: aas_import::Bundle = serde_json::from_str(&data)?;
+    let bundle: aas_import::Bundle = if aas_import::is_encrypted_bundle(&data) {
+        let passphrase = match std::env::var("AAS_VAULT_PASSPHRASE") {
+            Ok(value) if !value.is_empty() => value,
+            Ok(_) => anyhow::bail!("AAS_VAULT_PASSPHRASE cannot be empty"),
+            Err(_) => rpassword::prompt_password("Vault passphrase: ")?,
+        };
+        aas_import::decrypt_bundle(&data, &passphrase)?
+    } else {
+        serde_json::from_slice(&data)?
+    };
+    if bundle.version != 1 {
+        anyhow::bail!("unsupported bundle version: {}", bundle.version);
+    }
     let report = aas_import::import_bundle(&bundle);
     ui::success(format!(
         "Imported {} accounts, {} credentials",

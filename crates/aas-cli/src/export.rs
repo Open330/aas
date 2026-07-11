@@ -10,7 +10,7 @@ use aas_core::model::ProfileType;
 use aas_core::naming::{normalize_provider_key, profile_home};
 use aas_core::secure_store;
 use aas_core::store::AccountStore;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, Default)]
@@ -143,24 +143,56 @@ fn set_0600(p: &Path) {
 #[cfg(not(unix))]
 fn set_0600(_p: &Path) {}
 
-/// Export every account + credential as a portable JSON bundle (for host-to-host migration).
-fn export_all(out: Option<&Path>) -> anyhow::Result<()> {
+fn vault_passphrase() -> anyhow::Result<String> {
+    if let Ok(passphrase) = std::env::var("AAS_VAULT_PASSPHRASE") {
+        if passphrase.is_empty() {
+            anyhow::bail!("AAS_VAULT_PASSPHRASE cannot be empty");
+        }
+        return Ok(passphrase);
+    }
+    let first = rpassword::prompt_password("Vault passphrase: ")?;
+    if first.is_empty() {
+        anyhow::bail!("vault passphrase cannot be empty");
+    }
+    let second = rpassword::prompt_password("Confirm passphrase: ")?;
+    if first != second {
+        anyhow::bail!("vault passphrases do not match");
+    }
+    Ok(first)
+}
+
+/// Export every account + credential as a portable bundle (for host-to-host migration).
+fn export_all(out: Option<&Path>, vault: bool) -> anyhow::Result<()> {
     let bundle = aas_import::export_bundle()?;
     let n = bundle.accounts.len();
-    let json = serde_json::to_string_pretty(&bundle)?;
+    if vault && out.is_none() && std::io::stdout().is_terminal() {
+        anyhow::bail!(
+            "refusing to print an encrypted vault to the terminal; use -o <file> or pipe stdout"
+        );
+    }
+    let bytes = if vault {
+        aas_import::encrypt_bundle(&bundle, &vault_passphrase()?)?
+    } else {
+        format!("{}\n", serde_json::to_string_pretty(&bundle)?).into_bytes()
+    };
     match out {
         Some(path) => {
-            std::fs::write(path, format!("{json}\n"))?;
+            std::fs::write(path, &bytes)?;
             set_0600(path);
             ui::success(format!(
-                "Exported {n} accounts (with credentials) → {}",
+                "Exported {n} accounts (with credentials{}) → {}",
+                if vault { ", encrypted" } else { "" },
                 path.display()
             ));
-            ui::warn("this file holds plaintext credentials — transfer securely, then delete it.");
+            if !vault {
+                ui::warn(
+                    "this file holds plaintext credentials — transfer securely, then delete it.",
+                );
+            }
         }
         None => {
-            println!("{json}");
-            if std::io::stdout().is_terminal() {
+            std::io::stdout().write_all(&bytes)?;
+            if !vault && std::io::stdout().is_terminal() {
                 ui::warn(
                     "this bundle holds plaintext credentials — pipe it, don't leave it on screen.",
                 );
@@ -177,6 +209,7 @@ pub fn run(
     name: Option<String>,
     account: Option<String>,
     all: bool,
+    vault: bool,
     shell: Shell,
     out: Option<PathBuf>,
 ) -> anyhow::Result<()> {
@@ -184,7 +217,13 @@ pub fn run(
         if name.is_some() || account.is_some() {
             anyhow::bail!("--all cannot be combined with an account name");
         }
-        return export_all(out.as_deref());
+        return export_all(out.as_deref(), vault);
+    }
+    if vault {
+        anyhow::bail!("--vault requires --all");
+    }
+    if out.is_some() {
+        anyhow::bail!("--out requires --all");
     }
     let resolved = match (name, account) {
         (Some(provider), Some(account)) => {

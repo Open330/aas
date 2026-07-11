@@ -9,6 +9,7 @@
 use aas_core::model::AccountRecord;
 use aas_core::secure_store;
 use aas_core::store::AccountStore;
+use age::secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
 /// Summary of what an adopt/inspect pass found.
@@ -53,6 +54,37 @@ pub struct Bundle {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub exported_at: Option<String>,
     pub accounts: Vec<BundleAccount>,
+}
+
+/// Prefix emitted by the age file format. Used only to decide whether a passphrase prompt is
+/// needed; [`decrypt_bundle`] still performs the authenticated format validation.
+pub const AGE_HEADER: &[u8] = b"age-encryption.org/v1\n";
+
+pub fn is_encrypted_bundle(data: &[u8]) -> bool {
+    data.starts_with(AGE_HEADER)
+}
+
+/// Encrypt a portable bundle with age's passphrase recipient (scrypt + authenticated
+/// encryption). The result is compatible with the `age` / `rage` command-line tools.
+pub fn encrypt_bundle(bundle: &Bundle, passphrase: &str) -> anyhow::Result<Vec<u8>> {
+    if passphrase.is_empty() {
+        anyhow::bail!("vault passphrase cannot be empty");
+    }
+    let plaintext = serde_json::to_vec_pretty(bundle)?;
+    let recipient = age::scrypt::Recipient::new(SecretString::from(passphrase.to_owned()));
+    age::encrypt(&recipient, &plaintext)
+        .map_err(|error| anyhow::anyhow!("could not encrypt vault: {error}"))
+}
+
+/// Decrypt and parse a passphrase-encrypted age bundle.
+pub fn decrypt_bundle(data: &[u8], passphrase: &str) -> anyhow::Result<Bundle> {
+    if passphrase.is_empty() {
+        anyhow::bail!("vault passphrase cannot be empty");
+    }
+    let identity = age::scrypt::Identity::new(SecretString::from(passphrase.to_owned()));
+    let plaintext = age::decrypt(&identity, data)
+        .map_err(|error| anyhow::anyhow!("could not decrypt vault: {error}"))?;
+    serde_json::from_slice(&plaintext).map_err(Into::into)
 }
 
 /// Collect every account + its credential into a portable bundle.
@@ -160,5 +192,29 @@ mod tests {
         let decoded: Bundle = serde_json::from_str(json).unwrap();
         assert!(decoded.exported_at.is_none());
         assert!(decoded.accounts[0].credential.is_none());
+    }
+
+    #[test]
+    fn encrypted_bundle_round_trip() {
+        let bundle = Bundle {
+            version: 1,
+            exported_at: Some("2026-07-11T00:00:00.000Z".into()),
+            accounts: vec![BundleAccount {
+                record: AccountRecord::new("codex", "work"),
+                credential: Some("very-secret".into()),
+            }],
+        };
+
+        let encrypted = encrypt_bundle(&bundle, "correct horse battery staple").unwrap();
+        assert!(is_encrypted_bundle(&encrypted));
+        assert!(!String::from_utf8_lossy(&encrypted).contains("very-secret"));
+
+        let decoded = decrypt_bundle(&encrypted, "correct horse battery staple").unwrap();
+        assert_eq!(decoded.accounts[0].record.name, "work");
+        assert_eq!(
+            decoded.accounts[0].credential.as_deref(),
+            Some("very-secret")
+        );
+        assert!(decrypt_bundle(&encrypted, "wrong passphrase").is_err());
     }
 }
