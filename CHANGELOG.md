@@ -3,7 +3,9 @@
 All notable user-facing changes are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and releases use semantic versioning.
 
-## [0.1.5] - Unreleased
+## [Unreleased]
+
+## [0.1.5] - 2026-07-11
 
 ### Added
 
@@ -38,5 +40,6 @@ All notable user-facing changes are recorded here. The format follows
 - Hardened account storage, provider adapters, proxy authentication, retries, installers, and
   portable app packaging.
 
-[0.1.5]: https://github.com/Open330/aas/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/Open330/aas/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/Open330/aas/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/Open330/aas/releases/tag/v0.1.4
