@@ -97,22 +97,43 @@ pub fn read_credential(service: &str) -> Option<String> {
     })
 }
 
+fn quote_security_arg(value: &str) -> io::Result<String> {
+    if value.chars().any(char::is_control) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "security argument contains a control character",
+        ));
+    }
+    Ok(format!(
+        "\"{}\"",
+        value.replace('\\', "\\\\").replace('"', "\\\"")
+    ))
+}
+
+fn add_generic_password_command(service: &str, user: &str, raw: &str) -> io::Result<String> {
+    let hex: String = raw
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Ok(format!(
+        "add-generic-password -s {} -a {} -U -X {hex}\n",
+        quote_security_arg(service)?,
+        quote_security_arg(user)?
+    ))
+}
+
 /// Write (create or update via `-U`) a generic-password credential.
 pub fn write_credential(service: &str, raw: &str) -> io::Result<()> {
     let user = current_user();
     with_keychain_lock(|| {
-        // `security` documents `-w` without an argv value as its safe prompted mode. Feed the
-        // value over stdin so OAuth JSON/API keys never appear in process metadata.
+        // `security ... -w` without an argv value reads directly from the terminal and prompts
+        // twice; it does not consume our piped stdin. Interactive mode instead accepts an entire
+        // command over stdin. `-X` carries the password as hex inside that private pipe, keeping
+        // OAuth JSON/API keys out of process metadata without triggering a terminal prompt.
+        let command = add_generic_password_command(service, &user, raw)?;
         let mut child = Command::new("security")
-            .args([
-                "add-generic-password",
-                "-s",
-                service,
-                "-a",
-                &user,
-                "-U",
-                "-w",
-            ])
+            .args(["-q", "-i"])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -121,8 +142,7 @@ pub fn write_credential(service: &str, raw: &str) -> io::Result<()> {
             .stdin
             .take()
             .ok_or_else(|| io::Error::other("security stdin was not available"))?;
-        stdin.write_all(raw.as_bytes())?;
-        stdin.write_all(b"\n")?;
+        stdin.write_all(command.as_bytes())?;
         drop(stdin);
         let status = child.wait()?;
         if status.success() {
@@ -176,5 +196,20 @@ mod tests {
             s,
             claude_keychain_service(Some(Path::new("/some/config/dir")))
         );
+    }
+
+    #[test]
+    fn keychain_write_command_keeps_raw_secret_out_of_process_arguments() {
+        let command = add_generic_password_command(
+            "Claude Code-credentials-abcd1234",
+            "user name",
+            r#"{"token":"very-secret"}"#,
+        )
+        .unwrap();
+        assert!(command.starts_with("add-generic-password "));
+        assert!(command.contains("-a \"user name\""));
+        assert!(command.contains("-X 7b22746f6b656e22"));
+        assert!(!command.contains("very-secret"));
+        assert!(add_generic_password_command("service", "bad\nuser", "secret").is_err());
     }
 }
