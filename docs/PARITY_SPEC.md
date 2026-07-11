@@ -4,6 +4,10 @@ The behavioral contract `aas` (Rust) must reproduce from `asx` (TypeScript, v0.3
 `file:line` points into `/Users/june/personal/asx/src/`. This is the port checklist; wire
 contracts (endpoints/headers/JSON shapes) must **not** drift.
 
+This document separates inherited parity from aas-only extensions. As of v0.1.5, the extensions
+are deterministic account sorting, the typed `usage --json` integration contract, portable
+credential export/import, and optional passphrase-encrypted vault bundles; see §J.
+
 ---
 
 ## §A. Command matrix (`cli.ts`)
@@ -234,6 +238,15 @@ Continuity = full-transcript replay (no server session store). Tool ids round-tr
 2. Codex `getLoginCommand=['codex','login']` (not bare `codex`).
 
 ## §J. New in aas
-- `import`/adopt-asx command (default to same paths → usually zero-migration).
-- Structured `Usage{headline,plan,meters[],notes,error}` returned by adapters; CLI renders table/bars.
-- Parallel `list -u` (fan-out fetch, single render).
+- `import` without a file inspects/adopts the shared asx paths. `export --all` and
+  `import <file|->` move a versioned portable bundle containing account metadata and aas-managed
+  provider credentials.
+- `export --all --vault` encrypts the portable JSON using the standard age passphrase format
+  (scrypt recipient and authenticated encryption). Import detects the age header automatically;
+  passphrases come from a no-echo terminal prompt or short-lived `AAS_VAULT_PASSPHRASE`.
+- Structured `Usage{headline,plan,meters[],notes,error}` returned by adapters; CLI renders
+  table/bars and `usage --json` exposes the typed integration contract used by aas-bar/BarShelf.
+- Parallel `list -u` / `usage` (fan-out fetch, ordered single render).
+- Deterministic display ordering: fixed provider registry order, then case-insensitive account
+  name by default. `--sort added` uses `addedAt`; `--sort stored` preserves the `accounts.json`
+  array order. Sorting is a view operation and never rewrites the store.

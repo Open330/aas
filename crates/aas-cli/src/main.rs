@@ -101,6 +101,7 @@ enum Command {
     /// List accounts per provider (or all). `-u` live usage table, `-d` dump credentials.
     #[command(visible_alias = "ls")]
     List {
+        #[arg(value_name = "PROVIDER_OR_ACCOUNT")]
         provider: Option<String>,
         #[arg(short, long)]
         usage: bool,
@@ -113,6 +114,7 @@ enum Command {
     /// Live usage table for every account (shorthand for `list -u`).
     #[command(visible_alias = "u")]
     Usage {
+        #[arg(value_name = "PROVIDER_OR_ACCOUNT")]
         provider: Option<String>,
         /// Emit machine-readable JSON (for aas-bar and other integrations).
         #[arg(long)]
@@ -169,6 +171,7 @@ enum Command {
     /// Switch the active credential.
     #[command(visible_alias = "s")]
     Switch {
+        #[arg(value_name = "PROVIDER_OR_ACCOUNT")]
         provider: String,
         name: Option<String>,
     },
@@ -185,6 +188,7 @@ enum Command {
     },
     /// Refresh (rotate) a stored credential.
     Refresh {
+        #[arg(value_name = "PROVIDER_OR_ACCOUNT")]
         provider: String,
         name: Option<String>,
         #[arg(long = "no-login")]

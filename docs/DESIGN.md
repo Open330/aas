@@ -1,8 +1,7 @@
 # aas — Agent Account Switcher (Rust) — Design Document
 
-> Status: **DRAFT (in progress)** — Stable sections below are finalized. The detailed
-> behavioral specs (Command Reference, Data Model, Provider Adapters, Keychain, Proxy)
-> are being filled from a precise mapping of the existing `asx` (TypeScript) codebase.
+> Status: **IMPLEMENTED** — Updated for aas v0.1.5. `PARITY_SPEC.md` remains the contract for
+> inherited `asx` behavior; aas-only extensions are identified explicitly.
 
 `aas` is a from-scratch Rust rewrite of [`asx`](https://github.com/enif-lee/asx), a
 multi-account switcher for LLM coding agents (Claude Code, Codex, Grok/xAI, Z.AI, Cursor).
@@ -30,9 +29,10 @@ agent's UI onto another provider's backend.
 6. **A modern, polished CLI** — tables, aligned meters, color, spinners.
 
 ### Non-Goals
-- No feature expansion beyond `asx` parity in the initial port (new features come after).
-- No GUI/TUI dashboard (plain, scriptable CLI output stays the default).
-- No change to on-disk credential formats or provider wire protocols — we must remain
+- No hosted account service or credential broker; credentials remain local to the user's host.
+- The optional macOS app and BarShelf widget are presentation layers; the scriptable CLI and its
+  JSON contract remain the engine.
+- No change to native credential formats or provider wire protocols — aas remains
   byte-compatible with the native CLIs (`claude`/`codex`/`grok`) and with `asx`'s stores.
 
 ### Why Rust for *this* tool (honest framing)
@@ -89,6 +89,8 @@ aas/
 │  ├─ aas-providers/         # provider adapters (claude/codex/grok/zai/cursor)
 │  ├─ aas-proxy/             # cross-provider translating HTTP server (axum) + adapters
 │  └─ aas-import/            # read/adopt existing `asx` state (accounts.json, homes, keychain)
+├─ apps/aas-bar/             # optional native macOS usage menubar app
+├─ widgets/                  # optional BarShelf usage widget
 ├─ docs/
 │  └─ DESIGN.md              # this file
 ├─ install.sh / install.ps1  # binary-drop installers (no Node)
@@ -121,9 +123,9 @@ all in the common case), and additionally provide an explicit adopt/import path:
 - **macOS Keychain:** reproduce `asx`'s exact service-name derivation
   (`Claude Code-credentials-<sha256(CLAUDE_CONFIG_DIR)[:8]>`) so stored Claude credentials
   are found without re-login. *(Exact scheme + `security` argv: from §Keychain mapping.)*
-- **`aas import` command (aas-import crate):** an explicit one-shot that validates and, if
-  ever the dirs diverge, copies `asx` state into `aas`'s dir; reports what was adopted and
-  what needs re-login (e.g. keychain entries that can't be relocated).
+- **`aas import` command (aas-import crate):** with no file, validates and reports the shared
+  `asx` state. With a file or stdin, restores an aas portable credential bundle. Bundles can be
+  plaintext JSON or passphrase-encrypted age/scrypt files; encrypted input is auto-detected.
 
 Guiding rule: **prefer zero-migration adoption** (same paths, same formats) over a copy step;
 the `import` command is the safety net, not the primary flow.
@@ -140,18 +142,20 @@ Summary:
 
 | Command | Alias | Purpose |
 |---|---|---|
-| `list [provider]` `-u -d` | `ls` | Per-provider account list; `-u` live usage bars (parallel), `-d` dump creds. Hides empty providers unless one is named. |
+| `list [provider\|account]` `-u -d --sort name\|added\|stored` | `ls` | Filterable account list; `-u` live usage bars (parallel), `-d` dump creds. Default account order is case-insensitive name within fixed provider order. |
+| `usage [provider\|account]` `--json --sort name\|added\|stored` | `u` | Live usage for all matching accounts; `--json` is the stable app/widget integration contract. |
 | `load [provider] [name]` | | Snapshot the live system credential as a **system** profile (auto-scans all providers if none given; email-dedup). Rejects share flags. |
 | `login [provider] [name]` `--long-lived` +share | | Fresh native login into an **isolated** profile home; `--long-lived` = Claude `setup-token`. |
-| `switch <provider> <name>` | `s` | Write a stored profile back to the provider's live store. |
+| `switch <provider> <name>` or `switch <account>` | `s` | Write a stored profile back to the provider's live store. |
 | `status [provider]` | | Show asx-tracked active account per provider. |
 | `rename <from> <to>` | | Move profile home + update metadata + active markers. |
 | `remove [provider] <name>` | `rm` | Delete account + its secret/home. |
 | `exec <name> [target] [args…]` | `e` | Run the native CLI under a profile. `target`≠provider → cross-provider via proxy. `-b` bypass, `-d` debug, cross opts `-s/-i/--share/--isolate/--keep-context`, `--` passthrough. |
 | `sharing <name>` +share | | Show/set which categories an isolated profile shares. |
-| `refresh <provider> <name>` `--no-login` | | Rotate credential via refresh token; falls back to login unless `--no-login`. |
+| `refresh <provider> <name>` or `refresh <account>` `--no-login` | | Rotate credential via refresh token; falls back to login unless `--no-login`. |
 | `proxy <name> <frontend>` | | Standalone proxy; prints env/config to point `<frontend>` at the profile's backend. |
-| **`import` (new)** | | Adopt existing `asx` state (see §4). |
+| `export [name]` / `export --all [--vault]` | | Print profile environment or export every account and credential as a portable JSON/encrypted bundle. |
+| `import [file|-]` | | Inspect shared `asx` state or restore a portable JSON/encrypted bundle (see §4). |
 
 A bare `asx <account> …` (unknown subcommand that resolves to an account) is shimmed to
 `exec` — replicate this default-command behavior.
@@ -201,6 +205,17 @@ Rust: model as serde structs; `Store { version, accounts: Vec<AccountRecord> }`,
 `AccountRecord { provider, name, label: Option, email: Option, added_at, profile_type:
 Option<ProfileType>, share: Option<Vec<Category>>, .. }`. Note `asx` mixes exact-string and
 lowercased-provider matching across ops — replicate per-op (documented in PARITY_SPEC §4).
+
+The array order remains meaningful and can be requested with `--sort stored`. Display commands
+default to the provider registry order (`claude`, `codex`, `zai`, `grok`, `cursor`) and then a
+case-insensitive account-name order. `--sort added` uses `addedAt` oldest-first. Sorting never
+rewrites `accounts.json`; it only controls the returned/rendered view.
+
+**Portable bundles:** `export --all` serializes account metadata plus aas-managed provider
+credentials. `--vault` wraps that JSON in the standard age passphrase format (scrypt recipient +
+authenticated encryption). Passphrases are read without echo or from the short-lived
+`AAS_VAULT_PASSPHRASE` environment variable. Imports auto-detect encrypted input and do not
+include browser cookies, conversation history, or machine-specific active markers.
 
 ## 7. Provider Adapters
 

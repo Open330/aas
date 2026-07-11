@@ -45,9 +45,14 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/open330/aas/main/install.ps1 | iex
 ```
 
+The installers fetch the latest published GitHub Release, verify its SHA-256 checksum, and run
+the downloaded binary before replacing an existing installation.
+
 From source:
 
 ```bash
+git clone https://github.com/Open330/aas.git
+cd aas
 cargo install --path crates/aas-cli --locked   # -> ~/.cargo/bin/aas
 ```
 
@@ -108,18 +113,18 @@ ssh -t jiun-mini 'aas import ~/aas-vault.age'
 
 | Command | Description |
 |---|---|
-| `list [provider]` (alias `ls`) `-u`,`-d`, `--sort name\|added\|stored` | List accounts per provider. The default is provider-registry order then account name; `stored` preserves the `accounts.json` array order. `-u` shows live usage; `-d` dumps stored credentials. |
-| `usage [provider]` (alias `u`) `--sort name\|added\|stored` | Live usage table for every account (shorthand for `list -u`), using the same deterministic order. |
+| `list [provider\|account]` (alias `ls`) `-u`,`-d`, `--sort name\|added\|stored` | List all accounts or filter by provider/account. The default is provider-registry order then account name; `stored` preserves the `accounts.json` array order. `-u` shows live usage; `-d` dumps stored credentials. |
+| `usage [provider\|account]` (alias `u`) `--json`, `--sort name\|added\|stored` | Live usage for all accounts or one provider/account (shorthand for `list -u`), using the same deterministic order. `--json` is the integration contract used by aas-bar and BarShelf. |
 | `status [provider]` | Show the active account per provider. |
 | `login [provider] [name]` `--long-lived`, `--device-auth`/`--headless`, *share flags* | Login and store a new **isolated** profile. `--long-lived` uses Claude's `setup-token`; `--device-auth` uses a browserless device-code flow. |
 | `load [provider] [name]` | Snapshot the **currently logged-in** credential as a **system** profile (auto-scans providers if none given). |
-| `switch <provider> <name>` (alias `s`) | Make a stored account the active credential. |
+| `switch <provider> <name>` or `switch <account>` (alias `s`) | Make a stored account the active credential. The one-argument form resolves a globally unique stored account name. |
 | `exec <name> [target] [args…]` (alias `e`) | Run the native CLI under a profile. If `target` ≠ the profile's provider, requests route through the local **ASX Proxy** (cross-provider). `-b` full-access bypass; cross-run share flags `-s/-i/--share/--isolate/--keep-context`; `--` passes the rest to the agent. |
 | `export [name]` or `export <provider> <name>` `--all`, `--vault`, `-o <file>`, `--shell posix\|fish\|powershell` | Print shell env to use a profile in the current shell (`eval "$(aas export <name>)"`), or `--all` for a portable bundle of **every account + credential**. `--vault` encrypts it with an age/scrypt passphrase. |
 | `sharing <name>` *share flags* | Show or change which state (sessions/skills/agents/hooks/settings) an isolated profile shares from the provider's home. |
 | `rename <from> <to>` | Rename an account (moves its profile home + markers). |
 | `remove [provider] <name>` (alias `rm`) | Remove a stored account. |
-| `refresh <provider> <name>` `--no-login` | Rotate a credential via its refresh token (falls back to login unless `--no-login`). |
+| `refresh <provider> <name>` or `refresh <account>` `--no-login` | Rotate a credential via its refresh token (falls back to login unless `--no-login`). |
 | `proxy <name> <frontend>` | Start a standalone ASX Proxy for `<name>`'s backend and print env to point a `<frontend>` agent at it. |
 | `import [file]` | No arg: adopt/inspect existing `asx` state. With a file (or `-` for stdin): restore a bundle from `export --all` on another host. |
 
@@ -166,6 +171,11 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets --all-features
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the complete development workflow,
+[SECURITY.md](SECURITY.md) for private vulnerability reporting,
+[SUPPORT.md](SUPPORT.md) for support channels, [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for
+community expectations, and [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## License
 
