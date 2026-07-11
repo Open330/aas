@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "id": "dev.barshelf.aas-usage",
   "name": "aas Usage",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "icon": "gauge",
   "bucket": { "group": "Agents", "order": 20, "size": "M" },
 

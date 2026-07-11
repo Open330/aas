@@ -7,7 +7,8 @@
 use crate::common::{http_client, now_ms, set_active, store_account_secret};
 use crate::RefreshOutcome;
 use aas_core::keychain::{
-    claude_keychain_service, delete_credential, read_credential, write_credential,
+    claude_keychain_service, credential_fits_security_cli, delete_credential, read_credential,
+    write_credential,
 };
 use aas_core::platform::{claude_config_dir, claude_credentials_path};
 use aas_core::secure_store::{get_secret, set_secret, write_restricted_file};
@@ -241,7 +242,36 @@ fn write_active_credentials(raw: &str) -> anyhow::Result<()> {
         } else {
             claude_keychain_service(None)
         };
+        let file = claude_credentials_path();
+        let keychain_value = read_credential(&svc);
+        if keychain_value.as_deref() == Some(raw) {
+            match std::fs::remove_file(&file) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            return Ok(());
+        }
+        let file_matches = std::fs::read_to_string(&file)
+            .map(|current| current == raw)
+            .unwrap_or(false);
+        if keychain_value.is_none() && file_matches {
+            return Ok(());
+        }
+        if !credential_fits_security_cli(raw) {
+            write_restricted_file(&file, raw)?;
+            if let Err(error) = delete_credential(&svc) {
+                let _ = std::fs::remove_file(&file);
+                return Err(error.into());
+            }
+            return Ok(());
+        }
         write_credential(&svc, raw)?;
+        match std::fs::remove_file(&file) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
         return Ok(());
     }
     write_restricted_file(&claude_credentials_path(), raw)?;

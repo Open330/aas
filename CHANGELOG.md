@@ -5,6 +5,18 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-07-12
+
+### Fixed
+
+- Prevented macOS `security -i` from silently truncating large Claude OAuth credentials after
+  hex encoding. Credentials beyond the safe parser limit now use Claude's owner-only
+  `.credentials.json` fallback instead of writing a corrupt Keychain item.
+- Preserved credentials created by native Claude login without rewriting an identical scoped
+  Keychain item or profile file, avoiding false login failures and Keychain ACL changes.
+- Applied the same safe large-credential fallback when switching or refreshing the active Claude
+  profile on macOS.
+
 ## [0.1.5] - 2026-07-11
 
 ### Added
@@ -40,6 +52,7 @@ All notable user-facing changes are recorded here. The format follows
 - Hardened account storage, provider adapters, proxy authentication, retries, installers, and
   portable app packaging.
 
-[Unreleased]: https://github.com/Open330/aas/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/Open330/aas/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/Open330/aas/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/Open330/aas/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/Open330/aas/releases/tag/v0.1.4

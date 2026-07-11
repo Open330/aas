@@ -1,6 +1,6 @@
 # aas — Agent Account Switcher (Rust) — Design Document
 
-> Status: **IMPLEMENTED** — Updated for aas v0.1.5. `PARITY_SPEC.md` remains the contract for
+> Status: **IMPLEMENTED** — Updated for aas v0.1.6. `PARITY_SPEC.md` remains the contract for
 > inherited `asx` behavior; aas-only extensions are identified explicitly.
 
 `aas` is a from-scratch Rust rewrite of [`asx`](https://github.com/enif-lee/asx), a

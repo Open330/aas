@@ -12,6 +12,9 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
 pub const SERVICE_PREFIX: &str = "Claude Code-credentials";
+/// `security -i` truncates its input command around 4 KiB. Since `-X` hex doubles credential
+/// bytes and the command itself has overhead, stay below the observed boundary with margin.
+pub const SECURITY_CLI_MAX_PASSWORD_BYTES: usize = 1900;
 
 /// Serializes `security` CLI access so no two invocations touch the Keychain at once. The
 /// parallel usage fan-out (and a *second* aas process, e.g. the menubar app fetching while you
@@ -97,6 +100,10 @@ pub fn read_credential(service: &str) -> Option<String> {
     })
 }
 
+pub fn credential_fits_security_cli(raw: &str) -> bool {
+    raw.len() <= SECURITY_CLI_MAX_PASSWORD_BYTES
+}
+
 fn quote_security_arg(value: &str) -> io::Result<String> {
     if value.chars().any(char::is_control) {
         return Err(io::Error::new(
@@ -111,6 +118,16 @@ fn quote_security_arg(value: &str) -> io::Result<String> {
 }
 
 fn add_generic_password_command(service: &str, user: &str, raw: &str) -> io::Result<String> {
+    if !credential_fits_security_cli(raw) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "credential is too large for safe macOS security CLI input ({} bytes; max {})",
+                raw.len(),
+                SECURITY_CLI_MAX_PASSWORD_BYTES
+            ),
+        ));
+    }
     let hex: String = raw
         .as_bytes()
         .iter()
@@ -211,5 +228,12 @@ mod tests {
         assert!(command.contains("-X 7b22746f6b656e22"));
         assert!(!command.contains("very-secret"));
         assert!(add_generic_password_command("service", "bad\nuser", "secret").is_err());
+    }
+
+    #[test]
+    fn oversized_credentials_are_rejected_before_security_can_truncate_them() {
+        let raw = "a".repeat(SECURITY_CLI_MAX_PASSWORD_BYTES + 1);
+        let error = add_generic_password_command("service", "user", &raw).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 }

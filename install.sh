@@ -5,7 +5,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/open330/aas/main/install.sh | sh
 #
 # Env overrides:
-#   AAS_VERSION=v0.1.5   pin a version (default: latest)
+#   AAS_VERSION=v0.1.6   pin a version (default: latest)
 #   AAS_BIN_DIR=~/.local/bin   install location
 
 set -eu

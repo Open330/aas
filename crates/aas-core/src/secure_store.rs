@@ -1,12 +1,14 @@
 //! Per-profile credential storage. Mirrors asx `storage/secure-store.ts`.
 //!
 //! Each profile owns a `0700` home under the profiles dir; file providers keep the credential
-//! in that home under the native filename, while **macOS Claude** keeps it in a profile-scoped
-//! Keychain service (derived in [`crate::keychain`]) via the `security` CLI. Service/account
-//! identifiers remain compatible with asx; secret values are sent over stdin, never argv.
+//! in that home under the native filename, while **macOS Claude** prefers a profile-scoped
+//! Keychain service (derived in [`crate::keychain`]) via the `security` CLI. Large credentials
+//! that cannot safely pass through its bounded interactive parser use Claude's owner-only profile
+//! file instead. Service/account identifiers remain compatible with asx; secret values are sent
+//! over stdin, never argv.
 
 use crate::keychain::{
-    claude_keychain_service, delete_credential as keychain_delete,
+    claude_keychain_service, credential_fits_security_cli, delete_credential as keychain_delete,
     read_credential as keychain_read, write_credential as keychain_write,
 };
 use crate::naming::{profile_credential_path, profile_home};
@@ -32,8 +34,38 @@ fn claude_profile_service(provider: &str, name: &str) -> String {
 pub fn set_secret(provider: &str, name: &str, value: &str) -> io::Result<()> {
     validate_storage_key(provider, name)?;
     if is_mac_claude(provider) {
-        keychain_write(&claude_profile_service(provider, name), value)?;
-        remove_file_if_exists(&profile_credential_path(provider, name))?;
+        let service = claude_profile_service(provider, name);
+        let file = profile_credential_path(provider, name);
+        let keychain_value = keychain_read(&service);
+
+        // Native Claude login has already written this exact profile credential, either to its
+        // scoped Keychain item or (on newer/headless setups) to `.credentials.json`. Avoid an
+        // unnecessary rewrite after `aas login`; it can change ACL ownership and large OAuth JSON
+        // exceeds the `security -i` parser limit.
+        if keychain_value.as_deref() == Some(value) {
+            remove_file_if_exists(&file)?;
+            return Ok(());
+        }
+        let file_matches = std::fs::read_to_string(&file)
+            .map(|current| current == value)
+            .unwrap_or(false);
+        if keychain_value.is_none() && file_matches {
+            return Ok(());
+        }
+
+        if !credential_fits_security_cli(value) {
+            // Claude reads this owner-only fallback whenever the scoped Keychain entry is absent.
+            // Write first, then remove any stale entry so readers never observe no credential.
+            write_secret_file(provider, name, value)?;
+            if let Err(error) = keychain_delete(&service) {
+                let _ = remove_file_if_exists(&file);
+                return Err(error);
+            }
+            return Ok(());
+        }
+
+        keychain_write(&service, value)?;
+        remove_file_if_exists(&file)?;
         return Ok(());
     }
     write_secret_file(provider, name, value)
@@ -241,6 +273,28 @@ mod tests {
         );
         delete_secret("codex", "t.codex").unwrap();
         assert_eq!(get_secret("codex", "t.codex"), None);
+
+        #[cfg(target_os = "macos")]
+        {
+            let store = AccountStore::open_default();
+            store
+                .add(crate::model::AccountRecord::new("claude", "large.test"))
+                .unwrap();
+            let raw = "a".repeat(crate::keychain::SECURITY_CLI_MAX_PASSWORD_BYTES + 1);
+            set_secret("claude", "large.test", &raw).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(profile_credential_path("claude", "large.test")).unwrap(),
+                raw
+            );
+            // The idempotent path used immediately after native Claude login must also succeed.
+            set_secret("claude", "large.test", &raw).unwrap();
+            assert_eq!(
+                get_secret("claude", "large.test").as_deref(),
+                Some(raw.as_str())
+            );
+            delete_secret("claude", "large.test").unwrap();
+        }
+
         std::env::remove_var("AAS_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(&dir);
     }
