@@ -14,7 +14,7 @@ A single-binary, dependency-free **multi-account switcher for LLM coding agents*
 - **Reads existing `asx` state** — drop-in adoption, usually zero re-login.
 
 <div align="center">
-  <img src="docs/assets/cli-demo.gif" alt="aas CLI demo showing account list, status, and usage options" width="920" />
+  <img src="docs/assets/cli-usage-sessions.gif" alt="aas CLI demo showing usage and isolated account sessions" width="920" />
   <br />
   <sub>Rendered from the reproducible <a href="docs/assets/cli-demo.tape">VHS tape</a>.</sub>
 </div>

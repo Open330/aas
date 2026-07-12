@@ -1,6 +1,6 @@
 Require cargo
 
-Output docs/assets/cli-demo.gif
+Output docs/assets/cli-usage-sessions.gif
 
 Set Shell "bash"
 Set FontSize 16
