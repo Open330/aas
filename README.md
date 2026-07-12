@@ -9,7 +9,8 @@ A single-binary, dependency-free **multi-account switcher for LLM coding agents*
 - Store each account's credential in its own `0600` file / OS keychain entry and switch instantly.
 - Run one-off, profile-scoped agent sessions without touching your default login.
 - Cross-provider execution: run one agent's UI against another provider's backend (ASX Proxy).
-- Live usage at a glance (`aas usage`) — every account fetched in parallel, rendered as a table.
+- Usage at a glance (`aas usage`) — accounts resolve in parallel through a shared success cache;
+  use `--fresh` for an explicit live request.
 - **Reads existing `asx` state** — drop-in adoption, usually zero re-login.
 
 ## Quickstart for Agents
@@ -114,7 +115,7 @@ ssh -t jiun-mini 'aas import ~/aas-vault.age'
 | Command | Description |
 |---|---|
 | `list [provider\|account]` (alias `ls`) `-u`,`-d`, `--sort name\|added\|stored` | List all accounts or filter by provider/account. The default is provider-registry order then account name; `stored` preserves the `accounts.json` array order. `-u` shows live usage; `-d` dumps stored credentials. |
-| `usage [provider\|account]` (alias `u`) `--json`, `--sort name\|added\|stored` | Live usage for all accounts or one provider/account (shorthand for `list -u`), using the same deterministic order. `--json` is the integration contract used by aas-bar and BarShelf. |
+| `usage [provider\|account]` (alias `u`) `--json`, `--fresh`, `--sort name\|added\|stored` | Usage for all accounts or one provider/account (shorthand for `list -u`), using a shared 10-minute success cache and deterministic order. `--fresh` bypasses the success cache but still honors rate-limit backoff. `--json` is the integration contract used by aas-bar and BarShelf. |
 | `status [provider]` | Show the active account per provider. |
 | `login [provider] [name]` `--long-lived`, `--device-auth`/`--headless`, *share flags* | Login and store a new **isolated** profile. `--long-lived` uses Claude's `setup-token`; `--device-auth` uses a browserless device-code flow. |
 | `load [provider] [name]` | Snapshot the **currently logged-in** credential as a **system** profile (auto-scans providers if none given). |

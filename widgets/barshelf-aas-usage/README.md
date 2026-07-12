@@ -41,5 +41,8 @@ handling stays inside the `aas` binary itself.
 
 ## Refresh behavior
 
-Usage is fetched when the bucket is opened and considered stale after 10
-minutes; there is no background polling interval.
+Usage is considered for refresh only while the BarShelf popup is open and this
+widget is visible. A successful result remains fresh for 10 minutes. The
+manifest's `popupOnly` policy explicitly disables interval polling, background
+execution, file watchers, deadline/wake refreshes, and event triggers. AAS also shares its own 10-minute success cache
+and per-account fetch locks across terminal and widget callers.

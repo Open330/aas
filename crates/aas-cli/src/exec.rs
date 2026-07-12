@@ -177,9 +177,7 @@ pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyh
 
     // Auto-refresh an expired credential before launch.
     if let Some(p) = get_adapter(&profile_provider) {
-        if p.is_expired(&account_name).await {
-            let _ = p.refresh(&account_name).await;
-        }
+        let _ = p.refresh_if_expired(&account_name).await;
     }
 
     let mut env: HashMap<String, String> = std::env::vars().collect();
@@ -341,9 +339,7 @@ pub async fn cmd_proxy(store: &AccountStore, name: &str, frontend: &str) -> anyh
     }
 
     if let Some(p) = get_adapter(&backend_provider) {
-        if p.is_expired(&acct.name).await {
-            let _ = p.refresh(&acct.name).await;
-        }
+        let _ = p.refresh_if_expired(&acct.name).await;
     }
     let Some(backend_cred) = secure_store::get_secret(&backend_provider, &acct.name) else {
         anyhow::bail!("No stored credential for {backend_provider}/{}", acct.name);

@@ -143,7 +143,7 @@ Summary:
 | Command | Alias | Purpose |
 |---|---|---|
 | `list [provider\|account]` `-u -d --sort name\|added\|stored` | `ls` | Filterable account list; `-u` live usage bars (parallel), `-d` dump creds. Default account order is case-insensitive name within fixed provider order. |
-| `usage [provider\|account]` `--json --sort name\|added\|stored` | `u` | Live usage for all matching accounts; `--json` is the stable app/widget integration contract. |
+| `usage [provider\|account]` `--json --fresh --sort name\|added\|stored` | `u` | Usage for all matching accounts through the shared success cache; `--fresh` requests live data while honoring backoff, and `--json` is the stable app/widget integration contract. |
 | `load [provider] [name]` | | Snapshot the live system credential as a **system** profile (auto-scans all providers if none given; email-dedup). Rejects share flags. |
 | `login [provider] [name]` `--long-lived` +share | | Fresh native login into an **isolated** profile home; `--long-lived` = Claude `setup-token`. |
 | `switch <provider> <name>` or `switch <account>` | `s` | Write a stored profile back to the provider's live store. |

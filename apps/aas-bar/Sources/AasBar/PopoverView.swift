@@ -236,6 +236,11 @@ struct AccountRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 8)
+                if account.cached == true {
+                    Text("CACHED")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
                 if let plan = account.planChip {
                     Text(plan)
                         .font(.system(size: 8.5, weight: .semibold))
@@ -254,17 +259,26 @@ struct AccountRow: View {
                     .font(.system(size: 10.5, weight: .medium))
                     .foregroundStyle(.red)
                     .lineLimit(1)
-            } else if account.meters.isEmpty {
+            }
+            if account.meters.isEmpty, account.error == nil {
                 Text(account.headline)
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
-            } else {
+            } else if !account.meters.isEmpty {
                 VStack(spacing: 3) {
                     ForEach(account.meters) { meter in
                         LinearMeter(meter: meter)
                     }
                 }
+            }
+            if let refreshWarning = account.notes?.first(where: {
+                $0.localizedCaseInsensitiveContains("refresh failed")
+            }) {
+                Text(refreshWarning)
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
             }
         }
         .padding(.vertical, 7)

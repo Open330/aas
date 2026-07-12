@@ -5,6 +5,25 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Added a shared 10-minute last-known-good usage cache, additive `cached`/`fetchedAtMs` JSON
+  provenance, and `aas usage --fresh` for explicit live requests.
+- Added per-account cross-process locks that coalesce simultaneous credential refreshes and usage
+  fetches from terminals, BarShelf, and editor integrations.
+
+### Changed
+
+- Rate-limit backoff is now checked before OAuth refresh, guaranteeing that a backed-off usage
+  request performs no provider calls. Transient failures retain cached meters; authentication
+  failures remain explicit and never fall back to stale usage.
+- The BarShelf usage widget now declares the `popupOnly` policy and disables interval,
+  background, file-watch, deadline/wake, and event-triggered execution.
+
+### Fixed
+
+- Automatic refresh failures are surfaced in usage output instead of being silently discarded.
+
 ## [0.1.6] - 2026-07-12
 
 ### Fixed

@@ -143,6 +143,10 @@ pub fn import_bundle(bundle: &Bundle) -> RestoreReport {
                             )
                             .is_ok();
                         if ok {
+                            aas_core::usage_cache::clear(&format!(
+                                "{}/{}",
+                                ba.record.provider, ba.record.name
+                            ));
                             report.credentials += 1;
                         } else {
                             report.failed.push(id);

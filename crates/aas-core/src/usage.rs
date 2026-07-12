@@ -3,8 +3,9 @@
 //! `list -u` fan-out + single-render, and a provider-agnostic table.
 
 use chrono::{Local, TimeZone, Utc};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Usage {
     /// e.g. `subscription=max tier=... org=... has_max=yes`.
     pub headline: String,
@@ -26,7 +27,7 @@ impl Usage {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Meter {
     /// "5h", "7d", "credits", ...
     pub label: String,

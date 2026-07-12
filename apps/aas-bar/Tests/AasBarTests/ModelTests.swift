@@ -3,12 +3,14 @@ import XCTest
 
 final class ModelTests: XCTestCase {
     func testUsageJSONContractAcceptsNotesAndMeters() throws {
-        let json = #"{"accounts":[{"provider":"grok","name":"work","email":null,"active":true,"plan":"team","planLabel":"TEAM","headline":"Grok team","error":null,"notes":["rate remaining req=3 tok=9"],"meters":[{"label":"credits","usedPct":25.0,"resetMs":null}]}]}"#
+        let json = #"{"accounts":[{"provider":"grok","name":"work","email":null,"active":true,"cached":true,"fetchedAtMs":123,"plan":"team","planLabel":"TEAM","headline":"Grok team","error":null,"notes":["rate remaining req=3 tok=9"],"meters":[{"label":"credits","usedPct":25.0,"resetMs":null}]}]}"#
         let decoded = try JSONDecoder().decode(UsageResponse.self, from: Data(json.utf8))
 
         XCTAssertEqual(decoded.accounts.count, 1)
         XCTAssertEqual(decoded.accounts[0].id, "grok/work")
         XCTAssertEqual(decoded.accounts[0].meters[0].remaining, 75)
+        XCTAssertEqual(decoded.accounts[0].cached, true)
+        XCTAssertEqual(decoded.accounts[0].fetchedAtMs, 123)
         XCTAssertEqual(decoded.accounts[0].notes, ["rate remaining req=3 tok=9"])
     }
 

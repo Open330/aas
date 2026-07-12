@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "id": "dev.barshelf.aas-usage",
   "name": "aas Usage",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "icon": "gauge",
   "bucket": {
     "group": "Agents",
@@ -36,7 +36,11 @@
   "refresh": {
     "onOpen": true,
     "interval": null,
-    "staleAfterSec": 600
+    "staleAfterSec": 600,
+    "watchPaths": [],
+    "runInBackground": false,
+    "popupOnly": true,
+    "triggers": []
   },
   "permissions": {
     "exec": [

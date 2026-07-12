@@ -6,6 +6,7 @@
 
 use aas_core::naming::normalize_provider;
 use aas_core::usage::Usage;
+use std::fs::File;
 
 mod claude;
 mod codex;
@@ -14,7 +15,10 @@ mod cursor;
 mod key_adapter;
 mod snapshot;
 
-pub use snapshot::{resolve_scope, snapshot, snapshot_sorted, AccountUsage};
+pub use snapshot::{
+    resolve_scope, snapshot, snapshot_sorted, snapshot_sorted_with_cache, AccountUsage,
+    UsageCacheMode,
+};
 
 /// The five adapters the CLI drives. `Grok`/`Zai` share `key_adapter`; `Cursor` is a marker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +64,14 @@ pub fn all_providers() -> [Provider; 5] {
 }
 
 impl Provider {
+    async fn operation_lock(&self, scope: &'static str, account: &str) -> Result<File, String> {
+        let key = format!("{}/{}", self.id(), account);
+        tokio::task::spawn_blocking(move || aas_core::keyed_lock::acquire(scope, &key))
+            .await
+            .map_err(|error| format!("{scope} lock task failed: {error}"))?
+            .map_err(|error| format!("could not acquire {scope} lock: {error}"))
+    }
+
     /// Canonical provider id.
     pub fn id(&self) -> &'static str {
         match self {
@@ -147,8 +159,44 @@ impl Provider {
         }
     }
 
-    /// Refresh (rotate) the stored credential.
+    /// Refresh (rotate) the stored credential under a per-account cross-process lock.
     pub async fn refresh(&self, account: &str) -> RefreshOutcome {
+        let _lock = match self.operation_lock("refresh", account).await {
+            Ok(lock) => lock,
+            Err(message) => {
+                return RefreshOutcome {
+                    ok: false,
+                    message,
+                    needs_relogin: false,
+                }
+            }
+        };
+        self.refresh_unlocked(account).await
+    }
+
+    /// Refresh only when expired, checking again after acquiring the lock so simultaneous AAS
+    /// callers coalesce into one token rotation.
+    pub async fn refresh_if_expired(&self, account: &str) -> Option<RefreshOutcome> {
+        if !self.is_expired(account).await {
+            return None;
+        }
+        let _lock = match self.operation_lock("refresh", account).await {
+            Ok(lock) => lock,
+            Err(message) => {
+                return Some(RefreshOutcome {
+                    ok: false,
+                    message,
+                    needs_relogin: false,
+                })
+            }
+        };
+        if !self.is_expired(account).await {
+            return None;
+        }
+        Some(self.refresh_unlocked(account).await)
+    }
+
+    async fn refresh_unlocked(&self, account: &str) -> RefreshOutcome {
         match self {
             Provider::Claude => claude::refresh(account).await,
             Provider::Codex => codex::refresh(account).await,

@@ -246,6 +246,9 @@ Continuity = full-transcript replay (no server session store). Tool ids round-tr
   passphrases come from a no-echo terminal prompt or short-lived `AAS_VAULT_PASSPHRASE`.
 - Structured `Usage{headline,plan,meters[],notes,error}` returned by adapters; CLI renders
   table/bars and `usage --json` exposes the typed integration contract used by aas-bar/BarShelf.
+- Successful usage snapshots are shared across processes for 10 minutes; `--fresh` bypasses this
+  cache while still honoring persistent 429 backoff. Per-account fetch/refresh locks coalesce
+  concurrent callers, and JSON adds `cached` plus `fetchedAtMs` provenance fields.
 - Parallel `list -u` / `usage` (fan-out fetch, ordered single render).
 - Deterministic display ordering: fixed provider registry order, then case-insensitive account
   name by default. `--sort added` uses `addedAt`; `--sort stored` preserves the `accounts.json`

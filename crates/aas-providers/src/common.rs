@@ -90,6 +90,7 @@ pub(crate) fn store_account_secret(
             }
         );
     }
+    aas_core::usage_cache::clear(&format!("{provider}/{name}"));
     Ok(())
 }
 

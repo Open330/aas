@@ -9,6 +9,7 @@ pub mod backoff;
 pub mod execargs;
 pub mod jwt;
 pub mod keychain;
+pub mod keyed_lock;
 pub mod model;
 pub mod naming;
 pub mod platform;
@@ -16,5 +17,6 @@ pub mod secure_store;
 pub mod share;
 pub mod store;
 pub mod usage;
+pub mod usage_cache;
 
 pub use model::{AccountRecord, ProfileType, Store};

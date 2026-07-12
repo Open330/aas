@@ -27,7 +27,7 @@ const STYLES: Styles = Styles::styled()
 
 const EXAMPLES: &str = "\
 Examples:
-  aas usage                live usage for every account (fetched in parallel)
+  aas usage                cached usage for every account (`--fresh` for live)
   aas login claude work    add a Claude account as an isolated profile
   aas switch codex work    make a stored account active
   aas e work               run the agent under a profile
@@ -98,7 +98,7 @@ impl From<SortMode> for AccountSort {
 
 #[derive(Subcommand)]
 enum Command {
-    /// List accounts per provider (or all). `-u` live usage table, `-d` dump credentials.
+    /// List accounts per provider (or all). `-u` usage table, `-d` dump credentials.
     #[command(visible_alias = "ls")]
     List {
         #[arg(value_name = "PROVIDER_OR_ACCOUNT")]
@@ -111,7 +111,7 @@ enum Command {
         #[arg(long, value_enum, default_value_t)]
         sort: SortMode,
     },
-    /// Live usage table for every account (shorthand for `list -u`).
+    /// Usage table for every account (shorthand for `list -u`).
     #[command(visible_alias = "u")]
     Usage {
         #[arg(value_name = "PROVIDER_OR_ACCOUNT")]
@@ -119,6 +119,9 @@ enum Command {
         /// Emit machine-readable JSON (for aas-bar and other integrations).
         #[arg(long)]
         json: bool,
+        /// Bypass the ten-minute success cache (active rate-limit backoff is still honored).
+        #[arg(long)]
+        fresh: bool,
         /// Account order within each provider.
         #[arg(long, value_enum, default_value_t)]
         sort: SortMode,
@@ -228,16 +231,40 @@ async fn main() {
             usage,
             debug,
             sort,
-        } => cmd_list(&store, provider.as_deref(), usage, debug, sort.into()).await,
+        } => {
+            cmd_list(
+                &store,
+                provider.as_deref(),
+                usage,
+                debug,
+                sort.into(),
+                aas_providers::UsageCacheMode::PreferCache,
+            )
+            .await
+        }
         Command::Usage {
             provider,
             json,
+            fresh,
             sort,
         } => {
-            if json {
-                cmd_usage_json(&store, provider.as_deref(), sort.into()).await
+            let cache_mode = if fresh {
+                aas_providers::UsageCacheMode::Refresh
             } else {
-                cmd_list(&store, provider.as_deref(), true, false, sort.into()).await
+                aas_providers::UsageCacheMode::PreferCache
+            };
+            if json {
+                cmd_usage_json(&store, provider.as_deref(), sort.into(), cache_mode).await
+            } else {
+                cmd_list(
+                    &store,
+                    provider.as_deref(),
+                    true,
+                    false,
+                    sort.into(),
+                    cache_mode,
+                )
+                .await
             }
         }
         Command::Status { provider } => cmd_status(&store, provider.as_deref()),
@@ -346,13 +373,15 @@ async fn cmd_list(
     usage: bool,
     debug: bool,
     sort: AccountSort,
+    cache_mode: aas_providers::UsageCacheMode,
 ) -> anyhow::Result<()> {
     let (provs, single_name) = aas_providers::resolve_scope(store, provider)?;
     let live = live_credentials(&provs).await;
 
     if usage {
         // Shared fetch path (also used by aas-bar): parallel usage for every account.
-        let items = aas_providers::snapshot_sorted(store, provider, sort).await?;
+        let items =
+            aas_providers::snapshot_sorted_with_cache(store, provider, sort, cache_mode).await?;
         let rows: Vec<UsageRow> = items
             .into_iter()
             .map(|it| {
@@ -463,8 +492,10 @@ async fn cmd_usage_json(
     store: &AccountStore,
     provider: Option<&str>,
     sort: AccountSort,
+    cache_mode: aas_providers::UsageCacheMode,
 ) -> anyhow::Result<()> {
-    let items = aas_providers::snapshot_sorted(store, provider, sort).await?;
+    let items =
+        aas_providers::snapshot_sorted_with_cache(store, provider, sort, cache_mode).await?;
     println!("{}", serde_json::to_string(&usage_json_response(&items))?);
     Ok(())
 }
@@ -481,6 +512,8 @@ struct UsageJsonAccount<'a> {
     name: &'a str,
     email: Option<&'a str>,
     active: bool,
+    cached: bool,
+    fetched_at_ms: Option<i64>,
     plan: Option<&'a str>,
     plan_label: Option<String>,
     headline: &'a str,
@@ -516,6 +549,8 @@ fn usage_json_response(items: &[aas_providers::AccountUsage]) -> UsageJsonRespon
                 name: &it.name,
                 email: it.email.as_deref(),
                 active: it.active,
+                cached: it.cached,
+                fetched_at_ms: it.fetched_at_ms,
                 plan: it.usage.plan.as_deref(),
                 // Only a real plan gets a pretty label; long-lived tokens (plan=None) stay
                 // null so the app falls back cleanly instead of chipping the raw headline.
@@ -765,10 +800,12 @@ async fn cmd_switch(store: &AccountStore, a: &str, b: Option<&str>) -> anyhow::R
 }
 
 fn cmd_rename(store: &AccountStore, from: &str, to: &str) -> anyhow::Result<()> {
-    let Some(_account) = store.get_by_name(from)? else {
+    let Some(account) = store.get_by_name(from)? else {
         anyhow::bail!("Account not found: {from}");
     };
     store.rename(from, to)?;
+    aas_core::usage_cache::clear(&format!("{}/{from}", account.provider));
+    aas_core::usage_cache::clear(&format!("{}/{to}", account.provider));
     ui::success(format!("Renamed {from} → {to}"));
     Ok(())
 }
@@ -814,6 +851,7 @@ fn cmd_remove(store: &AccountStore, args: &[String]) -> anyhow::Result<()> {
                 }
             );
         }
+        aas_core::usage_cache::clear(&format!("{prov}/{name}"));
         ui::success(format!("Removed {prov}/{name}"));
     } else {
         ui::warn(format!("Not found: {prov}/{name}"));
@@ -967,6 +1005,9 @@ mod tests {
             }
         ));
 
+        let parsed = Cli::try_parse_from(["aas", "usage", "--fresh"]).unwrap();
+        assert!(matches!(parsed.command, Command::Usage { fresh: true, .. }));
+
         let parsed = Cli::try_parse_from(["aas", "list", "--sort", "added", "-u"]).unwrap();
         assert!(matches!(
             parsed.command,
@@ -985,6 +1026,8 @@ mod tests {
             name: "work".into(),
             email: None,
             active: true,
+            cached: true,
+            fetched_at_ms: Some(456),
             usage: aas_core::usage::Usage {
                 headline: "Grok team".into(),
                 plan: Some("team".into()),
@@ -996,6 +1039,8 @@ mod tests {
         let value = serde_json::to_value(usage_json_response(&items)).unwrap();
         let account = &value["accounts"][0];
         assert_eq!(account["notes"][0], "rate remaining req=3 tok=9");
+        assert_eq!(account["cached"], true);
+        assert_eq!(account["fetchedAtMs"], 456);
         assert_eq!(account["meters"][0]["usedPct"], 25.0);
         assert_eq!(account["meters"][0]["resetMs"], 123);
         assert!(account["meters"][0].get("used_pct").is_none());

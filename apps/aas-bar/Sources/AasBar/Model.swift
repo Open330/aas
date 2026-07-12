@@ -19,12 +19,42 @@ struct Account: Codable, Identifiable {
     let name: String
     let email: String?
     let active: Bool
+    let cached: Bool?
+    let fetchedAtMs: Int64?
     let plan: String?
     let planLabel: String?
     let headline: String
     let error: String?
     let notes: [String]?
     let meters: [Meter]
+
+    init(
+        provider: String,
+        name: String,
+        email: String?,
+        active: Bool,
+        plan: String?,
+        planLabel: String?,
+        headline: String,
+        error: String?,
+        notes: [String]?,
+        meters: [Meter],
+        cached: Bool? = nil,
+        fetchedAtMs: Int64? = nil
+    ) {
+        self.provider = provider
+        self.name = name
+        self.email = email
+        self.active = active
+        self.cached = cached
+        self.fetchedAtMs = fetchedAtMs
+        self.plan = plan
+        self.planLabel = planLabel
+        self.headline = headline
+        self.error = error
+        self.notes = notes
+        self.meters = meters
+    }
 
     var id: String { "\(provider)/\(name)" }
 
@@ -86,7 +116,9 @@ extension Account {
                 headline: base.headline,
                 error: base.error,
                 notes: base.notes,
-                meters: base.meters
+                meters: base.meters,
+                cached: base.cached,
+                fetchedAtMs: base.fetchedAtMs
             )
         }
     }

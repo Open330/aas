@@ -198,11 +198,11 @@ pub fn plan_label(u: &Usage) -> String {
 /// Build the `Usage` and `Reset` cell contents for an account — one line per meter (5h/7d),
 /// each line coloured independently (usage green→red by used %, reset green→red by time left).
 fn usage_reset_cells(u: &Usage) -> (String, String) {
-    if let Some(err) = &u.error {
-        return (color_line(format!("⚠ {err}"), BarLevel::Bad), String::new());
-    }
     let mut usage_lines: Vec<String> = Vec::new();
     let mut reset_lines: Vec<String> = Vec::new();
+    if let Some(err) = &u.error {
+        usage_lines.push(color_line(format!("⚠ {err}"), BarLevel::Bad));
+    }
     for m in &u.meters {
         let used = m.used_pct.clamp(0.0, 100.0);
         // Bar fills with USED (like Claude Code's /usage): a full bar = at the limit.
