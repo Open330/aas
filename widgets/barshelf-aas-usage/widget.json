@@ -3,36 +3,64 @@
   "schemaVersion": 1,
   "id": "dev.barshelf.aas-usage",
   "name": "aas Usage",
-  "version": "0.1.6",
+  "version": "0.2.0",
   "icon": "gauge",
-  "bucket": { "group": "Agents", "order": 20, "size": "M" },
-
-  "entry": { "kind": "exec" },
+  "bucket": {
+    "group": "Agents",
+    "order": 21,
+    "size": "M"
+  },
+  "entry": {
+    "kind": "exec"
+  },
   "source": {
     "kind": "exec",
-    "command": ["aas", "usage", "--json"],
-    "discover": ["$AAS_BIN", "~/.local/bin/aas", "~/bin/aas", "~/.cargo/bin/aas", "/opt/homebrew/bin/aas", "/usr/local/bin/aas", "PATH"],
+    "command": [
+      "aas",
+      "usage",
+      "--json"
+    ],
+    "discover": [
+      "$AAS_BIN",
+      "~/.local/bin/aas",
+      "~/bin/aas",
+      "~/.cargo/bin/aas",
+      "/opt/homebrew/bin/aas",
+      "/usr/local/bin/aas",
+      "PATH"
+    ],
     "timeoutMs": 25000,
     "output": "data",
     "adapter": "aas-usage"
   },
-
-  "refresh": { "onOpen": true, "interval": null, "staleAfterSec": 600 },
-
+  "refresh": {
+    "onOpen": true,
+    "interval": null,
+    "staleAfterSec": 600
+  },
   "permissions": {
     "exec": [
       {
         "command": "aas",
-        "allowedArgs": [["usage", "--json"]],
+        "allowedArgs": [
+          [
+            "usage",
+            "--json"
+          ]
+        ],
         "maxOutputBytes": 1048576,
         "sensitiveOutput": false
       }
     ],
     "network": [],
     "readPaths": [],
-    "env": ["AAS_BIN"],
+    "env": [
+      "AAS_BIN"
+    ],
     "keychain": false
   },
-
-  "settings": []
+  "settings": [],
+  "appearance": {
+    "accent": "orange"
+  }
 }
