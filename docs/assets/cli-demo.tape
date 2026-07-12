@@ -47,12 +47,14 @@ Type `export PATH="/tmp/aas-readme-bin:$PWD/target/release:$PATH"`
 Enter
 Type "clear"
 Enter
+Sleep 500ms
+Type "aas usage"
+Enter
+Sleep 1s
 Set TypingSpeed 25ms
 Show
 
-Type "aas usage"
-Enter
-Sleep 2s
+Sleep 1.5s
 
 Type "aas e personal"
 Enter
