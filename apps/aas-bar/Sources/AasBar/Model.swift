@@ -268,7 +268,7 @@ final class UsageModel: ObservableObject {
     private var fetchTask: Task<Void, Never>?
     /// When we last *attempted* a fetch (success or failure). Guards against re-polling the
     /// rate-limited usage API on every incidental trigger — repeated refreshes inside this window
-    /// coalesce to the cached snapshot. Complements the CLI's shared on-disk escalating backoff.
+    /// coalesce to the cached snapshot. Complements the CLI's shared on-disk provider backoff.
     private var lastFetchAt: Date?
     private static let minFetchInterval: TimeInterval = 30
 

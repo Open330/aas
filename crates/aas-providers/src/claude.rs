@@ -426,11 +426,8 @@ pub(crate) async fn usage(account: &str) -> Usage {
         };
     }
     if status == 429 {
-        // Record the 429 with client-side escalation (see aas_core::backoff): the window doubles
-        // on every consecutive hit and is honored by *all* callers, so repeated retries widen the
-        // gap and converge instead of re-arming a short window forever. Anthropic sends Retry-After
-        // as delta-seconds; if it's absent/an HTTP-date we can't parse, pass 0 and let the backoff
-        // floor apply.
+        // Persist Anthropic's Retry-After so all local callers honor the same provider-supplied
+        // gate. If it is absent/an HTTP-date we can't parse, pass 0 and let the safety floor apply.
         let hint_ms: i64 = retry
             .as_deref()
             .and_then(|r| r.trim().parse().ok())

@@ -8,6 +8,12 @@ The widget runs `aas usage --json` (all accounts fetched in parallel) and
 renders the remaining quota per provider/account as a compact table in the
 BarShelf popover.
 
+<div align="center">
+  <img src="assets/screenshot.png" alt="aas Usage widget rendered in BarShelf" width="420" />
+  <br />
+  <sub>Native BarShelf rendering with example account data.</sub>
+</div>
+
 ## Install
 
 [![BarShelf Install](https://img.shields.io/badge/BarShelf-Install-0A84FF)](barshelf://install?url=https%3A%2F%2Fgithub.com%2FOpen330%2Faas)
@@ -44,5 +50,6 @@ handling stays inside the `aas` binary itself.
 Usage is considered for refresh only while the BarShelf popup is open and this
 widget is visible. A successful result remains fresh for 10 minutes. The
 manifest's `popupOnly` policy explicitly disables interval polling, background
-execution, file watchers, deadline/wake refreshes, and event triggers. AAS also shares its own 10-minute success cache
-and per-account fetch locks across terminal and widget callers.
+execution, file watchers, deadline/wake refreshes, and event triggers. AAS also
+shares its own 10-minute success cache and per-account fetch locks across
+terminal and widget callers.

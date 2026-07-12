@@ -13,6 +13,12 @@ A single-binary, dependency-free **multi-account switcher for LLM coding agents*
   use `--fresh` for an explicit live request.
 - **Reads existing `asx` state** — drop-in adoption, usually zero re-login.
 
+<div align="center">
+  <img src="docs/assets/cli-demo.gif" alt="aas CLI demo showing account list, status, and usage options" width="920" />
+  <br />
+  <sub>Rendered from the reproducible <a href="docs/assets/cli-demo.tape">VHS tape</a>.</sub>
+</div>
+
 ## Quickstart for Agents
 
 Paste this into your coding agent (Claude Code, Codex, …) to install and set up `aas`:
@@ -149,6 +155,10 @@ Prefer the menubar? This repo ships an `aas usage` widget for
 [BarShelf](https://github.com/Open330/barshelf), a scriptable menubar
 widget platform:
 
+<div align="center">
+  <img src="widgets/barshelf-aas-usage/assets/screenshot.png" alt="aas Usage widget in the BarShelf popover" width="420" />
+</div>
+
 ```bash
 mbk install https://github.com/Open330/aas
 ```
@@ -171,6 +181,9 @@ cargo build
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets --all-features
+
+# Regenerate the README CLI demo (requires VHS)
+vhs docs/assets/cli-demo.tape
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the complete development workflow,

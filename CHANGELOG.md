@@ -5,6 +5,8 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-07-12
+
 ### Added
 
 - Added a shared 10-minute last-known-good usage cache, additive `cached`/`fetchedAtMs` JSON
@@ -22,6 +24,9 @@ All notable user-facing changes are recorded here. The format follows
 
 ### Fixed
 
+- Removed synthetic exponential growth from persisted usage backoff. `aas` now honors the
+  provider's `Retry-After` (with a 60-second fallback only when absent), preventing one machine
+  from showing an hour-long local rate limit after the provider has already recovered.
 - Automatic refresh failures are surfaced in usage output instead of being silently discarded.
 
 ## [0.1.6] - 2026-07-12
@@ -71,7 +76,8 @@ All notable user-facing changes are recorded here. The format follows
 - Hardened account storage, provider adapters, proxy authentication, retries, installers, and
   portable app packaging.
 
-[Unreleased]: https://github.com/Open330/aas/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/Open330/aas/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/Open330/aas/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/Open330/aas/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/Open330/aas/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/Open330/aas/releases/tag/v0.1.4
