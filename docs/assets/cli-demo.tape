@@ -15,7 +15,7 @@ Set MarginFill "#161821"
 Set BorderRadius 12
 Set WindowBar Colorful
 Set Theme "Catppuccin Mocha"
-Set TypingSpeed 35ms
+Set TypingSpeed 25ms
 Set CursorBlink false
 Set Framerate 30
 
@@ -24,7 +24,7 @@ Env CODEX_HOME "/tmp/aas-readme-native-codex"
 Env PS1 "❯ "
 
 Hide
-Set TypingSpeed 0ms
+Set TypingSpeed 2ms
 Type "cargo build --release --quiet"
 Enter
 Type `rm -rf "$AAS_CONFIG_DIR" /tmp/aas-readme-bin /tmp/aas-readme-native-codex`
@@ -47,20 +47,20 @@ Type `export PATH="/tmp/aas-readme-bin:$PWD/target/release:$PATH"`
 Enter
 Type "clear"
 Enter
-Set TypingSpeed 35ms
+Set TypingSpeed 25ms
 Show
 
 Type "aas usage"
 Enter
-Sleep 5s
+Sleep 2s
 
 Type "aas e personal"
 Enter
-Sleep 3s
+Sleep 1.2s
 
 Type "aas e team"
 Enter
-Sleep 5s
+Sleep 2s
 
 Hide
 Type `rm -rf "$AAS_CONFIG_DIR" /tmp/aas-readme-bin /tmp/aas-readme-native-codex`
