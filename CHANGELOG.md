@@ -5,6 +5,12 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Labeled and ordered Codex usage windows from their reported duration instead of assuming
+  `primary` always means 5h and `secondary` always means 7d. A weekly-only primary window now
+  appears correctly as `7d`, while duration-less legacy responses retain the old fallback.
+
 ## [0.1.7] - 2026-07-12
 
 ### Added

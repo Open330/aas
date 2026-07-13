@@ -64,12 +64,12 @@ pub(crate) fn extract_plan_from_id_token(
 
 /// asx `codexReset`: `reset_at*1000` or `now + reset_after_seconds*1000` (epoch ms).
 pub(crate) fn codex_reset_ms(w: &Value, now: i64) -> Option<i64> {
-    if let Some(ra) = w.get("reset_at").and_then(|v| v.as_f64()) {
+    if let Some(ra) = numeric_field(w, &["reset_at", "resets_at", "resetAt", "resetsAt"]) {
         if ra != 0.0 {
             return Some((ra * 1000.0) as i64);
         }
     }
-    if let Some(ras) = w.get("reset_after_seconds").and_then(|v| v.as_f64()) {
+    if let Some(ras) = numeric_field(w, &["reset_after_seconds", "resetAfterSeconds"]) {
         if ras != 0.0 {
             return Some(now + (ras * 1000.0) as i64);
         }
@@ -104,6 +104,41 @@ fn codex_account_id(data: &Value) -> Option<String> {
         .map(String::from)
 }
 
+fn numeric_field(value: &Value, keys: &[&str]) -> Option<f64> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_f64))
+}
+
+/// Duration carried by current Codex rate-limit windows. Older wham payloads use seconds while
+/// newer Codex events expose minutes; accept both snake_case and camelCase variants.
+fn codex_window_minutes(window: &Value) -> Option<i64> {
+    numeric_field(window, &["window_minutes", "windowMinutes"])
+        .map(|minutes| minutes.round() as i64)
+        .or_else(|| {
+            numeric_field(
+                window,
+                &[
+                    "limit_window_seconds",
+                    "window_seconds",
+                    "limitWindowSeconds",
+                    "windowSeconds",
+                ],
+            )
+            .map(|seconds| (seconds / 60.0).round() as i64)
+        })
+        .filter(|minutes| *minutes > 0)
+}
+
+fn codex_window_label(minutes: i64) -> String {
+    if minutes % (24 * 60) == 0 {
+        format!("{}d", minutes / (24 * 60))
+    } else if minutes % 60 == 0 {
+        format!("{}h", minutes / 60)
+    } else {
+        format!("{minutes}m")
+    }
+}
+
 /// asx usage parse: `(headline, plan, meters)` from the wham/usage payload.
 pub(crate) fn parse_codex_usage(
     payload: &Value,
@@ -136,17 +171,26 @@ pub(crate) fn parse_codex_usage(
         None => "subscription-based (5h reasoning windows)".to_string(),
     };
 
-    let mut meters = Vec::new();
-    if let Some(p) = primary {
-        if let Some(up) = p.get("used_percent").and_then(|v| v.as_f64()) {
-            meters.push(Meter::new("5h", up, codex_reset_ms(p, now)));
-        }
-    }
-    if let Some(s) = secondary {
-        if let Some(up) = s.get("used_percent").and_then(|v| v.as_f64()) {
-            meters.push(Meter::new("7d", up, codex_reset_ms(s, now)));
-        }
-    }
+    // `primary` and `secondary` used to mean 5h and 7d respectively, but current Codex can return
+    // a weekly (10080-minute) window as the sole `primary`. Prefer the authoritative duration and
+    // retain the positional labels only for old payloads which omit duration metadata.
+    let mut parsed = [(primary, "5h", 300_i64), (secondary, "7d", 10_080_i64)]
+        .into_iter()
+        .filter_map(|(window, fallback_label, fallback_minutes)| {
+            let window = window?;
+            let used = numeric_field(window, &["used_percent", "usedPercent"])?;
+            let minutes = codex_window_minutes(window);
+            let label = minutes
+                .map(codex_window_label)
+                .unwrap_or_else(|| fallback_label.to_string());
+            Some((
+                minutes.unwrap_or(fallback_minutes),
+                Meter::new(label, used, codex_reset_ms(window, now)),
+            ))
+        })
+        .collect::<Vec<_>>();
+    parsed.sort_by_key(|(minutes, _)| *minutes);
+    let meters = parsed.into_iter().map(|(_, meter)| meter).collect();
     (headline, plan_type, meters)
 }
 
@@ -500,6 +544,51 @@ mod tests {
         assert_eq!(h2, "subscription-based (5h reasoning windows)");
         assert!(p2.is_none());
         assert_eq!(m2.len(), 2);
+        assert_eq!(m2[0].label, "5h");
+        assert_eq!(m2[1].label, "7d");
+    }
+
+    #[test]
+    fn usage_labels_a_lone_primary_window_from_its_duration() {
+        let payload = json!({
+            "rate_limits": {
+                "plan_type": "pro",
+                "primary": {
+                    "used_percent": 14.0,
+                    "window_minutes": 10080,
+                    "resets_at": 1_784_509_561
+                },
+                "secondary": null
+            }
+        });
+        let (_, plan, meters) = parse_codex_usage(&payload, None, 0);
+        assert_eq!(plan.as_deref(), Some("pro"));
+        assert_eq!(meters.len(), 1);
+        assert_eq!(meters[0].label, "7d");
+        assert_eq!(meters[0].used_pct, 14.0);
+        assert_eq!(meters[0].reset_ms, Some(1_784_509_561_000));
+    }
+
+    #[test]
+    fn usage_sorts_windows_by_duration_instead_of_position() {
+        let payload = json!({
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 40.0,
+                    "limit_window_seconds": 604800
+                },
+                "secondary_window": {
+                    "usedPercent": 10.0,
+                    "limitWindowSeconds": 18000
+                }
+            }
+        });
+        let (_, _, meters) = parse_codex_usage(&payload, None, 0);
+        assert_eq!(meters.len(), 2);
+        assert_eq!(meters[0].label, "5h");
+        assert_eq!(meters[0].used_pct, 10.0);
+        assert_eq!(meters[1].label, "7d");
+        assert_eq!(meters[1].used_pct, 40.0);
     }
 
     #[test]
