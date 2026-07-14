@@ -3,7 +3,7 @@
 # aas — Agent Account Switcher
 
 A single-binary, dependency-free **multi-account switcher for LLM coding agents**
-(Claude Code, Codex, Grok/xAI, Z.AI, Cursor). Rust rewrite of
+(Claude Code, Codex, Grok/xAI, Z.AI, Cursor, Pi). Rust rewrite of
 [`asx`](https://github.com/enif-lee/asx).
 
 - Store each account's credential in its own `0600` file / OS keychain entry and switch instantly.
@@ -71,6 +71,10 @@ aas login claude work
 aas login codex personal              # opens a browser
 aas login codex server --headless     # CLI-only box: device-code flow (no browser)
 
+# Pi authenticates in its TUI; snapshot its complete auth.json afterwards
+pi                                      # run /login
+aas load pi personal
+
 # See what you have, and live quota for every account (parallel fetch)
 aas list
 aas usage
@@ -83,6 +87,7 @@ aas exec work -- --version
 
 # Cross-provider: run Claude's UI on the codex backend (via the local proxy)
 aas exec personal.codex claude
+aas exec personal.codex pi -- -p "run Pi on the Codex backend"
 
 # Use a profile in the *current shell* without switching your default
 eval "$(aas export personal.codex)"       # POSIX (bash/zsh)
@@ -145,7 +150,7 @@ agent conversation history, or machine-specific active-account markers.
 (default), `--isolated`, `--share <a,b,…>`, `--isolate <a,b,…>` over the categories
 `sessions, skills, agents, hooks, settings`.
 
-**Providers:** `claude`, `codex`, `grok` (alias `xai`), `zai`, `cursor`.
+**Providers:** `claude`, `codex`, `grok` (alias `xai`), `zai`, `cursor`, `pi`.
 
 Colors respect `NO_COLOR` and only apply on a TTY.
 
@@ -168,7 +173,10 @@ See [`widgets/barshelf-aas-usage/`](widgets/barshelf-aas-usage/) for details
 
 ## Status
 
-The port covers the `asx` P1–P5 surface: storage/keychain/import, provider adapters,
+The port covers the `asx` P1–P5 surface plus the current post-v0.3.0 proxy/provider updates:
+Pi, GPT-5.6 Sol/Terra/Luna, live Grok/Z.AI model discovery, Claude tier aliases,
+Anthropic `count_tokens`, strict tool-argument normalization, and Grok OIDC refresh. It includes
+storage/keychain/import, provider adapters,
 parallel `usage`, account management, same- and cross-provider `exec`, the translating proxy,
 and staged static-binary releases. Rust and Swift tests, strict lint/docs checks, installer
 parsing, and portable app-bundle verification run in CI. See

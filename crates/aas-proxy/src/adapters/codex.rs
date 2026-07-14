@@ -634,6 +634,9 @@ fn reasoning_levels() -> Value {
         { "effort": "low", "description": "Fast responses with lighter reasoning" },
         { "effort": "medium", "description": "Balances speed and reasoning depth" },
         { "effort": "high", "description": "Greater reasoning depth for complex problems" },
+        { "effort": "xhigh", "description": "Extra-high reasoning for hard multi-step work" },
+        { "effort": "max", "description": "Maximum reasoning budget" },
+        { "effort": "ultra", "description": "Ultra reasoning (Sol/Terra)" },
     ])
 }
 

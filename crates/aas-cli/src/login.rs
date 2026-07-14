@@ -29,6 +29,7 @@ fn home_env_var(provider_key: &str) -> Option<&'static str> {
         "claude" => Some("CLAUDE_CONFIG_DIR"),
         "codex" => Some("CODEX_HOME"),
         "grok" => Some("GROK_HOME"),
+        "pi" => Some("PI_CODING_AGENT_DIR"),
         _ => None,
     }
 }
@@ -197,7 +198,21 @@ pub async fn run_login_flow(
         return Ok(Some(target));
     }
 
-    // 3. Providers without a native login flow.
+    // 3. Pi authenticates interactively inside its TUI (`/login`) and has no standalone login
+    // subcommand. A complete auth.json can still be supplied for a headless/import flow.
+    if provider == Provider::Pi {
+        if let Ok(raw) = std::env::var("PI_AUTH_JSON") {
+            if !raw.trim().is_empty() {
+                provider.load_pi_auth_json(&target, raw.trim()).await?;
+                return Ok(Some(target));
+            }
+        }
+        anyhow::bail!(
+            "Pi has no non-interactive login command. Run `pi`, complete `/login`, then `aas load pi {target}`. Or set PI_AUTH_JSON to a complete auth.json document."
+        );
+    }
+
+    // 4. Providers without a native login flow.
     if provider.login_command().is_none() {
         eprintln!(
             "Login flow is not supported for provider '{}'.",
@@ -206,12 +221,12 @@ pub async fn run_login_flow(
         return Ok(None);
     }
 
-    // 4. system profile → login into the provider's normal home.
+    // 5. system profile → login into the provider's normal home.
     if system_home {
         return login_in_home(provider, &target, None, device_auth).await;
     }
 
-    // 5. Isolated agent profile → login into a per-profile home.
+    // 6. Isolated agent profile → login into a per-profile home.
     let dir: PathBuf = profile_home(provider.id(), &target);
     ensure_700(&dir);
     seed_agent_home(&key, &dir);

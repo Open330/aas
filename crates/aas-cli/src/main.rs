@@ -353,7 +353,7 @@ fn can_show_sharing(provider: &str, profile_type: Option<ProfileType>) -> bool {
     profile_type != Some(ProfileType::System)
         && matches!(
             normalize_provider_key(provider).as_str(),
-            "claude" | "codex" | "grok"
+            "claude" | "codex" | "grok" | "pi"
         )
 }
 
@@ -501,7 +501,18 @@ async fn cmd_usage_json(
 }
 
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct UsageJsonResponse<'a> {
+    accounts: Vec<UsageJsonAccount<'a>>,
+    provider_groups: Vec<UsageJsonProviderGroup<'a>>,
+    worst_remaining_pct: Option<f64>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageJsonProviderGroup<'a> {
+    provider: &'a str,
+    title: &'static str,
     accounts: Vec<UsageJsonAccount<'a>>,
 }
 
@@ -520,6 +531,7 @@ struct UsageJsonAccount<'a> {
     error: Option<&'a str>,
     notes: &'a [String],
     meters: Vec<UsageJsonMeter<'a>>,
+    remaining_pct: Option<f64>,
 }
 
 #[derive(serde::Serialize)]
@@ -530,43 +542,84 @@ struct UsageJsonMeter<'a> {
     reset_ms: Option<i64>,
 }
 
-fn usage_json_response(items: &[aas_providers::AccountUsage]) -> UsageJsonResponse<'_> {
-    let accounts = items
+fn remaining_pct(meters: &[aas_core::usage::Meter]) -> Option<f64> {
+    meters
         .iter()
-        .map(|it| {
-            let meters = it
-                .usage
-                .meters
-                .iter()
-                .map(|meter| UsageJsonMeter {
-                    label: &meter.label,
-                    used_pct: meter.used_pct,
-                    reset_ms: meter.reset_ms,
-                })
-                .collect();
-            UsageJsonAccount {
-                provider: &it.provider,
-                name: &it.name,
-                email: it.email.as_deref(),
-                active: it.active,
-                cached: it.cached,
-                fetched_at_ms: it.fetched_at_ms,
-                plan: it.usage.plan.as_deref(),
-                // Only a real plan gets a pretty label; long-lived tokens (plan=None) stay
-                // null so the app falls back cleanly instead of chipping the raw headline.
-                plan_label: it
-                    .usage
-                    .plan
-                    .as_ref()
-                    .map(|_| render::plan_label(&it.usage)),
-                headline: &it.usage.headline,
-                error: it.usage.error.as_deref(),
-                notes: &it.usage.notes,
-                meters,
-            }
-        })
-        .collect();
-    UsageJsonResponse { accounts }
+        .map(|meter| 100.0 - meter.used_pct.clamp(0.0, 100.0))
+        .reduce(f64::min)
+}
+
+fn usage_json_account(item: &aas_providers::AccountUsage) -> UsageJsonAccount<'_> {
+    UsageJsonAccount {
+        provider: &item.provider,
+        name: &item.name,
+        email: item.email.as_deref(),
+        active: item.active,
+        cached: item.cached,
+        fetched_at_ms: item.fetched_at_ms,
+        plan: item.usage.plan.as_deref(),
+        // Only a real plan gets a pretty label; long-lived tokens (plan=None) stay null so the
+        // app falls back cleanly instead of chipping the raw headline.
+        plan_label: item
+            .usage
+            .plan
+            .as_ref()
+            .map(|_| render::plan_label(&item.usage)),
+        headline: &item.usage.headline,
+        error: item.usage.error.as_deref(),
+        notes: &item.usage.notes,
+        meters: item
+            .usage
+            .meters
+            .iter()
+            .map(|meter| UsageJsonMeter {
+                label: &meter.label,
+                used_pct: meter.used_pct,
+                reset_ms: meter.reset_ms,
+            })
+            .collect(),
+        remaining_pct: remaining_pct(&item.usage.meters),
+    }
+}
+
+fn provider_title(provider: &str) -> &'static str {
+    match provider {
+        "claude" => "Claude",
+        "codex" => "Codex",
+        "zai" => "Zai",
+        "grok" => "Grok",
+        "cursor" => "Cursor",
+        "pi" => "Pi",
+        _ => "Other",
+    }
+}
+
+fn usage_json_response(items: &[aas_providers::AccountUsage]) -> UsageJsonResponse<'_> {
+    let accounts = items.iter().map(usage_json_account).collect();
+    let mut provider_groups: Vec<UsageJsonProviderGroup<'_>> = Vec::new();
+    for item in items {
+        if let Some(group) = provider_groups
+            .last_mut()
+            .filter(|group| group.provider == item.provider)
+        {
+            group.accounts.push(usage_json_account(item));
+        } else {
+            provider_groups.push(UsageJsonProviderGroup {
+                provider: &item.provider,
+                title: provider_title(&item.provider),
+                accounts: vec![usage_json_account(item)],
+            });
+        }
+    }
+    let worst_remaining_pct = items
+        .iter()
+        .filter_map(|item| remaining_pct(&item.usage.meters))
+        .reduce(f64::min);
+    UsageJsonResponse {
+        accounts,
+        provider_groups,
+        worst_remaining_pct,
+    }
 }
 
 fn cmd_status(store: &AccountStore, provider: Option<&str>) -> anyhow::Result<()> {
@@ -680,7 +733,7 @@ async fn cmd_load(
                     ui::hint(format!("shell env:     eval \"$(aas export {prov})\""));
                 } else {
                     ui::error(format!("Unknown provider: {prov}"));
-                    ui::hint("providers: claude · codex · grok · zai · cursor");
+                    ui::hint("providers: claude · codex · grok · zai · cursor · pi");
                     ui::hint("`load` snapshots the currently logged-in credential, e.g.:  aas load codex");
                 }
                 std::process::exit(1);
@@ -740,7 +793,7 @@ async fn cmd_login(
         (Some(p), n) => (p.clone(), n.clone()),
         (None, _) => {
             ui::error("Specify a provider to log in.");
-            ui::hint("providers:  claude · codex · grok · zai");
+            ui::hint("providers:  claude · codex · grok · zai · pi");
             ui::hint("example:    aas login claude work");
             std::process::exit(2);
         }
@@ -865,9 +918,9 @@ fn cmd_sharing(store: &AccountStore, name: &str, share: &ShareArgs) -> anyhow::R
     };
     if !matches!(
         normalize_provider_key(&acct.provider).as_str(),
-        "claude" | "codex" | "grok"
+        "claude" | "codex" | "grok" | "pi"
     ) {
-        anyhow::bail!("Sharing is only available for agent profiles (claude, codex, grok).");
+        anyhow::bail!("Sharing is only available for agent profiles (claude, codex, grok, pi).");
     }
     if acct.profile_type == Some(ProfileType::System) {
         anyhow::bail!(
@@ -1043,6 +1096,11 @@ mod tests {
         assert_eq!(account["fetchedAtMs"], 456);
         assert_eq!(account["meters"][0]["usedPct"], 25.0);
         assert_eq!(account["meters"][0]["resetMs"], 123);
+        assert_eq!(account["remainingPct"], 75.0);
+        assert_eq!(value["worstRemainingPct"], 75.0);
+        assert_eq!(value["providerGroups"][0]["provider"], "grok");
+        assert_eq!(value["providerGroups"][0]["title"], "Grok");
+        assert_eq!(value["providerGroups"][0]["accounts"][0]["name"], "work");
         assert!(account["meters"][0].get("used_pct").is_none());
     }
 }

@@ -4,9 +4,10 @@ Live LLM quota for every `aas` account, right in your macOS menubar via
 [BarShelf](https://github.com/Open330/barshelf) — a scriptable menubar
 widget platform.
 
-The widget runs `aas usage --json` (all accounts fetched in parallel) and
-renders the remaining quota per provider/account as a compact table in the
-BarShelf popover.
+The widget runs `aas usage --json` (all accounts fetched in parallel) and uses
+its own declarative workflow to render each provider/account. Every 5h/7d bar
+represents quota **used**, the row also shows quota **left**, and reset time is
+kept as separate text so it cannot be mistaken for the progress value.
 
 <div align="center">
   <img src="assets/screenshot.png" alt="aas Usage widget rendered in BarShelf" width="420" />
@@ -44,6 +45,10 @@ barshelf://install?url=https%3A%2F%2Fgithub.com%2FOpen330%2Faas
 The widget only requests permission to execute `aas usage --json`. No network,
 file-read, or keychain access is declared in the manifest — all credential
 handling stays inside the `aas` binary itself.
+
+The renderer lives in this repository's `workflow.json`; it does not depend on
+BarShelf's built-in `aas-usage` adapter, so widget presentation changes ship
+with AAS itself.
 
 ## Refresh behavior
 

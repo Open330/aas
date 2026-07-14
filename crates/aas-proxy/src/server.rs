@@ -6,7 +6,7 @@
 //! ```
 
 use crate::adapters::{pick_agent, pick_backend};
-use crate::models::backend_choices;
+use crate::models::{backend_choices, refresh_backend_choices};
 use crate::retry::{fetch_upstream_with_retry, UpstreamOutcome};
 use crate::sse::{SseFramer, ToolAccumulator};
 use crate::types::{
@@ -98,13 +98,18 @@ pub async fn start_proxy(options: ProxyStartOptions) -> anyhow::Result<ProxyHand
         uuid::Uuid::new_v4().simple()
     );
 
+    let client = reqwest::Client::builder().build()?;
+    if !cred.is_empty() {
+        let _ = refresh_backend_choices(&client, &backend_provider, &cred).await;
+    }
+
     let state = Arc::new(ProxyState {
         agent: pick_agent(&agent_provider),
         backend: pick_backend(&backend_provider),
         agent_provider,
         backend_provider,
         cred,
-        client: reqwest::Client::builder().build()?,
+        client,
         auth_token: auth_token.clone(),
         request_slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT_REQUESTS)),
     });
@@ -137,15 +142,78 @@ pub async fn start_proxy(options: ProxyStartOptions) -> anyhow::Result<ProxyHand
 }
 
 pub(crate) fn is_inference(method: &Method, path: &str) -> bool {
+    if method != Method::POST {
+        return false;
+    }
+    let path = path.trim_end_matches('/');
+    [
+        "/responses",
+        "/messages",
+        "/chat/completions",
+        "/completions",
+    ]
+    .iter()
+    .any(|endpoint| path.ends_with(endpoint))
+}
+
+pub(crate) fn is_count_tokens(method: &Method, path: &str) -> bool {
     method == Method::POST
-        && (path.contains("/responses")
-            || path.contains("/messages")
-            || path.contains("/chat/completions")
-            || path.contains("/completions"))
+        && path
+            .trim_end_matches('/')
+            .ends_with("/messages/count_tokens")
 }
 
 pub(crate) fn is_models(method: &Method, path: &str) -> bool {
     method == Method::GET && path.trim_end_matches('/').ends_with("/models")
+}
+
+fn content_chars(value: &Value) -> usize {
+    match value {
+        Value::String(text) => text.chars().count(),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::String(text) => text.chars().count(),
+                Value::Object(object) => object
+                    .get("text")
+                    .or_else(|| object.get("content"))
+                    .and_then(Value::as_str)
+                    .map(|text| text.chars().count())
+                    .unwrap_or_else(|| item.to_string().chars().count()),
+                _ => 0,
+            })
+            .sum(),
+        Value::Object(_) => value.to_string().chars().count(),
+        _ => 0,
+    }
+}
+
+/// Stable local approximation for Anthropic's token-counting endpoint. It is used for context
+/// meters and pre-flight gates only; inference/billing always remains upstream-authoritative.
+pub(crate) fn estimate_anthropic_input_tokens(raw: &[u8]) -> usize {
+    if raw.is_empty() {
+        return 0;
+    }
+    let Ok(body) = serde_json::from_slice::<Value>(raw) else {
+        return raw.len().div_ceil(4).max(1);
+    };
+    let mut chars = body.get("system").map(content_chars).unwrap_or(0);
+    chars += body
+        .get("messages")
+        .and_then(Value::as_array)
+        .map(|messages| {
+            messages
+                .iter()
+                .map(|message| message.get("content").map(content_chars).unwrap_or(0))
+                .sum::<usize>()
+        })
+        .unwrap_or(0);
+    chars += body
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(|tools| Value::Array(tools.clone()).to_string().chars().count())
+        .unwrap_or(0);
+    chars.div_ceil(4).max(1)
 }
 
 fn json_response(status: StatusCode, value: Value) -> Response {
@@ -186,6 +254,22 @@ async fn handle(State(st): State<Arc<ProxyState>>, req: Request) -> Response {
             }
         };
         return json_response(StatusCode::OK, body);
+    }
+
+    if is_count_tokens(&method, &path) {
+        let body = match axum::body::to_bytes(req.into_body(), MAX_REQUEST_BODY_BYTES).await {
+            Ok(body) => body,
+            Err(_) => {
+                return json_response(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    json!({ "error": { "message": format!("request body exceeds {MAX_REQUEST_BODY_BYTES} bytes") } }),
+                )
+            }
+        };
+        return json_response(
+            StatusCode::OK,
+            json!({ "input_tokens": estimate_anthropic_input_tokens(&body) }),
+        );
     }
 
     // Non-inference startup checkpoints (auth/status/billing). Real auth is the backend cred.

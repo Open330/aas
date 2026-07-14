@@ -5,7 +5,10 @@ use crate::adapters::claude::{ClaudeAgent, ClaudeBackend};
 use crate::adapters::codex::{CodexAgent, CodexBackend};
 use crate::adapters::grok::{GrokAgent, GrokBackend};
 use crate::adapters::zai::{is_zai_overload, ZaiBackend};
-use crate::models::{backend_choices, resolve_choice};
+use crate::models::{
+    backend_choices, clear_remote_model_cache, detect_agent_tier, grok_models_to_choices,
+    resolve_choice, AgentTier,
+};
 use crate::retry::{
     backoff_ms, classify_body, is_retryable_fetch_error, should_return_stream, BodyDecision,
 };
@@ -23,9 +26,11 @@ fn lock_models() -> std::sync::MutexGuard<'static, ()> {
     MODEL_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Clear model env so `backend_choices` falls back to built-in defaults (point the config file at a
-/// path that does not exist so a real `~/.../asx/models.json` on the dev machine can't leak in).
+/// Clear model env and the live-discovery cache so `backend_choices` falls back to built-in
+/// defaults (point the config file at a path that does not exist so a real
+/// `~/.../asx/models.json` on the dev machine can't leak in).
 fn reset_model_env() {
+    clear_remote_model_cache();
     for p in ["CODEX", "ZAI", "CLAUDE", "GROK"] {
         std::env::remove_var(format!("ASX_{p}_MODELS"));
     }
@@ -160,6 +165,21 @@ fn accumulator_first_seen_order_even_when_later_index_first() {
     assert!(acc.is_empty());
 }
 
+#[test]
+fn accumulator_normalizes_float_spelled_integers() {
+    let mut acc = ToolAccumulator::new();
+    acc.push(&delta(
+        0,
+        Some("a"),
+        Some("spawn"),
+        Some(r#"{"timeout_ms":30000.0,"ratio":0.5}"#),
+    ));
+    let CommonEvent::ToolCall { arguments, .. } = &acc.list()[0] else {
+        unreachable!();
+    };
+    assert_eq!(arguments, r#"{"ratio":0.5,"timeout_ms":30000}"#);
+}
+
 // ---------------------------------------------------------------------------
 // Retry decision logic (pure) — reproduces the §H named scenarios
 // ---------------------------------------------------------------------------
@@ -257,7 +277,9 @@ fn backoff_grows_and_caps() {
 
 #[test]
 fn path_classification() {
-    use crate::server::{is_inference, is_models};
+    use crate::server::{
+        estimate_anthropic_input_tokens, is_count_tokens, is_inference, is_models,
+    };
     use axum::http::Method;
     assert!(is_inference(&Method::POST, "/v1/messages"));
     assert!(is_inference(&Method::POST, "/backend-api/codex/responses"));
@@ -265,10 +287,18 @@ fn path_classification() {
     assert!(is_inference(&Method::POST, "/v1/completions"));
     assert!(!is_inference(&Method::GET, "/v1/messages"));
     assert!(!is_inference(&Method::POST, "/health"));
+    assert!(!is_inference(&Method::POST, "/v1/messages/count_tokens"));
+    assert!(is_count_tokens(&Method::POST, "/v1/messages/count_tokens"));
     assert!(is_models(&Method::GET, "/v1/models"));
     assert!(is_models(&Method::GET, "/models/"));
     assert!(!is_models(&Method::GET, "/models/foo"));
     assert!(!is_models(&Method::POST, "/v1/models"));
+    assert_eq!(
+        estimate_anthropic_input_tokens(
+            br#"{"system":"abcd","messages":[{"content":"abcdefgh"}]}"#
+        ),
+        3
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -402,6 +432,22 @@ fn claude_backend_parse_stream_chunks() {
             message: "boom".into()
         }]
     );
+}
+
+#[test]
+fn claude_empty_end_turn_emits_materialized_text_and_stop_sequence() {
+    let mut ctx = StreamCtx::new("cid".into(), 0, "model".into(), None);
+    let out = ClaudeAgent.format_stream_chunk(
+        &CommonEvent::Done {
+            finish_reason: Some("stop".into()),
+        },
+        &mut ctx,
+    );
+    assert!(out.contains("content_block_start"));
+    assert!(out.contains("text_delta"));
+    assert!(out.contains("\"text\":\"\""));
+    assert!(out.contains("\"stop_sequence\":null"));
+    assert!(out.contains("message_stop"));
 }
 
 #[test]
@@ -570,6 +616,11 @@ fn codex_agent_format_models_shape() {
     assert_eq!(out["models"][0]["slug"], "gpt-5.5-high");
     assert_eq!(out["models"][0]["default_reasoning_level"], "high");
     assert_eq!(out["models"][0]["context_window"], 200000);
+    assert!(out["models"][0]["supported_reasoning_levels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|level| level["effort"] == "ultra"));
 }
 
 // ---------------------------------------------------------------------------
@@ -630,6 +681,27 @@ fn grok_backend_drops_reasoning_content() {
             finish_reason: Some("stop".into())
         }]
     );
+}
+
+#[test]
+fn grok_backend_forwards_live_model_reasoning_effort() {
+    let _g = lock_models();
+    reset_model_env();
+    std::env::set_var("ASX_GROK_MODELS", "grok-4.5:high");
+    let up = GrokBackend.build_request(
+        &CommonRequest {
+            model: "grok-4.5-high".into(),
+            messages: vec![user("hi")],
+            stream: true,
+            ..Default::default()
+        },
+        "jwt-token",
+    );
+    let body: Value = serde_json::from_str(&up.body).unwrap();
+    assert_eq!(body["model"], "grok-4.5");
+    assert_eq!(body["reasoning_effort"], "high");
+    std::env::remove_var("ASX_GROK_MODELS");
+    reset_model_env();
 }
 
 #[test]
@@ -741,22 +813,54 @@ fn models_defaults_per_provider() {
     let _g = lock_models();
     reset_model_env();
     let codex = backend_choices("codex");
-    assert_eq!(
-        codex.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
-        vec![
-            "gpt-5.5-high",
-            "gpt-5.5-medium",
-            "gpt-5.5-low",
-            "gpt-5.5-xhigh"
-        ]
-    );
-    assert!(codex.iter().all(|c| c.model == "gpt-5.5"));
+    assert_eq!(codex.len(), 21);
+    assert_eq!(codex[0].id, "gpt-5.6-sol-high");
+    assert_eq!(codex[1].id, "gpt-5.6-sol-medium");
+    assert_eq!(codex[2].id, "gpt-5.6-sol-low");
+    assert!(codex
+        .iter()
+        .any(|choice| choice.id == "gpt-5.6-terra-ultra"));
+    assert!(codex.iter().any(|choice| choice.id == "gpt-5.6-luna-max"));
+    assert!(codex.iter().any(|choice| choice.id == "gpt-5.5-high"));
     let claude = backend_choices("claude");
     assert_eq!(claude[0].id, "claude-opus-4-8");
     let zai = backend_choices("zai");
     assert_eq!(zai.len(), 4);
     assert_eq!(zai[1].effort.as_deref(), Some("max"));
     assert_eq!(backend_choices("grok")[0].id, "grok-build");
+}
+
+#[test]
+fn models_resolve_claude_tier_aliases_to_safe_codex_choices() {
+    let _g = lock_models();
+    reset_model_env();
+    assert_eq!(
+        detect_agent_tier("claude-haiku-4-5"),
+        Some(AgentTier::Haiku)
+    );
+    assert_eq!(resolve_choice("codex", "haiku").id, "gpt-5.6-sol-low");
+    assert_eq!(
+        resolve_choice("codex", "claude-sonnet-4-6").id,
+        "gpt-5.6-sol-medium"
+    );
+    assert_eq!(resolve_choice("codex", "opus").id, "gpt-5.6-sol-high");
+    assert_eq!(resolve_choice("codex", "fable").id, "gpt-5.6-sol-xhigh");
+}
+
+#[test]
+fn grok_live_models_expand_reasoning_efforts_default_first() {
+    let choices = grok_models_to_choices(&[json!({
+        "id": "grok-4.5",
+        "model": "grok-4.5",
+        "supports_reasoning_effort": true,
+        "reasoning_efforts": [
+            { "value": "low" },
+            { "value": "high", "default": true }
+        ]
+    })]);
+    assert_eq!(choices[0].id, "grok-4.5-high");
+    assert_eq!(choices[0].effort.as_deref(), Some("high"));
+    assert_eq!(choices[1].id, "grok-4.5-low");
 }
 
 #[test]
@@ -882,9 +986,9 @@ async fn server_models_and_fake_auth_routes() {
     use crate::server::{start_proxy, Credential, ProxyStartOptions};
     let handle = start_proxy(ProxyStartOptions {
         source_provider: "grok".into(),
-        target_provider: "zai".into(),
+        target_provider: "codex".into(),
         target_credential: Credential {
-            raw: Some("zkey".into()),
+            raw: Some("{}".into()),
             api_key: None,
         },
         tmp_dir: None,
@@ -934,6 +1038,21 @@ async fn server_models_and_fake_auth_routes() {
     assert_eq!(auth["authenticated"], true);
     assert_eq!(auth["via"], "asx-proxy");
 
+    let counted: Value = client
+        .post(format!("{}/v1/messages/count_tokens", handle.url))
+        .header(reqwest::header::AUTHORIZATION, &bearer)
+        .json(&json!({
+            "system": "abcd",
+            "messages": [{ "role": "user", "content": "abcdefgh" }]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(counted["input_tokens"], 3);
+
     handle.stop().await;
 }
 
@@ -942,9 +1061,9 @@ async fn server_rejects_invalid_and_oversized_inference_bodies() {
     use crate::server::{start_proxy, Credential, ProxyStartOptions};
     let handle = start_proxy(ProxyStartOptions {
         source_provider: "grok".into(),
-        target_provider: "zai".into(),
+        target_provider: "codex".into(),
         target_credential: Credential {
-            raw: Some("zkey".into()),
+            raw: Some("{}".into()),
             api_key: None,
         },
         tmp_dir: None,

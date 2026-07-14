@@ -5,8 +5,30 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Added Pi as a first-class provider, including native `auth.json` load/switch, isolated profile
+  execution, shared state, shell export, and Pi as a cross-provider proxy frontend.
+- Added GPT-5.6 Sol/Terra/Luna choices while retaining GPT-5.5 compatibility, plus live per-session
+  model discovery from Grok and Z.AI.
+- Added Grok OIDC expiry detection and refresh-token rotation, including native auth synchronization
+  for system profiles.
+
+### Changed
+
+- Claude Opus/Sonnet/Haiku/Fable aliases now resolve to safe backend effort tiers, including
+  low-effort Sol for Haiku instead of preview-gated models.
+- Grok model choices now forward their advertised `reasoning_effort`; Codex catalogs expose the
+  complete low/medium/high/xhigh/max/ultra effort ladder.
+- The BarShelf widget now owns its renderer as a declarative workflow: 5h/7d progress bars show
+  quota used, while quota left and time until reset are presented as separate text.
+
 ### Fixed
 
+- Handled Anthropic `/v1/messages/count_tokens` locally instead of misrouting it to inference.
+- Normalized whole-number float spellings in streamed tool arguments and materialized empty Claude
+  `end_turn` responses with `stop_sequence: null`, preventing Codex multi-agent and Claude Task
+  subagent deserialization failures.
 - Labeled and ordered Codex usage windows from their reported duration instead of assuming
   `primary` always means 5h and `secondary` always means 7d. A weekly-only primary window now
   appears correctly as `7d`, while duration-less legacy responses retain the old fallback.

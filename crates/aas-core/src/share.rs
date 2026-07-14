@@ -28,8 +28,8 @@ const fn file(name: &'static str, category: &'static str) -> SharedEntry {
     }
 }
 
-/// config.toml is provider-injected on cross-provider runs, so it is skipped there.
-pub const INJECTED_WHEN_CROSS: &[&str] = &["config.toml"];
+/// Provider configs rewritten for cross-provider runs; never symlink them from the system home.
+pub const INJECTED_WHEN_CROSS: &[&str] = &["config.toml", "models.json", "settings.json"];
 
 /// asx `SHARED[providerKey]`.
 pub fn shared_entries(provider: &str) -> &'static [SharedEntry] {
@@ -37,6 +37,7 @@ pub fn shared_entries(provider: &str) -> &'static [SharedEntry] {
         "claude" => &CLAUDE,
         "codex" => &CODEX,
         "grok" => &GROK,
+        "pi" => &PI,
         _ => &[],
     }
 }
@@ -78,6 +79,16 @@ static GROK: [SharedEntry; 6] = [
     dir("skills", "skills"),
     dir("completions", "settings"),
     file("config.toml", "settings"),
+];
+
+static PI: [SharedEntry; 7] = [
+    dir("sessions", "sessions"),
+    dir("skills", "skills"),
+    dir("extensions", "settings"),
+    dir("prompt-templates", "settings"),
+    dir("themes", "settings"),
+    file("AGENTS.md", "settings"),
+    file("settings.json", "settings"),
 ];
 
 /// Categories a provider actually supports, ordered by SHARE_CATEGORIES. asx
@@ -319,6 +330,10 @@ mod tests {
         );
         assert_eq!(
             supported_share_categories("grok"),
+            vec!["sessions", "skills", "settings"]
+        );
+        assert_eq!(
+            supported_share_categories("pi"),
             vec!["sessions", "skills", "settings"]
         );
     }

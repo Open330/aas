@@ -1,0 +1,265 @@
+{
+  "$schema": "https://barshelf.dev/schema/workflow-0.1.json",
+  "schemaVersion": 1,
+  "kind": "workflow",
+  "_comment": "Preserves the original aas adapter layout; only quota/reset value presentation differs.",
+  "sources": {
+    "usage": {
+      "use": "exec",
+      "with": {
+        "command": ["aas", "usage", "--json"],
+        "discover": [
+          "$AAS_BIN",
+          "~/.local/bin/aas",
+          "~/bin/aas",
+          "~/.cargo/bin/aas",
+          "/opt/homebrew/bin/aas",
+          "/usr/local/bin/aas",
+          "PATH"
+        ],
+        "timeoutMs": 25000,
+        "output": "json",
+        "maxOutputBytes": 1048576
+      }
+    }
+  },
+  "transforms": {
+    "accounts": { "use": "assign", "from": "$.sources.usage.accounts" },
+    "providerGroups": { "use": "assign", "from": "$.sources.usage.providerGroups" }
+  },
+  "view": {
+    "type": "vstack",
+    "spacing": 8,
+    "children": [
+      {
+        "type": "hstack",
+        "spacing": 6,
+        "children": [
+          { "type": "text", "text": "aas", "role": "title" },
+          { "type": "spacer" },
+          {
+            "type": "text",
+            "text": "${string(round(coalesce(sources.usage.worstRemainingPct, 100), 0))}% left",
+            "role": "caption",
+            "monospacedDigit": true,
+            "foreground": "${if(lt(coalesce(sources.usage.worstRemainingPct, 100), 10), 'danger', if(lt(coalesce(sources.usage.worstRemainingPct, 100), 30), 'warning', 'good'))}"
+          }
+        ]
+      },
+      {
+        "type": "list",
+        "spacing": 7,
+        "items": {
+          "forEach": "$.transforms.providerGroups",
+          "as": "group",
+          "template": {
+            "type": "section",
+            "title": "${group.title}",
+            "spacing": 5,
+            "children": {
+              "forEach": "group.accounts",
+              "as": "acct",
+              "template": {
+                "type": "card",
+                "spacing": 4,
+                "widthFill": true,
+                "tone": "${if(eq(acct.remainingPct, null), 'neutral', if(lt(acct.remainingPct, 10), 'danger', if(lt(acct.remainingPct, 30), 'warning', 'good')))}",
+                "children": [
+                  {
+                    "type": "hstack",
+                    "spacing": 7,
+                    "children": [
+                      {
+                        "switch": "${group.provider}",
+                        "cases": {
+                          "claude": {
+                            "type": "image",
+                            "source": { "kind": "brand", "name": "claude" },
+                            "size": 16,
+                            "accessibilityLabel": "Claude"
+                          },
+                          "codex": {
+                            "type": "image",
+                            "source": { "kind": "brand", "name": "codex" },
+                            "size": 16,
+                            "accessibilityLabel": "Codex"
+                          }
+                        },
+                        "default": {
+                          "type": "image",
+                          "source": { "kind": "sfSymbol", "name": "cpu.fill" },
+                          "size": 16,
+                          "tint": "secondary",
+                          "accessibilityLabel": "${group.title}"
+                        }
+                      },
+                      {
+                        "type": "vstack",
+                        "spacing": 1,
+                        "children": [
+                          {
+                            "type": "text",
+                            "text": "${coalesce(acct.name, acct.email, 'unknown')}",
+                            "role": "body",
+                            "lineLimit": 1
+                          },
+                          {
+                            "switch": "${and(not(eq(acct.email, null)), ne(acct.email, acct.name))}",
+                            "cases": {
+                              "true": {
+                                "type": "text",
+                                "text": "${acct.email}",
+                                "role": "caption",
+                                "lineLimit": 1,
+                                "foreground": "secondary"
+                              }
+                            },
+                            "default": { "type": "vstack", "spacing": 0, "children": [] }
+                          }
+                        ]
+                      },
+                      { "type": "spacer" },
+                      {
+                        "switch": "${acct.active}",
+                        "cases": {
+                          "true": { "type": "badge", "text": "ACTIVE", "tint": "good" }
+                        },
+                        "default": { "type": "vstack", "spacing": 0, "children": [] }
+                      },
+                      {
+                        "switch": "${acct.cached}",
+                        "cases": {
+                          "true": { "type": "badge", "text": "CACHED", "tint": "neutral" }
+                        },
+                        "default": { "type": "vstack", "spacing": 0, "children": [] }
+                      },
+                      {
+                        "switch": "${not(eq(acct.planLabel, null))}",
+                        "cases": {
+                          "true": {
+                            "type": "badge",
+                            "text": "${acct.planLabel}",
+                            "tint": "accent"
+                          }
+                        },
+                        "default": { "type": "vstack", "spacing": 0, "children": [] }
+                      }
+                    ]
+                  },
+                  {
+                    "switch": "${not(eq(acct.error, null))}",
+                    "cases": {
+                      "true": {
+                        "type": "banner",
+                        "text": "${acct.error}",
+                        "tone": "danger",
+                        "icon": "exclamationmark.triangle.fill"
+                      }
+                    },
+                    "default": { "type": "vstack", "spacing": 0, "children": [] }
+                  },
+                  {
+                    "type": "list",
+                    "spacing": 1,
+                    "items": {
+                      "forEach": "acct.notes",
+                      "as": "note",
+                      "template": {
+                        "type": "text",
+                        "text": "${note}",
+                        "role": "caption",
+                        "foreground": "secondary",
+                        "lineLimit": 2
+                      }
+                    }
+                  },
+                  {
+                    "switch": "${count(acct.meters)}",
+                    "cases": {
+                      "0": {
+                        "type": "text",
+                        "text": "No usage meters reported",
+                        "role": "caption",
+                        "foreground": "secondary"
+                      }
+                    },
+                    "default": {
+                      "type": "grid",
+                      "columns": "${if(eq(count(acct.meters), 1), 1, 2)}",
+                      "spacing": 10,
+                      "items": {
+                        "forEach": "acct.meters",
+                        "as": "meter",
+                        "template": {
+                          "type": "vstack",
+                          "spacing": 2,
+                          "widthFill": true,
+                          "children": [
+                            {
+                              "type": "hstack",
+                              "spacing": 5,
+                              "alignment": "baseline",
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "text": "${coalesce(meter.label, 'Usage')}",
+                                  "role": "caption",
+                                  "lineLimit": 1,
+                                  "foreground": "secondary"
+                                },
+                                { "type": "spacer" },
+                                {
+                                  "switch": "${gt(meter.resetMs, now())}",
+                                  "cases": {
+                                    "true": {
+                                      "type": "text",
+                                      "text": "reset ${string(round(div(sub(meter.resetMs, now()), if(gte(sub(meter.resetMs, now()), 86400000), 86400000, 3600000)), 1))}${if(gte(sub(meter.resetMs, now()), 86400000), 'd', 'h')}",
+                                      "role": "caption",
+                                      "lineLimit": 1,
+                                      "monospacedDigit": true,
+                                      "foreground": "secondary"
+                                    }
+                                  },
+                                  "default": { "type": "vstack", "spacing": 0, "children": [] }
+                                }
+                              ]
+                            },
+                            {
+                              "type": "text",
+                              "text": "${string(round(sub(100, min(100, max(0, coalesce(meter.usedPct, 0)))), 0))}% left",
+                              "role": "title",
+                              "size": 19,
+                              "lineLimit": 1,
+                              "monospacedDigit": true,
+                              "foreground": "${if(gte(coalesce(meter.usedPct, 0), 90), 'danger', if(gte(coalesce(meter.usedPct, 0), 70), 'warning', 'good'))}"
+                            },
+                            {
+                              "type": "progress",
+                              "style": "linear",
+                              "value": "${div(min(100, max(0, coalesce(meter.usedPct, 0))), 100)}",
+                              "tint": "${if(gte(coalesce(meter.usedPct, 0), 90), 'danger', if(gte(coalesce(meter.usedPct, 0), 70), 'warning', 'good'))}"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  "empty": {
+    "type": "empty",
+    "icon": "person.crop.circle.badge.questionmark",
+    "title": "No accounts",
+    "subtitle": "Run `aas login` to add an account."
+  },
+  "status": {
+    "label": "${string(round(coalesce(sources.usage.worstRemainingPct, 100), 0))}%",
+    "tooltip": "${count(transforms.accounts)} accounts"
+  }
+}

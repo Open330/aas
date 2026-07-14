@@ -20,7 +20,7 @@ fn norm(p: &str) -> String {
 
 pub fn pick_agent(provider: &str) -> Option<Arc<dyn AgentAdapter>> {
     match norm(provider).as_str() {
-        "grok" => Some(Arc::new(grok::GrokAgent)),
+        "grok" | "pi" => Some(Arc::new(grok::GrokAgent)),
         "codex" => Some(Arc::new(codex::CodexAgent)),
         "claude" => Some(Arc::new(claude::ClaudeAgent)),
         _ => None,

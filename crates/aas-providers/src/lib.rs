@@ -1,4 +1,4 @@
-//! Provider adapters (claude/codex/grok/zai/cursor): credential storage, auth/switch/refresh,
+//! Provider adapters (claude/codex/grok/zai/cursor/pi): credential storage, auth/switch/refresh,
 //! and structured [`Usage`]. Ported from asx `src/providers/*`. See `docs/PARITY_SPEC.md` §F.
 //!
 //! Unlike asx (which returns a preformatted color string), `usage()` returns structured
@@ -13,6 +13,7 @@ mod codex;
 mod common;
 mod cursor;
 mod key_adapter;
+mod pi;
 mod snapshot;
 
 pub use snapshot::{
@@ -20,7 +21,7 @@ pub use snapshot::{
     UsageCacheMode,
 };
 
-/// The five adapters the CLI drives. `Grok`/`Zai` share `key_adapter`; `Cursor` is a marker.
+/// The adapters the CLI drives. `Grok`/`Zai` share `key_adapter`; `Cursor` is a marker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Provider {
     Claude,
@@ -28,6 +29,7 @@ pub enum Provider {
     Grok,
     Zai,
     Cursor,
+    Pi,
 }
 
 /// Result of a credential refresh. `needs_relogin` = the refresh token is revoked/absent, so
@@ -48,18 +50,20 @@ pub fn get_adapter(name: &str) -> Option<Provider> {
         "grok" => Some(Provider::Grok),
         "zai" => Some(Provider::Zai),
         "cursor" => Some(Provider::Cursor),
+        "pi" => Some(Provider::Pi),
         _ => None,
     }
 }
 
-/// asx `listKnownProviders()` order: `[claude, codex, zai, grok, cursor]`.
-pub fn all_providers() -> [Provider; 5] {
+/// asx `listKnownProviders()` order: `[claude, codex, zai, grok, cursor, pi]`.
+pub fn all_providers() -> [Provider; 6] {
     [
         Provider::Claude,
         Provider::Codex,
         Provider::Zai,
         Provider::Grok,
         Provider::Cursor,
+        Provider::Pi,
     ]
 }
 
@@ -80,6 +84,7 @@ impl Provider {
             Provider::Grok => "grok",
             Provider::Zai => "zai",
             Provider::Cursor => "cursor",
+            Provider::Pi => "pi",
         }
     }
 
@@ -91,6 +96,7 @@ impl Provider {
             Provider::Grok => key_adapter::usage("grok", account).await,
             Provider::Zai => key_adapter::usage("zai", account).await,
             Provider::Cursor => cursor::usage(account),
+            Provider::Pi => pi::usage(account).await,
         }
     }
 
@@ -102,6 +108,7 @@ impl Provider {
             Provider::Grok => key_adapter::current_credential("grok").await,
             Provider::Zai => key_adapter::current_credential("zai").await,
             Provider::Cursor => cursor::current_credential().await,
+            Provider::Pi => pi::current_credential().await,
         }
     }
 
@@ -113,6 +120,7 @@ impl Provider {
             Provider::Grok => key_adapter::current_email("grok").await,
             Provider::Zai => key_adapter::current_email("zai").await,
             Provider::Cursor => cursor::current_email().await,
+            Provider::Pi => pi::current_email().await,
         }
     }
 
@@ -124,6 +132,7 @@ impl Provider {
             Provider::Grok => key_adapter::load_current("grok", account, label).await,
             Provider::Zai => key_adapter::load_current("zai", account, label).await,
             Provider::Cursor => cursor::load_current(account, label).await,
+            Provider::Pi => pi::load_current(account, label).await,
         }
     }
 
@@ -135,6 +144,7 @@ impl Provider {
             Provider::Grok => key_adapter::switch_to("grok", account).await,
             Provider::Zai => key_adapter::switch_to("zai", account).await,
             Provider::Cursor => cursor::switch_to(account).await,
+            Provider::Pi => pi::switch_to(account).await,
         }
     }
 
@@ -146,6 +156,7 @@ impl Provider {
             Provider::Grok => key_adapter::clear_current("grok").await,
             Provider::Zai => key_adapter::clear_current("zai").await,
             Provider::Cursor => cursor::clear_current().await,
+            Provider::Pi => pi::clear_current().await,
         }
     }
 
@@ -155,7 +166,8 @@ impl Provider {
             Provider::Claude => claude::is_expired(account).await,
             Provider::Codex => codex::is_expired(account).await,
             // Key/marker providers have no expiry.
-            Provider::Grok | Provider::Zai | Provider::Cursor => false,
+            Provider::Grok => key_adapter::is_grok_expired(account),
+            Provider::Zai | Provider::Cursor | Provider::Pi => false,
         }
     }
 
@@ -200,9 +212,14 @@ impl Provider {
         match self {
             Provider::Claude => claude::refresh(account).await,
             Provider::Codex => codex::refresh(account).await,
-            Provider::Grok => key_adapter::refresh_outcome("grok"),
+            Provider::Grok => key_adapter::refresh_grok(account).await,
             Provider::Zai => key_adapter::refresh_outcome("zai"),
             Provider::Cursor => cursor::refresh_outcome(),
+            Provider::Pi => RefreshOutcome {
+                ok: true,
+                message: "pi auth.json does not require a unified refresh".into(),
+                needs_relogin: false,
+            },
         }
     }
 
@@ -214,6 +231,7 @@ impl Provider {
             Provider::Grok => key_adapter::login_command("grok"),
             Provider::Zai => key_adapter::login_command("zai"),
             Provider::Cursor => cursor::login_command(),
+            Provider::Pi => None,
         }
     }
 
@@ -232,6 +250,14 @@ impl Provider {
             other => anyhow::bail!("{} does not support API-key login", other.id()),
         }
     }
+
+    /// Store a complete Pi auth.json supplied through the headless `PI_AUTH_JSON` flow.
+    pub async fn load_pi_auth_json(&self, account: &str, raw: &str) -> anyhow::Result<()> {
+        match self {
+            Provider::Pi => pi::load_raw_and_activate(account, raw),
+            other => anyhow::bail!("{} does not accept PI_AUTH_JSON", other.id()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -246,6 +272,7 @@ mod tests {
         assert_eq!(get_adapter("xai"), Some(Provider::Grok)); // alias
         assert_eq!(get_adapter("zai"), Some(Provider::Zai));
         assert_eq!(get_adapter("cursor"), Some(Provider::Cursor));
+        assert_eq!(get_adapter("pi"), Some(Provider::Pi));
         assert_eq!(get_adapter("openai"), None); // known target, but no local adapter
         assert_eq!(get_adapter("nope"), None);
     }
@@ -255,8 +282,9 @@ mod tests {
         assert_eq!(Provider::Claude.id(), "claude");
         assert_eq!(Provider::Grok.id(), "grok");
         assert_eq!(Provider::Zai.id(), "zai");
+        assert_eq!(Provider::Pi.id(), "pi");
         let order: Vec<&str> = all_providers().iter().map(|p| p.id()).collect();
-        assert_eq!(order, ["claude", "codex", "zai", "grok", "cursor"]);
+        assert_eq!(order, ["claude", "codex", "zai", "grok", "cursor", "pi"]);
     }
 
     #[tokio::test]

@@ -1,14 +1,15 @@
 //! Grok + Z.AI adapter. Mirrors asx `providers/key-adapter.ts` (`createKeyAdapter`).
 //!
-//! Both are API-key providers with no OAuth refresh. Grok additionally understands a native
-//! `~/.grok/auth.json` (`{key}` or `{<issuer>:{key}}`) and JWT subscription tokens. The two
-//! providers share this module; `provider` is `"grok"` or `"zai"`.
+//! Z.AI is an API-key provider. Grok additionally understands native OIDC credentials in
+//! `~/.grok/auth.json`, including access/refresh-token rotation.
 
 use crate::common::{http_client, num_alt, set_active, store_account_secret, value_display};
 use crate::RefreshOutcome;
 use aas_core::jwt::decode_jwt_claims;
+use aas_core::model::ProfileType;
 use aas_core::platform::grok_auth_path;
-use aas_core::secure_store::{get_secret, write_restricted_file};
+use aas_core::secure_store::{get_secret, set_secret, write_restricted_file};
+use aas_core::store::AccountStore;
 use aas_core::usage::{Meter, Usage};
 use serde_json::{json, Value};
 
@@ -93,6 +94,256 @@ pub(crate) fn parse_grok_token_info(token: &str) -> Option<Value> {
         return None;
     }
     decode_jwt_claims(token)
+}
+
+#[derive(Clone, Debug)]
+struct GrokStoredEntry {
+    document: Value,
+    wrapper_key: Option<String>,
+    entry: Value,
+}
+
+fn grok_stored_entry(raw: &str) -> Option<GrokStoredEntry> {
+    let document: Value = serde_json::from_str(raw).ok()?;
+    let object = document.as_object()?;
+    if object.get("key").and_then(Value::as_str).is_some() {
+        return Some(GrokStoredEntry {
+            document: document.clone(),
+            wrapper_key: None,
+            entry: document,
+        });
+    }
+    object.iter().find_map(|(key, value)| {
+        value
+            .get("key")
+            .and_then(Value::as_str)
+            .map(|_| GrokStoredEntry {
+                document: document.clone(),
+                wrapper_key: Some(key.clone()),
+                entry: value.clone(),
+            })
+    })
+}
+
+fn update_grok_document(stored: &GrokStoredEntry, updated_entry: Value) -> Value {
+    match &stored.wrapper_key {
+        Some(key) => {
+            let mut document = stored.document.clone();
+            if let Some(object) = document.as_object_mut() {
+                object.insert(key.clone(), updated_entry);
+            }
+            document
+        }
+        None => updated_entry,
+    }
+}
+
+struct GrokRefresh {
+    access_token: String,
+    refresh_token: String,
+    expires_in: i64,
+}
+
+async fn grok_refresh_grant(entry: &Value) -> Result<GrokRefresh, String> {
+    let refresh_token = entry
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "no refresh token stored".to_string())?;
+    let client_id = entry
+        .get("oidc_client_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "no OIDC client id stored".to_string())?;
+    let issuer = entry
+        .get("oidc_issuer")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("https://auth.x.ai")
+        .trim_end_matches('/');
+    let version = aas_core::platform::grok_version();
+    let response = http_client()
+        .post(format!("{issuer}/oauth2/token"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("x-grok-client-version", &version)
+        .header("x-grok-client-surface", "grok-build")
+        .header("x-grok-client-identifier", "grok-shell")
+        .header(
+            reqwest::header::USER_AGENT,
+            format!(
+                "grok-shell/{version} ({}; {})",
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            ),
+        )
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", client_id),
+        ])
+        .send()
+        .await
+        .map_err(|error| format!("refresh network error: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let detail: String = response
+            .text()
+            .await
+            .unwrap_or_default()
+            .chars()
+            .take(240)
+            .collect();
+        return Err(format!(
+            "refresh endpoint returned HTTP {}{}",
+            status.as_u16(),
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
+        ));
+    }
+    let payload: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("refresh endpoint returned invalid JSON: {error}"))?;
+    let access_token = payload
+        .get("access_token")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "refresh response did not contain access_token".to_string())?
+        .to_string();
+    Ok(GrokRefresh {
+        access_token,
+        refresh_token: payload
+            .get("refresh_token")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(refresh_token)
+            .to_string(),
+        expires_in: payload
+            .get("expires_in")
+            .and_then(Value::as_i64)
+            .unwrap_or(21_600),
+    })
+}
+
+pub(crate) fn is_grok_expired(account: &str) -> bool {
+    let Some(raw) = get_secret("grok", account) else {
+        return false;
+    };
+    let Some(stored) = grok_stored_entry(&raw) else {
+        return false;
+    };
+    if stored
+        .entry
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .is_none()
+    {
+        return false;
+    }
+    let Some(exp) = stored
+        .entry
+        .get("key")
+        .and_then(Value::as_str)
+        .and_then(decode_jwt_claims)
+        .and_then(|claims| claims.get("exp").and_then(Value::as_i64))
+    else {
+        return false;
+    };
+    exp * 1000 < chrono::Utc::now().timestamp_millis() + 60_000
+}
+
+pub(crate) async fn refresh_grok(account: &str) -> RefreshOutcome {
+    let Some(raw) = get_secret("grok", account) else {
+        return RefreshOutcome {
+            ok: false,
+            message: "no stored credential".into(),
+            needs_relogin: false,
+        };
+    };
+    let Some(stored) = grok_stored_entry(&raw) else {
+        return RefreshOutcome {
+            ok: false,
+            message: "no refresh token stored".into(),
+            needs_relogin: true,
+        };
+    };
+    if stored
+        .entry
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .is_none()
+    {
+        return RefreshOutcome {
+            ok: false,
+            message: "no refresh token stored".into(),
+            needs_relogin: true,
+        };
+    }
+    let refreshed = match grok_refresh_grant(&stored.entry).await {
+        Ok(refreshed) => refreshed,
+        Err(message) => {
+            return RefreshOutcome {
+                ok: false,
+                message,
+                needs_relogin: true,
+            }
+        }
+    };
+    let expires_at = chrono::Utc::now()
+        .checked_add_signed(chrono::Duration::seconds(refreshed.expires_in.max(0)))
+        .unwrap_or_else(chrono::Utc::now)
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let mut updated_entry = stored.entry.clone();
+    let Some(object) = updated_entry.as_object_mut() else {
+        return RefreshOutcome {
+            ok: false,
+            message: "stored Grok OIDC entry is malformed".into(),
+            needs_relogin: true,
+        };
+    };
+    object.insert("key".into(), Value::String(refreshed.access_token));
+    object.insert(
+        "refresh_token".into(),
+        Value::String(refreshed.refresh_token),
+    );
+    object.insert("expires_at".into(), Value::String(expires_at.clone()));
+    let new_raw = update_grok_document(&stored, updated_entry).to_string();
+    if let Err(error) = set_secret("grok", account, &new_raw) {
+        return RefreshOutcome {
+            ok: false,
+            message: format!("could not store refreshed credential: {error}"),
+            needs_relogin: false,
+        };
+    }
+    aas_core::usage_cache::clear(&format!("grok/{account}"));
+
+    let is_system = AccountStore::open_default()
+        .get("grok", account)
+        .ok()
+        .flatten()
+        .and_then(|record| record.profile_type)
+        == Some(ProfileType::System);
+    if is_system {
+        if let Err(error) = write_grok_auth(&new_raw) {
+            let _ = set_secret("grok", account, &raw);
+            return RefreshOutcome {
+                ok: false,
+                message: format!("refreshed vault but native sync failed; rolled back: {error}"),
+                needs_relogin: false,
+            };
+        }
+    }
+    RefreshOutcome {
+        ok: true,
+        message: format!(
+            "refreshed (expires {expires_at}){}",
+            if is_system { " [native synced]" } else { "" }
+        ),
+        needs_relogin: false,
+    }
 }
 
 /// JS `parseFloat`: parse the leading numeric prefix, ignoring trailing junk (`"42%"` → 42).
@@ -717,6 +968,27 @@ mod tests {
             grok_auth_file_from_credential("raw"),
             json!({"asx": {"key": "raw"}})
         );
+    }
+
+    #[test]
+    fn grok_refresh_preserves_issuer_wrapper() {
+        let stored = grok_stored_entry(
+            r#"{"https://auth.x.ai::device":{"key":"old","refresh_token":"refresh","oidc_client_id":"client"},"other":{"value":1}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            stored.wrapper_key.as_deref(),
+            Some("https://auth.x.ai::device")
+        );
+        let updated = update_grok_document(
+            &stored,
+            json!({"key":"new","refresh_token":"rotated","oidc_client_id":"client"}),
+        );
+        assert_eq!(
+            updated["https://auth.x.ai::device"]["refresh_token"],
+            "rotated"
+        );
+        assert_eq!(updated["other"]["value"], 1);
     }
 
     #[test]

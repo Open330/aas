@@ -4,21 +4,22 @@
 > inherited `asx` behavior; aas-only extensions are identified explicitly.
 
 `aas` is a from-scratch Rust rewrite of [`asx`](https://github.com/enif-lee/asx), a
-multi-account switcher for LLM coding agents (Claude Code, Codex, Grok/xAI, Z.AI, Cursor).
+multi-account switcher for LLM coding agents (Claude Code, Codex, Grok/xAI, Z.AI, Cursor, Pi).
 It keeps each account's credential in its own `0600` file / OS keychain entry and switches
 the active login instantly, runs one-off profile-scoped agent sessions, and proxies one
 agent's UI onto another provider's backend.
 
 - **Repo:** `github.com/open330/aas`
 - **Binary:** `aas`
-- **Source of truth for behavior parity:** the `asx` TypeScript implementation (v0.3.0).
+- **Source of truth for behavior parity:** `asx` v0.3.0 plus current-main commits `fa24cfa` and
+  `0e819cd` (Pi, GPT-5.6/live models, and proxy compatibility).
 
 ---
 
 ## 1. Goals & Non-Goals
 
 ### Goals
-1. **Full behavioral parity** with `asx` v0.3.0 — every command, flag, provider, and the
+1. **Full behavioral parity** with the tracked `asx` baseline — every command, flag, provider, and the
    cross-provider proxy.
 2. **Single static binary, zero runtime.** `curl | sh` drops one executable. No Node, no
    nvm bootstrap. This is the primary motivation for the rewrite.
@@ -86,7 +87,7 @@ aas/
 ├─ crates/
 │  ├─ aas-cli/               # bin: clap commands, output rendering (tables/bars)
 │  ├─ aas-core/              # accounts store, profile homes, secure store, platform paths
-│  ├─ aas-providers/         # provider adapters (claude/codex/grok/zai/cursor)
+│  ├─ aas-providers/         # provider adapters (claude/codex/grok/zai/cursor/pi)
 │  ├─ aas-proxy/             # cross-provider translating HTTP server (axum) + adapters
 │  └─ aas-import/            # read/adopt existing `asx` state (accounts.json, homes, keychain)
 ├─ apps/aas-bar/             # optional native macOS usage menubar app
@@ -175,7 +176,7 @@ operation-level detail is in [`PARITY_SPEC.md`](./PARITY_SPEC.md); the essential
 **`<config>/accounts.json`** (`version: 1`):
 ```jsonc
 { "version": 1, "accounts": [ {
-  "provider": "claude",          // 'claude'|'codex'|'grok'|'zai'|'cursor'
+  "provider": "claude",          // 'claude'|'codex'|'grok'|'zai'|'cursor'|'pi'
   "name": "e-ed@callabo",        // GLOBALLY UNIQUE across providers
   "label": "e-ed@callabo",
   "email": "e-ed@callabo.ai",
@@ -197,7 +198,7 @@ different provider → error) plus unique resolved profile homes. This is exactl
 **Profile home** — `<config>/profiles/<safeProfileDirName>` where
 `safeProfileDirName(provider,name) = "{normKey}-{name}"` with `[^A-Za-z0-9_.-] → _`
 (normKey: contains `claude`→`claude`, `xai`→`grok`). Native cred file inside:
-claude `.credentials.json`, codex/grok `auth.json`, else `credential`.
+claude `.credentials.json`, codex/grok/pi `auth.json`, else `credential`.
 The sanitizer stays byte-compatible with asx, so aas rejects any logical-name pair that maps to
 the same result and commits account identity before credential creation.
 
@@ -207,7 +208,7 @@ Option<ProfileType>, share: Option<Vec<Category>>, .. }`. Note `asx` mixes exact
 lowercased-provider matching across ops — replicate per-op (documented in PARITY_SPEC §4).
 
 The array order remains meaningful and can be requested with `--sort stored`. Display commands
-default to the provider registry order (`claude`, `codex`, `zai`, `grok`, `cursor`) and then a
+default to the provider registry order (`claude`, `codex`, `zai`, `grok`, `cursor`, `pi`) and then a
 case-insensitive account-name order. `--sort added` uses `addedAt` oldest-first. Sorting never
 rewrites `accounts.json`; it only controls the returned/rendered view.
 
@@ -222,7 +223,7 @@ include browser cookies, conversation history, or machine-specific active marker
 Trait `ProviderAdapter` mirrors `asx`'s interface: `load_current`, `switch_to`,
 `current_email`, `usage`, `clear_current`, `login_command`, `current_credential`,
 `is_expired`, `refresh`, `load_long_lived_token`, `login`. Registry keys:
-`claude`/`claude-code`(alias)→claude, `codex`, `grok`, `zai`, `cursor`.
+`claude`/`claude-code`(alias)→claude, `codex`, `grok`, `zai`, `cursor`, `pi`.
 
 **Key design change — structured usage.** `asx`'s `getUsage` returns a preformatted,
 color-embedded multi-line **string**. `aas` splits this:
@@ -245,10 +246,13 @@ wire contracts must not drift). Highlights / gotchas to carry over:
   `User-Agent: codex-cli`). Refresh is the **`codex doctor --summary` trick** — shell out with
   `CODEX_HOME=<profile home>` so the native CLI rotates `auth.json` in place (no HTTP refresh).
 - **Grok:** JWT-vs-apikey branch → `cli-chat-proxy.grok.com/v1/billing`+`/settings` (subscription)
-  or `api.x.ai/v1/api-key` (credits) + rate-limit headers off `/models` (or a probe call).
+  or `api.x.ai/v1/api-key` (credits) + rate-limit headers off `/models` (or a probe call). OIDC
+  sessions derive expiry from JWT claims and rotate through the issuer's refresh-token grant.
 - **Z.AI:** `GET api.z.ai/api/monitor/usage/quota/limit` — **`Authorization: <raw key>` (NO `Bearer`)**,
   unlike the key-test endpoint which uses `Bearer`. Easy to get wrong.
-- **Expiry skew** is `+60s` for both claude and codex.
+- **Pi:** the complete `PI_CODING_AGENT_DIR/auth.json` is one credential snapshot; native login is
+  performed through Pi's interactive `/login` command.
+- **Expiry skew** is `+60s` for Claude, Codex, and refreshable Grok OIDC sessions.
 
 ## 8. Keychain & Platform Paths
 
@@ -273,8 +277,9 @@ per-profile at `<profileHome>/.credentials.json`.
 **Path roots & env overrides** (default to `asx`'s locations for zero-migration adoption):
 `<configBase>` = win `%APPDATA%` · macOS `~/Library/Application Support` · linux `$XDG_CONFIG_HOME|~/.config`;
 `<config>` = `<configBase>/asx`; profiles = `<config>/profiles`. Provider homes honor
-`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `GROK_HOME` (with `~` expansion); system homes `~/.claude`,
-`~/.codex`, `~/.grok`. `aas` reads these same vars so it drives the same native CLIs.
+`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `GROK_HOME` / `PI_CODING_AGENT_DIR` (with `~` expansion);
+system homes `~/.claude`, `~/.codex`, `~/.grok`, `~/.pi/agent`. `aas` reads these same vars so it
+drives the same native CLIs.
 
 ## 9. Proxy (cross-provider)
 
@@ -293,7 +298,8 @@ upstream SSE  ─[backend.parse_chunk]──▶ COMMON events ─[agent.format_c
   backend-only**.
 - **COMMON IR** (`CommonRequest`/`CommonMessage`/`CommonToolCall`/`CommonEvent`/`CommonResponse`)
   — the only thing each adapter needs to know besides its own wire. Tool-call args are kept as
-  raw JSON **strings** to round-trip losslessly.
+  raw JSON **strings** until final accumulation; whole-number float spellings are normalized before
+  strict frontends deserialize tool calls.
 
 Rust mapping: **axum** on hyper/tokio. Server = a `TcpListener` bound to `127.0.0.1:0` (keep it —
 avoids `asx`'s free-port TOCTOU race) and requires a random per-run token on every route.
@@ -319,23 +325,28 @@ tokio channel → axum `Sse`/`Body` back to the frontend.
    `min(30s, 500·2^(n-1)) + rand(0..499)ms`; per-attempt 120s timeout.
 7. The `errText` sentinel: a consumed body (error / non-stream) ⇒ treat as failure even at 200;
    an untouched streaming body flows straight through.
+8. Anthropic `messages/count_tokens` is estimated locally and never reaches an inference backend;
+   empty Claude `end_turn` streams materialize an empty text block and `stop_sequence:null`.
 
 Provider-specific transforms to preserve exactly: **no temperature/top_p/top_k to the Claude
 backend** and thinking disabled for non-Fable; Codex namespace/subagent tool flattening
 (`ns__name` ↔ `{namespace,name}`) so Codex multi-agent works against any backend; z.ai uses
 `thinking:{type:enabled|disabled}` (not `reasoning_effort`); grok drops `reasoning_content`
-deltas; Claude-frontend model-id `claude-asx-` wrap/unwrap to survive Claude Code's `/model`
-picker filter.
+deltas and forwards live-model `reasoning_effort`, using the installed Grok version in client
+headers; Claude-frontend model-id `claude-asx-` wrap/unwrap survives Claude Code's `/model` picker
+filter.
 
 **Injection** (`aas-proxy::inject`, per frontend, so the launched binary talks to the proxy and
 skips its own auth): codex → write `config.toml` (`model_provider="asx-proxy"`, `base_url=<url>/v1`,
 `wire_api="responses"`) + `models.json`, set `CODEX_HOME`/`ASX_PROXY_API_KEY`; claude → env only
 (`ANTHROPIC_BASE_URL`, per-run `ANTHROPIC_AUTH_TOKEN`, slot→model remap, drop gateway
-discovery); grok → `config.toml` per-model blocks + `GROK_HOME`. All frontends use the same
+discovery); grok → `config.toml` per-model blocks + `GROK_HOME`; Pi → custom-provider
+`models.json`/`settings.json` + `PI_CODING_AGENT_DIR`. All frontends use the same
 per-run proxy token. Explicit scratch homes override inherited agent-home variables, and Grok's
 `always-approve` mode is emitted only for an explicit `--bypass`. Model registry
 (`aas-proxy::models`) resolves picker `id` → real `{model, effort}`, override precedence
-`env(ASX_<PROV>_MODELS) > <config>/models.json > defaults`.
+`env(ASX_<PROV>_MODELS) > <config>/models.json > live Grok/Z.AI catalog > defaults`. Codex defaults
+cover GPT-5.6 Sol/Terra/Luna with GPT-5.5 fallback, and Claude tier aliases map to safe effort rows.
 
 ---
 

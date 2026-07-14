@@ -161,7 +161,6 @@ fn now_secs() -> i64 {
 }
 
 const GROK_URL: &str = "https://cli-chat-proxy.grok.com/v1/chat/completions";
-const GROK_VERSION: &str = "0.2.77";
 
 fn grok_token(cred: &str) -> String {
     if let Ok(d) = serde_json::from_str::<Value>(cred) {
@@ -183,9 +182,13 @@ pub struct GrokBackend;
 
 impl BackendAdapter for GrokBackend {
     fn build_request(&self, req: &CommonRequest, cred: &str) -> UpstreamRequest {
+        let grok_version = aas_core::platform::grok_version();
         let choice = resolve_choice("grok", &req.model);
         let messages = chat_messages_from_common(req.system.as_deref(), &req.messages);
         let mut body = json!({ "model": choice.model, "messages": messages, "stream": true });
+        if let Some(effort) = &choice.effort {
+            body["reasoning_effort"] = json!(effort);
+        }
         if let Some(tools) = chat_tools_from_common(req.tools.as_ref()) {
             body["tools"] = json!(tools);
             if let Some(tc) = &req.tool_choice {
@@ -204,17 +207,18 @@ impl BackendAdapter for GrokBackend {
                     format!("Bearer {}", grok_token(cred)),
                 ),
                 ("X-XAI-Token-Auth".to_string(), "xai-grok-cli".to_string()),
-                (
-                    "x-grok-client-version".to_string(),
-                    GROK_VERSION.to_string(),
-                ),
+                ("x-grok-client-version".to_string(), grok_version.clone()),
                 (
                     "x-grok-client-identifier".to_string(),
                     "grok-shell".to_string(),
                 ),
                 (
                     "User-Agent".to_string(),
-                    format!("grok-shell/{GROK_VERSION} (macos; aarch64)"),
+                    format!(
+                        "grok-shell/{grok_version} ({}; {})",
+                        std::env::consts::OS,
+                        std::env::consts::ARCH
+                    ),
                 ),
                 ("x-grok-model-override".to_string(), choice.model.clone()),
             ],

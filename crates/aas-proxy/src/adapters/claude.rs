@@ -317,6 +317,10 @@ impl AgentAdapter for ClaudeAgent {
                 }
                 if !ctx.text_open && ctx.items.is_empty() {
                     out += &open_text!();
+                    out += &anth_event(
+                        "content_block_delta",
+                        &json!({ "type": "content_block_delta", "index": ctx.text_index, "delta": { "type": "text_delta", "text": "" } }),
+                    );
                 }
                 out += &close_text!();
                 let stop_reason = if ctx.items.is_empty() {
@@ -326,7 +330,7 @@ impl AgentAdapter for ClaudeAgent {
                 };
                 out += &anth_event(
                     "message_delta",
-                    &json!({ "type": "message_delta", "delta": { "stop_reason": stop_reason }, "usage": { "output_tokens": 0 } }),
+                    &json!({ "type": "message_delta", "delta": { "stop_reason": stop_reason, "stop_sequence": null }, "usage": { "output_tokens": 0 } }),
                 );
                 out += &anth_event("message_stop", &json!({ "type": "message_stop" }));
                 out

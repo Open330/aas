@@ -80,12 +80,42 @@ pub fn grok_auth_path() -> PathBuf {
     grok_home().join("auth.json")
 }
 
+/// Pi coding agent config root. Unlike the other agents this is `~/.pi/agent`, not `~/.pi`.
+pub fn pi_agent_dir() -> PathBuf {
+    match std::env::var("PI_CODING_AGENT_DIR") {
+        Ok(v) if !v.is_empty() => expand_home(&v),
+        _ => home_dot_dir("pi").join("agent"),
+    }
+}
+
+pub fn pi_auth_path() -> PathBuf {
+    pi_agent_dir().join("auth.json")
+}
+
+/// Installed Grok CLI version used by the cloud proxy's client-identification headers.
+pub fn grok_version() -> String {
+    std::fs::read_to_string(grok_home().join("version.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|value| {
+            value
+                .get("version")
+                .or_else(|| value.get("stable_version"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(String::from)
+        })
+        .unwrap_or_else(|| "0.2.77".to_string())
+}
+
 /// The provider's system (native) home dir: `~/.claude` / `~/.codex` / `~/.grok`.
 pub fn system_home_for(provider: &str) -> Option<PathBuf> {
     match crate::naming::normalize_provider_key(provider).as_str() {
         "claude" => Some(claude_config_dir()),
         "codex" => Some(codex_home()),
         "grok" => Some(grok_home()),
+        "pi" => Some(pi_agent_dir()),
         _ => None,
     }
 }
@@ -105,5 +135,11 @@ mod tests {
         std::env::set_var("AAS_CONFIG_DIR", "/tmp/aas-test-cfg");
         assert_eq!(asx_config_dir(), PathBuf::from("/tmp/aas-test-cfg"));
         std::env::remove_var("AAS_CONFIG_DIR");
+    }
+
+    #[test]
+    fn pi_defaults_to_nested_agent_dir() {
+        std::env::remove_var("PI_CODING_AGENT_DIR");
+        assert_eq!(pi_agent_dir(), home_dir().join(".pi/agent"));
     }
 }

@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 /// Providers with a registered adapter (asx `listKnownProviders()`), minus the `claude-code` alias.
-pub const KNOWN_PROVIDERS: &[&str] = &["claude", "codex", "zai", "grok", "cursor"];
+pub const KNOWN_PROVIDERS: &[&str] = &["claude", "codex", "zai", "grok", "cursor", "pi"];
 
 /// asx `normalizeProvider`: canonical provider id, or `None` if unrecognized.
 pub fn normalize_provider(p: &str) -> Option<String> {
@@ -14,7 +14,7 @@ pub fn normalize_provider(p: &str) -> Option<String> {
         "claude-code" => Some("claude".into()),
         "xai" => Some("grok".into()),
         "openai" => Some("openai".into()),
-        "claude" | "codex" | "zai" | "grok" | "cursor" => Some(k),
+        "claude" | "codex" | "zai" | "grok" | "cursor" | "pi" => Some(k),
         _ => None,
     }
 }
@@ -37,6 +37,7 @@ pub fn provider_short_name(p: &str) -> String {
         "grok" => "grok".into(),
         "cursor" => "cursor".into(),
         "zai" => "zai".into(),
+        "pi" => "pi".into(),
         _ => {
             let stripped = k.strip_suffix("-code").unwrap_or(&k);
             stripped.split('-').next().unwrap_or(stripped).to_string()
@@ -70,7 +71,7 @@ pub fn derive_account_name(email: Option<&str>, provider: &str) -> String {
 pub fn native_cred_file(provider: &str) -> &'static str {
     match normalize_provider_key(provider).as_str() {
         "claude" => ".credentials.json",
-        "codex" | "grok" => "auth.json",
+        "codex" | "grok" | "pi" => "auth.json",
         _ => "credential",
     }
 }
@@ -140,6 +141,7 @@ mod tests {
     fn native_files() {
         assert_eq!(native_cred_file("claude"), ".credentials.json");
         assert_eq!(native_cred_file("codex"), "auth.json");
+        assert_eq!(native_cred_file("pi"), "auth.json");
         assert_eq!(native_cred_file("cursor"), "credential");
     }
 }

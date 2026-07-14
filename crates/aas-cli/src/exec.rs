@@ -54,6 +54,13 @@ fn agent_spec(provider: &str) -> Option<AgentSpec> {
             bypass: &["--dangerously-skip-permissions"],
             stub: None,
         }),
+        "pi" => Some(AgentSpec {
+            bin: "pi",
+            home_env: "PI_CODING_AGENT_DIR",
+            file: "auth.json",
+            bypass: &[],
+            stub: Some("{}"),
+        }),
         _ => None,
     }
 }
@@ -81,7 +88,16 @@ fn remove_cross_home(dir: &Path) {
         _ => dir.starts_with(&sessions),
     };
     if under {
-        let _ = std::fs::remove_dir_all(dir);
+        for attempt in 0..5 {
+            match std::fs::remove_dir_all(dir) {
+                Ok(()) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(_) if attempt < 4 => {
+                    std::thread::sleep(std::time::Duration::from_millis(20 * (attempt + 1)));
+                }
+                Err(_) => break,
+            }
+        }
     }
 }
 
@@ -334,8 +350,8 @@ pub async fn cmd_proxy(store: &AccountStore, name: &str, frontend: &str) -> anyh
     };
     let backend_provider = acct.provider.clone();
     let frontend_norm = normalize_provider(frontend).unwrap_or_else(|| frontend.to_lowercase());
-    if !matches!(frontend_norm.as_str(), "claude" | "codex" | "grok") {
-        anyhow::bail!("Frontend must be one of claude, codex, grok (got {frontend}).");
+    if !matches!(frontend_norm.as_str(), "claude" | "codex" | "grok" | "pi") {
+        anyhow::bail!("Frontend must be one of claude, codex, grok, pi (got {frontend}).");
     }
 
     if let Some(p) = get_adapter(&backend_provider) {

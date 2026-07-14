@@ -62,6 +62,8 @@ pub fn inject_proxy_endpoint(
             &models,
             bypass,
         )?;
+    } else if prov == "pi" {
+        inject_pi(tmp_dir, proxy_base_url, proxy_auth_token, env, &models)?;
     }
     Ok(())
 }
@@ -215,6 +217,76 @@ fn inject_grok(
     Ok(())
 }
 
+fn inject_pi(
+    tmp_dir: Option<&Path>,
+    proxy_base_url: &str,
+    proxy_auth_token: &str,
+    env: &mut HashMap<String, String>,
+    models: &[String],
+) -> anyhow::Result<()> {
+    let agent_dir = tmp_dir
+        .map(PathBuf::from)
+        .or_else(|| {
+            env.get("PI_CODING_AGENT_DIR")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(|| fallback_agent_home("pi"));
+    env.insert(
+        "PI_CODING_AGENT_DIR".into(),
+        agent_dir.to_string_lossy().to_string(),
+    );
+    mkdir_0700(&agent_dir)?;
+
+    let list: Vec<String> = if models.is_empty() {
+        vec!["asx-proxy".into()]
+    } else {
+        models.to_vec()
+    };
+    let base_url = format!("{}/v1", trim_trailing_slashes(proxy_base_url));
+    let models_doc = json!({
+        "providers": {
+            "asx-proxy": {
+                "baseUrl": base_url,
+                "api": "openai-completions",
+                "apiKey": proxy_auth_token,
+                "authHeader": true,
+                "compat": {
+                    "supportsDeveloperRole": false,
+                    "supportsReasoningEffort": false,
+                    "supportsUsageInStreaming": false
+                },
+                "models": list.iter().map(|id| json!({
+                    "id": id,
+                    "name": id,
+                    "reasoning": false,
+                    "input": ["text"],
+                    "contextWindow": 200000,
+                    "maxTokens": 16384,
+                    "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+                })).collect::<Vec<_>>()
+            }
+        }
+    });
+    let settings_doc = json!({
+        "defaultProvider": "asx-proxy",
+        "defaultModel": list[0],
+        "defaultProjectTrust": "always"
+    });
+    aas_core::secure_store::write_restricted_file(
+        &agent_dir.join("models.json"),
+        &serde_json::to_string_pretty(&models_doc)?,
+    )?;
+    aas_core::secure_store::write_restricted_file(
+        &agent_dir.join("settings.json"),
+        &serde_json::to_string_pretty(&settings_doc)?,
+    )?;
+    if !agent_dir.join("auth.json").exists() {
+        aas_core::secure_store::write_restricted_file(&agent_dir.join("auth.json"), "{}")?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,5 +387,34 @@ mod tests {
             env.get("OPENAI_API_KEY").map(String::as_str),
             Some("run-token")
         );
+    }
+
+    #[test]
+    fn pi_injection_writes_models_settings_and_proxy_token() {
+        let home = test_dir("pi");
+        let mut env = HashMap::new();
+        inject_proxy_endpoint(
+            "pi",
+            &mut env,
+            "http://127.0.0.1:1234",
+            "run-token",
+            Some(&home),
+            Some("codex"),
+            false,
+        )
+        .unwrap();
+
+        let models: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(home.join("models.json")).unwrap()).unwrap();
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(home.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(models["providers"]["asx-proxy"]["apiKey"], "run-token");
+        assert_eq!(
+            models["providers"]["asx-proxy"]["baseUrl"],
+            "http://127.0.0.1:1234/v1"
+        );
+        assert_eq!(settings["defaultProvider"], "asx-proxy");
+        assert!(home.join("auth.json").is_file());
+        let _ = fs::remove_dir_all(home);
     }
 }

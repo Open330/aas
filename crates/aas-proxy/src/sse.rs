@@ -1,6 +1,7 @@
 //! SSE framing + streamed tool-call accumulation (port of `forEachUpstreamEvent` framing and
 //! `toolAccumulator` from `proxy/server.ts`).
 
+use crate::adapters::util::normalize_tool_arguments;
 use crate::types::CommonEvent;
 use std::collections::HashMap;
 
@@ -145,7 +146,7 @@ impl ToolAccumulator {
                 CommonEvent::ToolCall {
                     id: t.id.clone(),
                     name: t.name.clone(),
-                    arguments: t.args.clone(),
+                    arguments: normalize_tool_arguments(&t.args),
                 }
             })
             .collect()

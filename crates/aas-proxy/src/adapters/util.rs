@@ -253,3 +253,51 @@ pub fn parse_chat_tool_deltas(tool_calls: &[Value]) -> Vec<CommonEvent> {
     }
     out
 }
+
+fn normalize_whole_numbers(value: &mut Value) {
+    match value {
+        Value::Number(number) => {
+            if number.as_i64().is_none() && number.as_u64().is_none() {
+                if let Some(float) = number.as_f64() {
+                    if float.is_finite()
+                        && float.fract() == 0.0
+                        && float >= i64::MIN as f64
+                        && float <= i64::MAX as f64
+                    {
+                        *value = Value::Number(serde_json::Number::from(float as i64));
+                    }
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(normalize_whole_numbers),
+        Value::Object(object) => object.values_mut().for_each(normalize_whole_numbers),
+        _ => {}
+    }
+}
+
+/// Strict agents deserialize integer-schema tool arguments as `i64`. Normalize JSON float spellings
+/// such as `30000.0` to `30000`, while preserving real fractions and malformed stream fragments.
+pub fn normalize_tool_arguments(arguments: &str) -> String {
+    if arguments.is_empty() {
+        return String::new();
+    }
+    let Ok(mut value) = serde_json::from_str::<Value>(arguments) else {
+        return arguments.to_string();
+    };
+    normalize_whole_numbers(&mut value);
+    serde_json::to_string(&value).unwrap_or_else(|_| arguments.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_arguments_normalize_whole_floats_recursively() {
+        assert_eq!(
+            normalize_tool_arguments(r#"{"timeout_ms":30000.0,"ratio":0.5,"nested":[2.0]}"#),
+            r#"{"nested":[2],"ratio":0.5,"timeout_ms":30000}"#
+        );
+        assert_eq!(normalize_tool_arguments("{partial"), "{partial");
+    }
+}
