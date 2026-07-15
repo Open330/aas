@@ -207,7 +207,6 @@
                                   "lineLimit": 1,
                                   "foreground": "secondary"
                                 },
-                                { "type": "spacer" },
                                 {
                                   "switch": "${gt(meter.resetMs, now())}",
                                   "cases": {

@@ -3,7 +3,7 @@
 #   irm https://raw.githubusercontent.com/open330/aas/main/install.ps1 | iex
 #
 # Env overrides:
-#   $env:AAS_VERSION = "v0.1.7"           # pin a version (default: latest)
+#   $env:AAS_VERSION = "v0.1.8"           # pin a version (default: latest)
 #   $env:AAS_BIN_DIR = "$HOME\bin"        # install location
 
 $ErrorActionPreference = "Stop"

@@ -107,11 +107,7 @@ pub fn cmd_export(store: &AccountStore, name: &str, shell: Shell) -> anyhow::Res
                 vars.push(("ZAI_KEY", k.clone()));
             }
         }
-        "pi" => {
-            if !system {
-                vars.push(("PI_CODING_AGENT_DIR", home));
-            }
-        }
+        "pi" if !system => vars.push(("PI_CODING_AGENT_DIR", home)),
         _ => {}
     }
 
