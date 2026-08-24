@@ -1033,6 +1033,7 @@ async fn server_models_and_fake_auth_routes() {
     let handle = start_proxy(ProxyStartOptions {
         source_provider: "grok".into(),
         target_provider: "codex".into(),
+        target_endpoint: None,
         target_credential: Credential {
             raw: Some("{}".into()),
             api_key: None,
@@ -1108,6 +1109,7 @@ async fn server_rejects_invalid_and_oversized_inference_bodies() {
     let handle = start_proxy(ProxyStartOptions {
         source_provider: "grok".into(),
         target_provider: "codex".into(),
+        target_endpoint: None,
         target_credential: Credential {
             raw: Some("{}".into()),
             api_key: None,
@@ -1139,4 +1141,180 @@ async fn server_rejects_invalid_and_oversized_inference_bodies() {
     assert_eq!(oversized.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
 
     handle.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// Anthropic-compatible backend: relay, don't translate
+// ---------------------------------------------------------------------------
+
+/// A stand-in Kimi host. Records the body it was handed so the test can assert the proxy relayed
+/// the agent's request instead of rebuilding it.
+async fn fake_anthropic_upstream(
+    seen: std::sync::Arc<std::sync::Mutex<Option<Value>>>,
+) -> (String, tokio::task::JoinHandle<()>) {
+    use axum::{routing::post, Json, Router};
+
+    let recorder = seen.clone();
+    let app = Router::new()
+        .route(
+            "/v1/models",
+            axum::routing::get(|| async { Json(json!({ "data": [{ "id": "kimi-test-model" }] })) }),
+        )
+        .route(
+            "/v1/messages",
+            post(move |Json(body): Json<Value>| {
+                let recorder = recorder.clone();
+                async move {
+                    *recorder.lock().unwrap() = Some(body);
+                    // Byte-for-byte what the client should receive back.
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                        "event: message_start\ndata: {\"type\":\"message_start\"}\n\n\
+                         event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+                    )
+                }
+            }),
+        );
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let join = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (base, join)
+}
+
+#[tokio::test]
+async fn anthropic_backend_relays_the_request_instead_of_translating_it() {
+    use crate::models::clear_remote_model_cache;
+    use crate::server::{start_proxy, Credential, ProxyStartOptions};
+
+    clear_remote_model_cache();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let (base, upstream) = fake_anthropic_upstream(seen.clone()).await;
+
+    let handle = start_proxy(ProxyStartOptions {
+        source_provider: "claude".into(),
+        target_provider: "kimi".into(),
+        target_endpoint: Some(base.clone()),
+        target_credential: Credential {
+            raw: Some("sk-kimi-secret".into()),
+            api_key: None,
+        },
+        tmp_dir: None,
+        port: None,
+    })
+    .await
+    .unwrap();
+
+    // Exactly the fields the COMMON round trip would drop.
+    let sent = json!({
+        "model": "kimi-test-model",
+        "system": [{"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}],
+        "thinking": {"type": "enabled", "budget_tokens": 2048},
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA"}}
+            ]
+        }],
+        "stream": true
+    });
+    let res = reqwest::Client::new()
+        .post(format!("{}/v1/messages", handle.url))
+        .header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", handle.auth_token),
+        )
+        .json(&sent)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), reqwest::StatusCode::OK);
+    let body = res.text().await.unwrap();
+
+    // The upstream response is relayed untouched — not re-framed through COMMON.
+    assert_eq!(
+        body,
+        "event: message_start\ndata: {\"type\":\"message_start\"}\n\n\
+         event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+    );
+
+    let got = seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("upstream saw a request");
+    assert_eq!(got["system"][0]["cache_control"]["type"], "ephemeral");
+    assert_eq!(got["thinking"]["budget_tokens"], 2048);
+    assert_eq!(
+        got["messages"][0]["content"][0]["cache_control"]["type"],
+        "ephemeral"
+    );
+    assert_eq!(got["messages"][0]["content"][1]["type"], "image");
+    assert_eq!(got["model"], "kimi-test-model");
+
+    handle.stop().await;
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn anthropic_backend_relays_an_upstream_error_verbatim() {
+    use crate::models::clear_remote_model_cache;
+    use crate::server::{start_proxy, Credential, ProxyStartOptions};
+    use axum::{routing::post, Json, Router};
+
+    clear_remote_model_cache();
+    // A wrong-platform key is the most likely real failure; the client must see the real status.
+    let app = Router::new().route(
+        "/v1/messages",
+        post(|| async {
+            (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": { "message": "invalid api key" } })),
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let upstream = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let handle = start_proxy(ProxyStartOptions {
+        source_provider: "claude".into(),
+        target_provider: "kimi".into(),
+        target_endpoint: Some(base),
+        target_credential: Credential {
+            raw: Some("sk-wrong-platform".into()),
+            api_key: None,
+        },
+        tmp_dir: None,
+        port: None,
+    })
+    .await
+    .unwrap();
+
+    let res = reqwest::Client::new()
+        .post(format!("{}/v1/messages", handle.url))
+        .header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", handle.auth_token),
+        )
+        .json(&json!({"model": "kimi-k2", "messages": [], "stream": true}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["error"]["message"], "invalid api key");
+
+    handle.stop().await;
+    upstream.abort();
 }

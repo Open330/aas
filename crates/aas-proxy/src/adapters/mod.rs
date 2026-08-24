@@ -3,6 +3,7 @@
 pub mod claude;
 pub mod codex;
 pub mod grok;
+pub mod kimi;
 pub mod util;
 pub mod zai;
 
@@ -27,12 +28,15 @@ pub fn pick_agent(provider: &str) -> Option<Arc<dyn AgentAdapter>> {
     }
 }
 
-pub fn pick_backend(provider: &str) -> Option<Arc<dyn BackendAdapter>> {
+/// `endpoint` is the account's API host, for providers that run more than one (Kimi). Ignored by
+/// backends with a single fixed host.
+pub fn pick_backend(provider: &str, endpoint: Option<&str>) -> Option<Arc<dyn BackendAdapter>> {
     match norm(provider).as_str() {
         "codex" => Some(Arc::new(codex::CodexBackend)),
         "grok" => Some(Arc::new(grok::GrokBackend)),
         "claude" => Some(Arc::new(claude::ClaudeBackend)),
         "zai" => Some(Arc::new(zai::ZaiBackend)),
+        "kimi" => Some(Arc::new(kimi::KimiBackend::new(endpoint))),
         _ => None,
     }
 }

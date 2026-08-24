@@ -190,4 +190,22 @@ pub trait BackendAdapter: Send + Sync {
     fn is_retryable(&self, _status: u16, _body: &str) -> bool {
         false
     }
+    /// Byte-level relay for a backend that already speaks the agent's own wire protocol.
+    ///
+    /// Returning `Some` tells the proxy to forward `body` to the upstream and stream the reply
+    /// back untouched, skipping the COMMON round trip entirely. COMMON is a lowest-common-
+    /// denominator model: routing an Anthropic request through it drops `cache_control`, thinking
+    /// blocks and image parts. For an Anthropic-compatible upstream (Kimi) that loss is pure cost,
+    /// so those requests relay instead of translate.
+    ///
+    /// Implementations MUST still rewrite the model id to the real upstream model and replace the
+    /// agent's proxy credentials with the backend's own.
+    fn passthrough(
+        &self,
+        _agent_provider: &str,
+        _body: &Value,
+        _cred: &str,
+    ) -> Option<UpstreamRequest> {
+        None
+    }
 }

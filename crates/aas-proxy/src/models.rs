@@ -91,6 +91,18 @@ fn defaults(provider: &str) -> Vec<BackendChoice> {
             BackendChoice::new("glm-4.5-air", "glm-4.5-air", None),
         ];
     }
+    if p == "kimi" || p == "moonshot" {
+        // Kimi ships new model ids often and they differ per platform, so these are only the
+        // fallback when live discovery (`/v1/models`) and explicit overrides both come up empty.
+        return [
+            "kimi-k2-turbo-preview",
+            "kimi-k2-0905-preview",
+            "moonshot-v1-128k",
+        ]
+        .iter()
+        .map(|m| BackendChoice::new(*m, *m, None))
+        .collect();
+    }
     vec![BackendChoice::new("asx-proxy", "asx-proxy", None)]
 }
 
@@ -462,10 +474,25 @@ fn zai_models_to_choices(data: &[Value]) -> Vec<BackendChoice> {
         .collect()
 }
 
+/// Straight `id -> choice` mapping for providers with no reasoning-effort convention.
+fn plain_models_to_choices(data: &[Value]) -> Vec<BackendChoice> {
+    data.iter()
+        .filter_map(|entry| {
+            let id = entry
+                .get("id")
+                .and_then(Value::as_str)
+                .or_else(|| entry.get("model").and_then(Value::as_str))?
+                .trim();
+            (!id.is_empty()).then(|| BackendChoice::new(id, id, None))
+        })
+        .collect()
+}
+
 async fn fetch_remote_choices(
     client: &reqwest::Client,
     provider: &str,
     credential: &str,
+    endpoint: Option<&str>,
 ) -> Option<Vec<BackendChoice>> {
     let response = match provider {
         "grok" | "xai" => {
@@ -497,6 +524,21 @@ async fn fetch_remote_choices(
             .send()
             .await
             .ok()?,
+        // Kimi's catalog is platform-specific, so discovery must use the account's own host.
+        "kimi" | "moonshot" => {
+            let base = endpoint
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(crate::adapters::kimi::DEFAULT_KIMI_BASE)
+                .trim_end_matches('/');
+            client
+                .get(format!("{base}/v1/models"))
+                .timeout(std::time::Duration::from_secs(8))
+                .bearer_auth(credential.trim())
+                .send()
+                .await
+                .ok()?
+        }
         _ => return None,
     };
     if !response.status().is_success() {
@@ -507,27 +549,28 @@ async fn fetch_remote_choices(
         .get("data")
         .and_then(Value::as_array)
         .or_else(|| body.as_array())?;
-    let choices = if matches!(provider, "grok" | "xai") {
-        grok_models_to_choices(list)
-    } else {
-        zai_models_to_choices(list)
+    let choices = match provider {
+        "grok" | "xai" => grok_models_to_choices(list),
+        "kimi" | "moonshot" => plain_models_to_choices(list),
+        _ => zai_models_to_choices(list),
     };
     (!choices.is_empty()).then_some(choices)
 }
 
-/// Refresh the live Grok/Z.AI model catalog once for this short-lived proxy process. Explicit
+/// Refresh the live Grok/Z.AI/Kimi model catalog once for this short-lived proxy process. Explicit
 /// environment/file overrides remain authoritative and suppress the network request.
 pub async fn refresh_backend_choices(
     client: &reqwest::Client,
     provider: &str,
     credential: &str,
+    endpoint: Option<&str>,
 ) -> Vec<BackendChoice> {
     let provider = provider.to_lowercase();
     if let Some(pinned) = from_env(&provider).or_else(|| from_config_file(&provider)) {
         put_cache(&provider, &pinned);
         return pinned;
     }
-    if let Some(remote) = fetch_remote_choices(client, &provider, credential).await {
+    if let Some(remote) = fetch_remote_choices(client, &provider, credential, endpoint).await {
         put_cache(&provider, &remote);
         return remote;
     }

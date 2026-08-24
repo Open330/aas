@@ -161,6 +161,11 @@ fn scrub_inherited_credentials(env: &mut HashMap<String, String>) {
         "ZAI_API_KEY",
         "ZAI_KEY",
         "ASX_ZAI_API_KEY",
+        "KIMI_API_KEY",
+        "KIMI_KEY",
+        "MOONSHOT_API_KEY",
+        "MOONSHOT_KEY",
+        "ASX_KIMI_API_KEY",
         "PI_AUTH_JSON",
         "CURSOR_ACCESS_TOKEN",
         "ASX_PROXY_API_KEY",
@@ -181,6 +186,16 @@ async fn live_credential(provider: &str) -> Option<String> {
         Some(p) => p.current_credential().await,
         None => None,
     }
+}
+
+/// The API host recorded for a backend account. Kimi's platforms issue keys that are not
+/// interchangeable, so the proxy must call the same host the key was validated against.
+fn account_endpoint(store: &AccountStore, provider: &str, name: &str) -> Option<String> {
+    store
+        .get(provider, name)
+        .ok()
+        .flatten()
+        .and_then(|record| record.endpoint().map(str::to_string))
 }
 
 async fn is_current_system_profile(provider: &str, name: &str) -> bool {
@@ -285,6 +300,7 @@ pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyh
                 raw: Some(backend_cred),
                 api_key: None,
             },
+            target_endpoint: account_endpoint(store, &profile_provider, &account_name),
             tmp_dir: Some(home.clone()),
             port: None,
         })
@@ -397,6 +413,7 @@ pub async fn cmd_proxy(store: &AccountStore, name: &str, frontend: &str) -> anyh
             raw: Some(backend_cred),
             api_key: None,
         },
+        target_endpoint: account_endpoint(store, &backend_provider, &acct.name),
         tmp_dir: None,
         port: None,
     })

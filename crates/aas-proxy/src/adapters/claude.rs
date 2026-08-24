@@ -383,7 +383,7 @@ const CLAUDE_CODE_ID: &str = "You are Claude Code, Anthropic's official CLI for 
 
 /// COMMON messages -> Anthropic messages, restoring tool_use/tool_result blocks. Consecutive
 /// tool results merge into one user turn.
-fn common_to_anth_messages(messages: &[CommonMessage]) -> Vec<Value> {
+pub(crate) fn common_to_anth_messages(messages: &[CommonMessage]) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     for m in messages {
         if m.role == "system" {
@@ -439,7 +439,7 @@ fn common_to_anth_messages(messages: &[CommonMessage]) -> Vec<Value> {
     out
 }
 
-fn anth_tool_choice(tc: Option<&Value>) -> Option<Value> {
+pub(crate) fn anth_tool_choice(tc: Option<&Value>) -> Option<Value> {
     let tc = tc?;
     if tc.is_null() {
         return None;

@@ -7,7 +7,7 @@
 
 use crate::adapters::{pick_agent, pick_backend};
 use crate::models::{backend_choices, refresh_backend_choices};
-use crate::retry::{fetch_upstream_with_retry, UpstreamOutcome};
+use crate::retry::{fetch_passthrough_with_retry, fetch_upstream_with_retry, UpstreamOutcome};
 use crate::sse::{SseFramer, ToolAccumulator};
 use crate::types::{
     AgentAdapter, BackendAdapter, CommonEvent, CommonResponse, CommonToolCall, StreamCtx,
@@ -42,6 +42,8 @@ pub struct ProxyStartOptions {
     /// backend (real upstream the proxy calls).
     pub target_provider: String,
     pub target_credential: Credential,
+    /// API host for the backend account, for providers that run several (Kimi). `None` = default.
+    pub target_endpoint: Option<String>,
     pub tmp_dir: Option<PathBuf>,
     pub port: Option<u16>,
 }
@@ -100,12 +102,18 @@ pub async fn start_proxy(options: ProxyStartOptions) -> anyhow::Result<ProxyHand
 
     let client = reqwest::Client::builder().build()?;
     if !cred.is_empty() {
-        let _ = refresh_backend_choices(&client, &backend_provider, &cred).await;
+        let _ = refresh_backend_choices(
+            &client,
+            &backend_provider,
+            &cred,
+            options.target_endpoint.as_deref(),
+        )
+        .await;
     }
 
     let state = Arc::new(ProxyState {
         agent: pick_agent(&agent_provider),
-        backend: pick_backend(&backend_provider),
+        backend: pick_backend(&backend_provider, options.target_endpoint.as_deref()),
         agent_provider,
         backend_provider,
         cred,
@@ -325,6 +333,18 @@ async fn handle(State(st): State<Arc<ProxyState>>, req: Request) -> Response {
         }
     };
 
+    // An upstream that already speaks the agent's wire is relayed, not translated: the COMMON
+    // round trip would silently drop cache_control, thinking blocks and image parts.
+    if let Some(up) = backend.passthrough(&st.agent_provider, &body_json, &st.cred) {
+        return match fetch_passthrough_with_retry(&st.client, &up).await {
+            Ok(res) => relay_upstream(res, request_slot),
+            Err(e) => json_response(
+                StatusCode::BAD_GATEWAY,
+                json!({ "error": { "message": e.to_string() } }),
+            ),
+        };
+    }
+
     let common = agent.parse_request(&path, &body_json);
     let up = backend.build_request(&common, &st.cred);
 
@@ -372,6 +392,29 @@ async fn handle(State(st): State<Arc<ProxyState>>, req: Request) -> Response {
             }
         }
     }
+}
+
+/// Relay an upstream response to the client untouched: same status, same content type, same bytes.
+/// The in-flight permit rides along with the body stream so the slot is held until the relay ends.
+fn relay_upstream(res: reqwest::Response, slot: tokio::sync::OwnedSemaphorePermit) -> Response {
+    let status = StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let mut builder = Response::builder().status(status);
+    for name in [
+        reqwest::header::CONTENT_TYPE,
+        reqwest::header::CACHE_CONTROL,
+    ] {
+        if let Some(value) = res.headers().get(&name).and_then(|v| v.to_str().ok()) {
+            builder = builder.header(name.as_str(), value);
+        }
+    }
+    let stream = res.bytes_stream().map(move |chunk| {
+        // Keep the permit alive for the lifetime of the relay.
+        let _slot = &slot;
+        chunk.map_err(std::io::Error::other)
+    });
+    builder
+        .body(Body::from_stream(stream))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 /// Build a 200 streaming response using the agent's SSE headers.

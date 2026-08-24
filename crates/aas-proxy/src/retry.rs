@@ -86,6 +86,51 @@ pub enum UpstreamOutcome {
 const MAX_RETRIES: u32 = 4;
 const PER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Passthrough relay fetch. Retries the same transport and status classes as
+/// [`fetch_upstream_with_retry`], but never reads the body: the response is handed back whatever
+/// its content type, so the caller can relay it to the client byte for byte. A non-retryable
+/// status (including 4xx) is returned as-is so the client sees the upstream's own error.
+pub async fn fetch_passthrough_with_retry(
+    client: &reqwest::Client,
+    up: &UpstreamRequest,
+) -> anyhow::Result<reqwest::Response> {
+    let retries = MAX_RETRIES;
+    let mut last_error = String::new();
+
+    for attempt in 0..=retries {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(backoff_ms(attempt, jitter()))).await;
+        }
+        let mut req = client.post(&up.url).timeout(PER_ATTEMPT_TIMEOUT);
+        for (k, v) in &up.headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+        match req.body(up.body.clone()).send().await {
+            Ok(res) => {
+                let status = res.status().as_u16();
+                if attempt < retries && RETRYABLE_STATUS.contains(&status) {
+                    last_error = format!("upstream status {status}");
+                    continue;
+                }
+                return Ok(res);
+            }
+            Err(error) => {
+                last_error = error.to_string();
+                if attempt < retries && is_retryable_fetch_error(&last_error) {
+                    continue;
+                }
+                break;
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!(if last_error.is_empty() {
+        "upstream fetch failed".to_string()
+    } else {
+        last_error
+    }))
+}
+
 pub async fn fetch_upstream_with_retry(
     client: &reqwest::Client,
     up: &UpstreamRequest,
