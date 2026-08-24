@@ -5,6 +5,68 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-08-24
+
+### Added
+
+- Added Kimi (alias `moonshot`) as a provider, so `aas exec <kimi-account> claude` runs Claude Code
+  against a Kimi backend. `aas login kimi --endpoint <moonshot-ai|kimi-code|moonshot-cn>` selects
+  the platform that issued the key, validates the key against it, and records it on the account —
+  Kimi's platforms issue keys that are not interchangeable. Only hosts known to the provider table
+  are accepted, so a tampered store cannot redirect a credential elsewhere.
+- Added live Kimi model discovery against the account's own endpoint, with built-in choices as the
+  fallback.
+- Release installers now verify the archive's GitHub build-provenance attestation against this
+  repository's release workflow. Constrained or offline hosts can set `AAS_SKIP_ATTESTATION=1`,
+  which gives up publisher authentication and keeps checksum-only integrity verification.
+
+### Changed
+
+- API-key providers (Grok, Z.AI, Kimi) are now driven by one provider table covering env var names,
+  API hosts, auth style, key validation, quota strategy, and login method, replacing per-provider
+  branches in every adapter function.
+- Backends that already speak the agent's wire protocol are relayed instead of translated: the
+  proxy rewrites only the model id and credential and streams the reply back byte for byte. Routing
+  an Anthropic request through the COMMON intermediate dropped `cache_control`, thinking blocks, and
+  image parts, which silently disabled prompt caching on a per-token-billed backend.
+- Rust CI and the release quality gates run on Linux, macOS, and Windows; release smoke tests drive
+  both installers against the release candidate, including a rejected checksum.
+
+### Fixed
+
+- A backend error mid-stream now flushes buffered tool calls and terminates the stream once, instead
+  of appending a synthetic "ended unexpectedly" terminator after a real error. Non-streaming
+  requests answer 502 rather than returning a truncated success body.
+- `aas status <provider>` and `aas remove <provider> <name>` now normalize the provider name, so
+  aliases resolve the same way they do everywhere else.
+- `aas import` exits non-zero when the bundle produced conflicts or failures.
+- `install.ps1` compares normalized PATH entries, so a prefix collision no longer skips the PATH
+  update.
+- The aas-bar usage cache reports a failed write instead of dropping it silently, and
+  `build-app.sh` keeps the previous known-good bundle until the staged replacement is signed and
+  verified.
+
+### Security
+
+- Keychain reads distinguish an absent item from a locked or unavailable Keychain, so rename and
+  import can no longer orphan or overwrite a live credential when the Keychain is unreachable.
+- Account removal quarantines the profile home and cleans it up only after metadata commits;
+  account and active-marker writes roll back together, so a failed removal cannot leave a
+  half-deleted profile.
+- Credential mutations run under a provider-wide lifecycle lock, so concurrent commits can no longer
+  publish metadata from one login with the secret from another.
+- Grok token refresh rejects any stored OIDC issuer other than `https://auth.x.ai` and no longer
+  follows redirects.
+- `aas login` for an isolated profile authenticates into a throwaway staging home and commits over
+  the existing profile only after the provider validates the new credential, so a failed re-login
+  leaves the previous session intact.
+- `aas exec` scrubs inherited provider credentials and home overrides before injecting the selected
+  profile, so an ambient key cannot reach the launched agent.
+- `aas export --out` creates its destination `O_EXCL` at mode 0600 and refuses plaintext file export
+  on Windows, where owner-only ACLs cannot be guaranteed.
+- Account storage rejects names that collide only by case (they break once a bundle reaches a
+  case-insensitive filesystem) and terminal control characters in account fields.
+
 ## [0.1.8] - 2026-07-15
 
 ### Added
@@ -106,7 +168,8 @@ All notable user-facing changes are recorded here. The format follows
 - Hardened account storage, provider adapters, proxy authentication, retries, installers, and
   portable app packaging.
 
-[Unreleased]: https://github.com/Open330/aas/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/Open330/aas/compare/v0.1.9...HEAD
+[0.1.9]: https://github.com/Open330/aas/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/Open330/aas/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/Open330/aas/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/Open330/aas/compare/v0.1.5...v0.1.6
