@@ -136,14 +136,6 @@ pub fn cmd_export(store: &AccountStore, name: &str, shell: Shell) -> anyhow::Res
     Ok(())
 }
 
-#[cfg(unix)]
-fn set_0600(p: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
-}
-#[cfg(not(unix))]
-fn set_0600(_p: &Path) {}
-
 fn vault_passphrase() -> anyhow::Result<String> {
     if let Ok(passphrase) = std::env::var("AAS_VAULT_PASSPHRASE") {
         if passphrase.is_empty() {
@@ -164,6 +156,12 @@ fn vault_passphrase() -> anyhow::Result<String> {
 
 /// Export every account + credential as a portable bundle (for host-to-host migration).
 fn export_all(out: Option<&Path>, vault: bool) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    if out.is_some() && !vault {
+        anyhow::bail!(
+            "refusing plaintext credential-file export on Windows because owner-only ACLs cannot be guaranteed; use --vault or pipe stdout directly"
+        );
+    }
     let bundle = aas_import::export_bundle()?;
     let n = bundle.accounts.len();
     if vault && out.is_none() && std::io::stdout().is_terminal() {
@@ -178,8 +176,12 @@ fn export_all(out: Option<&Path>, vault: bool) -> anyhow::Result<()> {
     };
     match out {
         Some(path) => {
-            std::fs::write(path, &bytes)?;
-            set_0600(path);
+            secure_store::write_private_new(path, &bytes).map_err(|error| {
+                anyhow::anyhow!(
+                    "could not create export destination {}: {error}",
+                    path.display()
+                )
+            })?;
             ui::success(format!(
                 "Exported {n} accounts (with credentials{}) → {}",
                 if vault { ", encrypted" } else { "" },

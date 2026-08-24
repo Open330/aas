@@ -624,7 +624,7 @@ fn usage_json_response(items: &[aas_providers::AccountUsage]) -> UsageJsonRespon
 
 fn cmd_status(store: &AccountStore, provider: Option<&str>) -> anyhow::Result<()> {
     let provs: Vec<String> = match provider {
-        Some(p) => vec![p.to_string()],
+        Some(p) => vec![normalize_provider_key(p)],
         None => all_providers().iter().map(|p| p.id().to_string()).collect(),
     };
     let rows: Vec<(String, Option<String>)> = provs
@@ -702,6 +702,9 @@ fn cmd_import(file: Option<&str>) -> anyhow::Result<()> {
             "could not store credential for: {}",
             report.failed.join(", ")
         ));
+    }
+    if !report.conflicts.is_empty() || !report.failed.is_empty() {
+        anyhow::bail!("import completed with errors");
     }
     Ok(())
 }
@@ -856,6 +859,11 @@ fn cmd_rename(store: &AccountStore, from: &str, to: &str) -> anyhow::Result<()> 
     let Some(account) = store.get_by_name(from)? else {
         anyhow::bail!("Account not found: {from}");
     };
+    let provider_key = normalize_provider_key(&account.provider);
+    let _lifecycle =
+        aas_core::keyed_lock::acquire("credential-lifecycle", &provider_key).map_err(|error| {
+            anyhow::anyhow!("could not acquire {provider_key} lifecycle lock: {error}")
+        })?;
     store.rename(from, to)?;
     aas_core::usage_cache::clear(&format!("{}/{from}", account.provider));
     aas_core::usage_cache::clear(&format!("{}/{to}", account.provider));
@@ -871,44 +879,51 @@ fn cmd_remove(store: &AccountStore, args: &[String]) -> anyhow::Result<()> {
             };
             (acct.provider, name.clone())
         }
-        [prov, name] => (prov.clone(), name.clone()),
+        [prov, name] => (normalize_provider_key(prov), name.clone()),
         _ => anyhow::bail!("Usage: aas remove [provider] <name>"),
     };
-    let account = store.get(&prov, &name)?;
-    let active_before = store.get_active(&prov)?;
-    let secret_before = secure_store::get_secret(&prov, &name);
-    if store.remove(&prov, &name)? {
-        if let Err(delete_error) = secure_store::delete_secret(&prov, &name) {
-            let mut rollback_errors = Vec::new();
-            if let Some(account) = account {
-                if let Err(error) = store.add(account) {
-                    rollback_errors.push(format!("account={error}"));
-                }
+    let provider_key = normalize_provider_key(&prov);
+    let _lifecycle =
+        aas_core::keyed_lock::acquire("credential-lifecycle", &provider_key).map_err(|error| {
+            anyhow::anyhow!("could not acquire {provider_key} lifecycle lock: {error}")
+        })?;
+    match secure_store::cleanup_quarantines(&prov, &name) {
+        Ok(count) if count > 0 => ui::success(format!(
+            "Cleaned {count} deferred profile tombstone(s) for {prov}/{name}"
+        )),
+        Ok(_) => {}
+        Err(error) => ui::warn(format!("Deferred cleanup is still blocked: {error}")),
+    }
+    if store.get(&prov, &name)?.is_none() {
+        ui::warn(format!("Not found: {prov}/{name}"));
+        return Ok(());
+    }
+
+    let quarantine = secure_store::quarantine_secret(&prov, &name)?;
+    match store.remove(&prov, &name) {
+        Ok(true) => {
+            if let Err(cleanup) = quarantine.commit() {
+                ui::warn(format!(
+                    "Removed {prov}/{name}; {cleanup}. Retry `aas remove {prov} {name}` after open files close."
+                ));
+            } else {
+                ui::success(format!("Removed {prov}/{name}"));
             }
-            if let Some(secret) = secret_before {
-                if let Err(error) = secure_store::set_secret(&prov, &name, &secret) {
-                    rollback_errors.push(format!("credential={error}"));
-                }
-            }
-            if active_before.as_deref() == Some(name.as_str()) {
-                if let Err(error) = store.set_active(&prov, &name) {
-                    rollback_errors.push(format!("active={error}"));
-                }
-            }
+        }
+        Ok(false) => {
+            let rollback = quarantine.rollback().err();
             anyhow::bail!(
-                "Could not remove credential for {prov}/{name}: {delete_error}; rollback: {}",
-                if rollback_errors.is_empty() {
-                    "completed".to_string()
-                } else {
-                    rollback_errors.join(", ")
-                }
+                "Account disappeared during removal: {prov}/{name}; credential rollback={rollback:?}"
             );
         }
-        aas_core::usage_cache::clear(&format!("{prov}/{name}"));
-        ui::success(format!("Removed {prov}/{name}"));
-    } else {
-        ui::warn(format!("Not found: {prov}/{name}"));
+        Err(error) => {
+            let rollback = quarantine.rollback().err();
+            anyhow::bail!(
+                "Could not remove {prov}/{name}: {error}; credential rollback={rollback:?}"
+            );
+        }
     }
+    aas_core::usage_cache::clear(&format!("{prov}/{name}"));
     Ok(())
 }
 

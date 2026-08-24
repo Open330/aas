@@ -2,9 +2,8 @@
 //! key, and native OAuth login into an isolated (or system) profile home.
 
 use crate::ui;
-use aas_core::naming::{
-    derive_account_name, native_cred_file, normalize_provider_key, profile_home,
-};
+use aas_core::naming::{derive_account_name, normalize_provider_key, profile_home};
+use aas_core::secure_store;
 use aas_core::store::AccountStore;
 use aas_providers::Provider;
 use std::path::{Path, PathBuf};
@@ -35,28 +34,20 @@ fn home_env_var(provider_key: &str) -> Option<&'static str> {
 }
 
 #[cfg(unix)]
-fn ensure_700(dir: &Path) {
+fn ensure_700(dir: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::create_dir_all(dir);
-    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    std::fs::create_dir_all(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
 }
 #[cfg(not(unix))]
-fn ensure_700(dir: &Path) {
-    let _ = std::fs::create_dir_all(dir);
+fn ensure_700(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)
 }
-
-#[cfg(unix)]
-fn set_0600(p: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
-}
-#[cfg(not(unix))]
-fn set_0600(_p: &Path) {}
 
 /// asx `seedAgentHome` (claude only): merge `{hasCompletedOnboarding:true}` into `.claude.json`.
-fn seed_agent_home(provider_key: &str, dir: &Path) {
+fn seed_agent_home(provider_key: &str, dir: &Path) -> anyhow::Result<()> {
     if provider_key != "claude" {
-        return;
+        return Ok(());
     }
     let p = dir.join(".claude.json");
     let mut json = std::fs::read_to_string(&p)
@@ -69,9 +60,8 @@ fn seed_agent_home(provider_key: &str, dir: &Path) {
             serde_json::Value::Bool(true),
         );
     }
-    if std::fs::write(&p, serde_json::to_string(&json).unwrap_or_default()).is_ok() {
-        set_0600(&p);
-    }
+    secure_store::write_restricted_file(&p, &serde_json::to_string(&json)?)?;
+    Ok(())
 }
 
 fn prompt_secret(msg: &str) -> anyhow::Result<String> {
@@ -118,11 +108,11 @@ async fn login_in_home(
     }
     let status = run_native(&cmd, env)?;
     if !status.success() {
-        ui::warn(match status.code() {
+        let message = match status.code() {
             Some(code) => format!("native login exited with code {code}"),
             None => "native login was terminated by a signal".to_string(),
-        });
-        return Ok(None);
+        };
+        anyhow::bail!(message);
     }
 
     // Load the newly logged-in session, with the home env var pointed at the profile home.
@@ -168,11 +158,11 @@ pub async fn run_login_flow(
         ));
         let status = run_native(&cmd, None)?;
         if !status.success() {
-            ui::warn(match status.code() {
+            let message = match status.code() {
                 Some(code) => format!("setup-token exited with code {code}"),
                 None => "setup-token was terminated by a signal".to_string(),
-            });
-            return Ok(None);
+            };
+            anyhow::bail!(message);
         }
         let token = match std::env::var("ASX_CLAUDE_CODE_OAUTH_TOKEN") {
             Ok(t) if !t.trim().is_empty() => t.trim().to_string(),
@@ -214,11 +204,10 @@ pub async fn run_login_flow(
 
     // 4. Providers without a native login flow.
     if provider.login_command().is_none() {
-        eprintln!(
+        anyhow::bail!(
             "Login flow is not supported for provider '{}'.",
             provider.id()
         );
-        return Ok(None);
     }
 
     // 5. system profile → login into the provider's normal home.
@@ -226,17 +215,40 @@ pub async fn run_login_flow(
         return login_in_home(provider, &target, None, device_auth).await;
     }
 
-    // 6. Isolated agent profile → login into a per-profile home.
-    let dir: PathBuf = profile_home(provider.id(), &target);
-    ensure_700(&dir);
-    seed_agent_home(&key, &dir);
-    let _ = std::fs::remove_file(dir.join(native_cred_file(provider.id())));
-    login_in_home(provider, &target, Some(&dir), device_auth).await
+    // 6. Isolated agent profile → authenticate in a fresh sibling home. The existing profile is
+    // never touched until provider.load_current has validated the new credential and atomically
+    // committed it under `target`.
+    let stage_name = format!(
+        ".login-stage-{}-{}-{}",
+        target,
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let dir: PathBuf = profile_home(provider.id(), &stage_name);
+    ensure_700(&dir)?;
+    seed_agent_home(&key, &dir)?;
+    let login_result = login_in_home(provider, &target, Some(&dir), device_auth).await;
+    let cleanup_result = secure_store::delete_secret(provider.id(), &stage_name);
+    match (login_result, cleanup_result) {
+        (Ok(account), Ok(())) => Ok(account),
+        (Ok(account), Err(cleanup)) => {
+            ui::warn(format!(
+                "login succeeded, but staging profile cleanup was deferred: {cleanup}"
+            ));
+            Ok(account)
+        }
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(cleanup)) => {
+            Err(error.context(format!("staging profile cleanup also failed: {cleanup}")))
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
     fn codex_device_login_adds_headless_flag() {
@@ -248,5 +260,54 @@ mod tests {
     fn grok_login_does_not_invent_a_device_flag() {
         let command = build_login_command(Provider::Grok, true).unwrap();
         assert_eq!(command, ["grok", "login"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_isolated_relogin_preserves_existing_profile() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = ENV_LOCK.lock().await;
+        let root = std::env::temp_dir().join(format!(
+            "aas-login-rollback-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("codex");
+        std::fs::write(&fake, "#!/bin/sh\nexit 42\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let previous_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", &bin);
+        std::env::set_var("AAS_CONFIG_DIR", root.join("config"));
+        let store = AccountStore::open_default();
+        store
+            .add(aas_core::model::AccountRecord::new("codex", "existing"))
+            .unwrap();
+        secure_store::set_secret("codex", "existing", "old-credential").unwrap();
+        let home = profile_home("codex", "existing");
+        std::fs::write(home.join("settings.json"), "keep-settings").unwrap();
+
+        let error = run_login_flow(Provider::Codex, Some("existing"), false, false, false)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("exited with code 42"));
+        assert_eq!(
+            secure_store::get_secret("codex", "existing").as_deref(),
+            Some("old-credential")
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join("settings.json")).unwrap(),
+            "keep-settings"
+        );
+
+        match previous_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+        std::env::remove_var("AAS_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

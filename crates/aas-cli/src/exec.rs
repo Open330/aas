@@ -148,6 +148,34 @@ fn claude_long_lived_token(raw: &str) -> Option<String> {
     None
 }
 
+fn scrub_inherited_credentials(env: &mut HashMap<String, String>) {
+    const KEYS: &[&str] = &[
+        "AAS_VAULT_PASSPHRASE",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "OPENAI_API_KEY",
+        "OPENAI_ORG_ID",
+        "XAI_API_KEY",
+        "GROK_API_KEY",
+        "ZAI_API_KEY",
+        "ZAI_KEY",
+        "ASX_ZAI_API_KEY",
+        "PI_AUTH_JSON",
+        "CURSOR_ACCESS_TOKEN",
+        "ASX_PROXY_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "OPENAI_BASE_URL",
+        "CLAUDE_CONFIG_DIR",
+        "CODEX_HOME",
+        "GROK_HOME",
+        "PI_CODING_AGENT_DIR",
+    ];
+    for key in KEYS {
+        env.remove(*key);
+    }
+}
+
 async fn live_credential(provider: &str) -> Option<String> {
     match get_adapter(provider) {
         Some(p) => p.current_credential().await,
@@ -197,6 +225,7 @@ pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyh
     }
 
     let mut env: HashMap<String, String> = std::env::vars().collect();
+    scrub_inherited_credentials(&mut env);
     let secret = secure_store::get_secret(&profile_provider, &account_name);
 
     // Claude long-lived token → env auth (same-provider claude only).
@@ -414,5 +443,22 @@ mod tests {
         use std::os::unix::process::ExitStatusExt;
         let status = std::process::ExitStatus::from_raw(libc::SIGTERM);
         assert_eq!(exit_status_code(status), 128 + libc::SIGTERM);
+    }
+
+    #[test]
+    fn inherited_credentials_are_removed_before_selected_profile_injection() {
+        let mut env = HashMap::from([
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("CLAUDE_CODE_OAUTH_TOKEN".to_string(), "wrong".to_string()),
+            ("OPENAI_API_KEY".to_string(), "wrong".to_string()),
+            ("AAS_VAULT_PASSPHRASE".to_string(), "vault".to_string()),
+            ("CODEX_HOME".to_string(), "/wrong".to_string()),
+        ]);
+        scrub_inherited_credentials(&mut env);
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
+        assert!(!env.contains_key("CLAUDE_CODE_OAUTH_TOKEN"));
+        assert!(!env.contains_key("OPENAI_API_KEY"));
+        assert!(!env.contains_key("AAS_VAULT_PASSPHRASE"));
+        assert!(!env.contains_key("CODEX_HOME"));
     }
 }
