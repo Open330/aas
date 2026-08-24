@@ -418,12 +418,21 @@ pub(crate) fn process_event(
     saw_done: &mut bool,
     ev: CommonEvent,
 ) -> Vec<String> {
+    if *saw_done {
+        return Vec::new();
+    }
     match &ev {
         CommonEvent::ToolCallDelta { .. } => {
             acc.push(&ev);
             Vec::new()
         }
         CommonEvent::Done { .. } => {
+            let mut out = flush_tools(agent, ctx, acc);
+            *saw_done = true;
+            out.push(agent.format_stream_chunk(&ev, ctx));
+            out
+        }
+        CommonEvent::Error { .. } => {
             let mut out = flush_tools(agent, ctx, acc);
             *saw_done = true;
             out.push(agent.format_stream_chunk(&ev, ctx));
@@ -468,6 +477,9 @@ async fn stream_producer(
                                 break 'outer;
                             }
                         }
+                        if saw_done {
+                            break 'outer;
+                        }
                     }
                 }
             }
@@ -485,6 +497,9 @@ async fn stream_producer(
                                 client_closed = true;
                                 break 'outer;
                             }
+                        }
+                        if saw_done {
+                            break 'outer;
                         }
                     }
                 }
@@ -565,6 +580,7 @@ async fn accumulate_non_stream(
     let mut acc = ToolAccumulator::new();
     let mut framer = SseFramer::new();
     let mut stream_err: Option<String> = None;
+    let mut protocol_error: Option<String> = None;
 
     let mut body = std::pin::pin!(res.bytes_stream());
     'outer: loop {
@@ -572,7 +588,13 @@ async fn accumulate_non_stream(
             Some(Ok(bytes)) => {
                 for block in framer.feed(&bytes) {
                     for ev in backend.parse_stream_chunk(&block) {
-                        apply_accumulate(&ev, &mut text, &mut finish_reason, &mut acc);
+                        apply_accumulate(
+                            &ev,
+                            &mut text,
+                            &mut finish_reason,
+                            &mut acc,
+                            &mut protocol_error,
+                        );
                     }
                 }
             }
@@ -583,7 +605,13 @@ async fn accumulate_non_stream(
             None => {
                 for block in framer.finish() {
                     for ev in backend.parse_stream_chunk(&block) {
-                        apply_accumulate(&ev, &mut text, &mut finish_reason, &mut acc);
+                        apply_accumulate(
+                            &ev,
+                            &mut text,
+                            &mut finish_reason,
+                            &mut acc,
+                            &mut protocol_error,
+                        );
                     }
                 }
                 break 'outer;
@@ -599,6 +627,12 @@ async fn accumulate_non_stream(
                 e
             }
         ));
+    }
+    if let Some(message) = protocol_error {
+        return json_response(
+            StatusCode::BAD_GATEWAY,
+            json!({ "error": { "message": message } }),
+        );
     }
     let tool_calls: Vec<CommonToolCall> = acc
         .list()
@@ -624,16 +658,18 @@ async fn accumulate_non_stream(
     json_response(StatusCode::OK, agent.format_response(&resp, common))
 }
 
-fn apply_accumulate(
+pub(crate) fn apply_accumulate(
     ev: &CommonEvent,
     text: &mut String,
     finish_reason: &mut Option<String>,
     acc: &mut ToolAccumulator,
+    protocol_error: &mut Option<String>,
 ) {
     match ev {
         CommonEvent::Text { text: t } => text.push_str(t),
         CommonEvent::ToolCallDelta { .. } => acc.push(ev),
         CommonEvent::Done { finish_reason: fr } => *finish_reason = fr.clone(),
+        CommonEvent::Error { message } => *protocol_error = Some(message.clone()),
         _ => {}
     }
 }

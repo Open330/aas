@@ -957,6 +957,52 @@ fn truncated_stream_gets_synthetic_terminator() {
 }
 
 #[test]
+fn backend_error_is_a_single_terminal_stream_event() {
+    use crate::server::{finalize_stream, process_event};
+    let agent = ClaudeAgent;
+    let mut ctx = StreamCtx::new("cid".into(), 0, "claude-opus-4-8".into(), None);
+    let mut acc = ToolAccumulator::new();
+    acc.push(&delta(0, Some("t1"), Some("f"), Some("{}")));
+    let mut saw_done = false;
+
+    let chunks = process_event(
+        &agent,
+        &mut ctx,
+        &mut acc,
+        &mut saw_done,
+        CommonEvent::Error {
+            message: "backend rejected request".into(),
+        },
+    );
+    assert!(saw_done);
+    let joined = chunks.join("");
+    assert!(joined.contains("tool_use"));
+    assert!(joined.contains("backend rejected request"));
+    assert!(joined.contains("message_stop"));
+    assert!(!joined.contains("ended unexpectedly"));
+    assert!(finalize_stream(&agent, &mut ctx, &mut acc, saw_done, None).is_empty());
+}
+
+#[test]
+fn backend_error_is_retained_by_non_stream_accumulator() {
+    use crate::server::apply_accumulate;
+    let mut text = String::new();
+    let mut finish_reason = None;
+    let mut acc = ToolAccumulator::new();
+    let mut protocol_error = None;
+    apply_accumulate(
+        &CommonEvent::Error {
+            message: "invalid token".into(),
+        },
+        &mut text,
+        &mut finish_reason,
+        &mut acc,
+        &mut protocol_error,
+    );
+    assert_eq!(protocol_error.as_deref(), Some("invalid token"));
+}
+
+#[test]
 fn midstream_error_flushes_and_terminates() {
     use crate::server::finalize_stream;
     let agent = ClaudeAgent;
