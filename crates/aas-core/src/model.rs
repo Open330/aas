@@ -66,6 +66,40 @@ pub fn sort_accounts(accounts: &mut [AccountRecord], order: AccountSort) {
 }
 
 impl AccountRecord {
+    /// Per-account provider endpoint. Third-party providers run several independent platforms
+    /// (Kimi: `api.moonshot.ai` token billing, `api.kimi.com/coding` subscription, `api.moonshot.cn`
+    /// for mainland China) whose API keys are NOT interchangeable — using a key against the wrong
+    /// one returns 401. The endpoint a key belongs to is therefore part of the account, not a
+    /// global constant.
+    pub fn endpoint(&self) -> Option<&str> {
+        self.meta
+            .as_ref()?
+            .get("endpoint")?
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
+    /// Record (or clear) this account's endpoint without disturbing the rest of `meta`.
+    pub fn set_endpoint(&mut self, endpoint: Option<&str>) {
+        let endpoint = endpoint.map(str::trim).filter(|value| !value.is_empty());
+        match (endpoint, self.meta.as_mut().and_then(|m| m.as_object_mut())) {
+            (Some(value), Some(meta)) => {
+                meta.insert("endpoint".into(), serde_json::Value::String(value.into()));
+            }
+            (Some(value), None) => {
+                self.meta = Some(serde_json::json!({ "endpoint": value }));
+            }
+            (None, Some(meta)) => {
+                meta.remove("endpoint");
+                if meta.is_empty() {
+                    self.meta = None;
+                }
+            }
+            (None, None) => {}
+        }
+    }
+
     pub fn new(provider: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             provider: provider.into(),
@@ -126,6 +160,38 @@ mod tests {
         assert!(out.contains("\"profileType\":\"isolated\""));
         assert!(!out.contains("\"share\""));
         assert!(!out.contains("\"meta\""));
+    }
+
+    #[test]
+    fn endpoint_round_trips_through_meta_without_clobbering_it() {
+        let mut record = AccountRecord::new("kimi", "work");
+        assert_eq!(record.endpoint(), None);
+
+        record.meta = Some(serde_json::json!({ "keep": "me" }));
+        record.set_endpoint(Some("https://api.moonshot.ai"));
+        assert_eq!(record.endpoint(), Some("https://api.moonshot.ai"));
+        assert_eq!(
+            record.meta.as_ref().unwrap().get("keep").unwrap(),
+            &serde_json::json!("me")
+        );
+
+        record.set_endpoint(None);
+        assert_eq!(record.endpoint(), None);
+        assert!(record.meta.is_some(), "unrelated meta must survive");
+
+        let mut only_endpoint = AccountRecord::new("kimi", "solo");
+        only_endpoint.set_endpoint(Some("  https://api.kimi.com/coding  "));
+        assert_eq!(
+            only_endpoint.endpoint(),
+            Some("https://api.kimi.com/coding")
+        );
+        only_endpoint.set_endpoint(None);
+        assert!(only_endpoint.meta.is_none(), "empty meta must be dropped");
+
+        // A blank value is not an endpoint.
+        let mut blank = AccountRecord::new("kimi", "blank");
+        blank.set_endpoint(Some("   "));
+        assert_eq!(blank.endpoint(), None);
     }
 
     #[test]

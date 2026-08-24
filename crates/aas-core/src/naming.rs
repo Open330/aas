@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 /// Providers with a registered adapter (asx `listKnownProviders()`), minus the `claude-code` alias.
-pub const KNOWN_PROVIDERS: &[&str] = &["claude", "codex", "zai", "grok", "cursor", "pi"];
+pub const KNOWN_PROVIDERS: &[&str] = &["claude", "codex", "zai", "grok", "kimi", "cursor", "pi"];
 
 /// asx `normalizeProvider`: canonical provider id, or `None` if unrecognized.
 pub fn normalize_provider(p: &str) -> Option<String> {
@@ -13,8 +13,10 @@ pub fn normalize_provider(p: &str) -> Option<String> {
     match k.as_str() {
         "claude-code" => Some("claude".into()),
         "xai" => Some("grok".into()),
+        // Moonshot AI ships the Kimi models; both names appear in their own docs and env vars.
+        "moonshot" => Some("kimi".into()),
         "openai" => Some("openai".into()),
-        "claude" | "codex" | "zai" | "grok" | "cursor" | "pi" => Some(k),
+        "claude" | "codex" | "zai" | "grok" | "kimi" | "cursor" | "pi" => Some(k),
         _ => None,
     }
 }
@@ -37,6 +39,7 @@ pub fn provider_short_name(p: &str) -> String {
         "grok" => "grok".into(),
         "cursor" => "cursor".into(),
         "zai" => "zai".into(),
+        "kimi" | "moonshot" => "kimi".into(),
         "pi" => "pi".into(),
         _ => {
             let stripped = k.strip_suffix("-code").unwrap_or(&k);
@@ -53,6 +56,8 @@ pub fn normalize_provider_key(p: &str) -> String {
         "claude".into()
     } else if k == "xai" {
         "grok".into()
+    } else if k == "moonshot" {
+        "kimi".into()
     } else {
         k
     }
