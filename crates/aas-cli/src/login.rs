@@ -139,6 +139,7 @@ pub async fn run_login_flow(
     long_lived: bool,
     device_auth: bool,
     system_home: bool,
+    endpoint: Option<&str>,
 ) -> anyhow::Result<Option<String>> {
     let key = normalize_provider_key(provider.id());
     let target = name
@@ -175,16 +176,40 @@ pub async fn run_login_flow(
         return Ok(Some(target));
     }
 
-    // 2. Z.AI API key.
-    if provider == Provider::Zai {
-        let key_val = match std::env::var("ASX_ZAI_API_KEY") {
+    // 2. API-key providers (Z.AI, Kimi). The provider table decides which these are, so a new
+    // third-party provider needs no branch here.
+    if provider.takes_api_key_login() {
+        let upper = key.to_uppercase();
+        let key_val = match std::env::var(format!("ASX_{upper}_API_KEY"))
+            .or_else(|_| std::env::var(format!("{upper}_API_KEY")))
+        {
             Ok(k) if !k.trim().is_empty() => k.trim().to_string(),
-            _ => prompt_secret("Paste Z.AI API key: ")?,
+            _ => prompt_secret(&format!("Paste {} API key: ", provider.id()))?,
         };
         if key_val.is_empty() {
             anyhow::bail!("No API key provided.");
         }
-        provider.validate_and_store_key(&target, &key_val).await?;
+        // Keys are scoped to the platform that issued them, so the host is chosen at login and
+        // recorded on the account rather than guessed at call time.
+        let endpoints = provider.endpoints();
+        if !endpoints.is_empty() && endpoint.is_none() {
+            ui::hint(format!(
+                "no --endpoint given; validating against the default ({})",
+                endpoints[0].label
+            ));
+            ui::hint(format!(
+                "other {} hosts: {}",
+                provider.id(),
+                endpoints[1..]
+                    .iter()
+                    .map(|entry| format!("{} ({})", entry.id, entry.label))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        provider
+            .validate_and_store_key(&target, &key_val, endpoint)
+            .await?;
         return Ok(Some(target));
     }
 
@@ -290,7 +315,7 @@ mod tests {
         let home = profile_home("codex", "existing");
         std::fs::write(home.join("settings.json"), "keep-settings").unwrap();
 
-        let error = run_login_flow(Provider::Codex, Some("existing"), false, false, false)
+        let error = run_login_flow(Provider::Codex, Some("existing"), false, false, false, None)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("exited with code 42"));

@@ -13,31 +13,236 @@ use aas_core::store::AccountStore;
 use aas_core::usage::{Meter, Usage};
 use serde_json::{json, Value};
 
-const ZAI_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";
-const ZAI_QUOTA_URL: &str = "https://api.z.ai/api/monitor/usage/quota/limit";
+// ---------------------------------------------------------------------------
+// Provider table. Everything that differs between the API-key providers lives here, so adding a
+// third-party provider is one entry rather than another arm in every function below.
+// ---------------------------------------------------------------------------
+
+/// How a key is presented to a provider's REST API.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum AuthStyle {
+    /// `Authorization: Bearer <key>`.
+    Bearer,
+    /// `Authorization: <key>` — Z.AI's quota endpoint rejects the `Bearer` prefix.
+    RawKey,
+}
+
+impl AuthStyle {
+    fn header(self, key: &str) -> String {
+        match self {
+            AuthStyle::Bearer => format!("Bearer {key}"),
+            AuthStyle::RawKey => key.to_string(),
+        }
+    }
+}
+
+/// One selectable API host. Kimi runs several platforms whose keys are NOT interchangeable (a key
+/// from one returns 401 on the others), so the host is recorded per account. Single-host providers
+/// simply have one entry.
+#[derive(Clone, Copy, Debug)]
+pub struct KeyEndpoint {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub base: &'static str,
+}
+
+/// How live quota is reported.
+#[derive(Clone, Copy, Debug)]
+enum QuotaStyle {
+    /// Grok's native multi-endpoint + JWT introspection.
+    GrokNative,
+    /// Percent-of-quota endpoint. Absolute, because Z.AI serves it off a different host than its API.
+    PercentQuota { url: &'static str, auth: AuthStyle },
+    /// Currency balance relative to the account's endpoint (Kimi `/v1/users/me/balance`). There is
+    /// no denominator, so this renders as a note rather than a percentage meter.
+    CurrencyBalance { path: &'static str, auth: AuthStyle },
+}
+
+/// Validation call issued before a pasted key is stored.
+#[derive(Clone, Copy, Debug)]
+struct KeyTest {
+    path: &'static str,
+    auth: AuthStyle,
+}
+
+pub(crate) struct KeyProviderSpec {
+    pub id: &'static str,
+    pub display: &'static str,
+    /// Env var names checked after `<ID>_API_KEY` / `<ID>_KEY`.
+    extra_env: &'static [&'static str],
+    /// Env vars exported when this provider's account becomes active.
+    activate_env: &'static [&'static str],
+    /// Selectable API hosts; the first is the default for a new account.
+    pub endpoints: &'static [KeyEndpoint],
+    key_test: Option<KeyTest>,
+    quota: QuotaStyle,
+    /// Provider keeps native OAuth credentials on disk (Grok's `~/.grok/auth.json`).
+    native_oidc: bool,
+    /// Native login argv, when the provider ships its own login command.
+    login_command: Option<&'static [&'static str]>,
+}
+
+impl KeyProviderSpec {
+    /// Whether a pasted API key is the login method (as opposed to a native OAuth command).
+    fn takes_api_key_login(&self) -> bool {
+        self.key_test.is_some()
+    }
+}
+
+const KEY_PROVIDERS: &[KeyProviderSpec] = &[
+    KeyProviderSpec {
+        id: "grok",
+        display: "Grok",
+        extra_env: &["XAI_API_KEY"],
+        activate_env: &["XAI_API_KEY"],
+        endpoints: &[KeyEndpoint {
+            id: "xai",
+            label: "api.x.ai",
+            base: "https://api.x.ai",
+        }],
+        key_test: None,
+        quota: QuotaStyle::GrokNative,
+        native_oidc: true,
+        login_command: Some(&["grok", "login"]),
+    },
+    KeyProviderSpec {
+        id: "zai",
+        display: "Z.AI",
+        extra_env: &[],
+        activate_env: &["ZAI_API_KEY"],
+        endpoints: &[KeyEndpoint {
+            id: "coding",
+            label: "api.z.ai coding plan",
+            base: "https://api.z.ai/api/coding/paas/v4",
+        }],
+        key_test: Some(KeyTest {
+            path: "/models",
+            auth: AuthStyle::Bearer,
+        }),
+        // Z.AI quota uses `Authorization: <raw key>` with NO `Bearer` prefix.
+        quota: QuotaStyle::PercentQuota {
+            url: "https://api.z.ai/api/monitor/usage/quota/limit",
+            auth: AuthStyle::RawKey,
+        },
+        native_oidc: false,
+        login_command: None,
+    },
+    KeyProviderSpec {
+        id: "kimi",
+        display: "Kimi",
+        extra_env: &["MOONSHOT_API_KEY", "MOONSHOT_KEY"],
+        activate_env: &["KIMI_API_KEY", "MOONSHOT_API_KEY"],
+        // Keys are platform-scoped; `aas login kimi --endpoint <id>` picks one. Restricting the
+        // stored value to this list means a tampered accounts.json cannot redirect a key to an
+        // attacker-controlled host.
+        endpoints: &[
+            KeyEndpoint {
+                id: "moonshot-ai",
+                label: "platform.kimi.ai — per-token billing",
+                base: "https://api.moonshot.ai",
+            },
+            KeyEndpoint {
+                id: "kimi-code",
+                label: "Kimi Code Console — subscription",
+                base: "https://api.kimi.com/coding",
+            },
+            KeyEndpoint {
+                id: "moonshot-cn",
+                label: "api.moonshot.cn — mainland China",
+                base: "https://api.moonshot.cn",
+            },
+        ],
+        key_test: Some(KeyTest {
+            path: "/v1/models",
+            auth: AuthStyle::Bearer,
+        }),
+        quota: QuotaStyle::CurrencyBalance {
+            path: "/v1/users/me/balance",
+            auth: AuthStyle::Bearer,
+        },
+        native_oidc: false,
+        login_command: None,
+    },
+];
+
+/// The table entry for a provider id (accepts asx aliases such as `moonshot` and `xai`).
+pub(crate) fn spec(provider: &str) -> Option<&'static KeyProviderSpec> {
+    let id = aas_core::naming::normalize_provider_key(provider);
+    KEY_PROVIDERS.iter().find(|entry| entry.id == id)
+}
+
+fn require_spec(provider: &str) -> anyhow::Result<&'static KeyProviderSpec> {
+    spec(provider).ok_or_else(|| anyhow::anyhow!("'{provider}' is not an API-key provider"))
+}
+
+/// Resolve an endpoint id (`--endpoint kimi-code`) or a full base URL to a table entry.
+pub(crate) fn resolve_endpoint(
+    spec: &'static KeyProviderSpec,
+    requested: Option<&str>,
+) -> anyhow::Result<&'static KeyEndpoint> {
+    let Some(requested) = requested.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(&spec.endpoints[0]);
+    };
+    spec.endpoints
+        .iter()
+        .find(|entry| entry.id == requested || entry.base == requested)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown {} endpoint '{requested}'; expected one of: {}",
+                spec.display,
+                spec.endpoints
+                    .iter()
+                    .map(|entry| entry.id)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+}
+
+/// The API base for one account: its recorded endpoint, else the provider default. Returns the
+/// `&'static` table value rather than the stored string, so a tampered store cannot point a
+/// credential at an arbitrary host.
+pub(crate) fn account_endpoint(
+    spec: &'static KeyProviderSpec,
+    account: &str,
+) -> anyhow::Result<&'static KeyEndpoint> {
+    let stored = AccountStore::open_default()
+        .get(spec.id, account)
+        .ok()
+        .flatten()
+        .and_then(|record| record.endpoint().map(str::to_string));
+    match stored {
+        Some(value) => resolve_endpoint(spec, Some(&value)).map_err(|_| {
+            anyhow::anyhow!(
+                "{}/{account} names endpoint '{value}', which is not a known {} host",
+                spec.id,
+                spec.display
+            )
+        }),
+        None => Ok(&spec.endpoints[0]),
+    }
+}
+
+fn join_url(base: &str, path: &str) -> String {
+    format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
+}
 
 // ---------------------------------------------------------------------------
 // Pure helpers (unit-tested).
 // ---------------------------------------------------------------------------
 
-/// asx `getEnvKey`: `<PFX>_API_KEY | <PFX>_KEY | (grok) XAI_API_KEY`.
+/// asx `getEnvKey`: `<PFX>_API_KEY`, then `<PFX>_KEY`, then the provider's table aliases
+/// (`XAI_API_KEY` for Grok, `MOONSHOT_API_KEY` for Kimi).
 fn get_env_key(provider: &str) -> Option<String> {
-    let pfx = provider.to_uppercase();
-    std::env::var(format!("{pfx}_API_KEY"))
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            std::env::var(format!("{pfx}_KEY"))
-                .ok()
-                .filter(|s| !s.is_empty())
-        })
-        .or_else(|| {
-            if provider == "grok" {
-                std::env::var("XAI_API_KEY").ok().filter(|s| !s.is_empty())
-            } else {
-                None
-            }
-        })
+    let pfx = aas_core::naming::normalize_provider_key(provider).to_uppercase();
+    let read = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+    read(&format!("{pfx}_API_KEY"))
+        .or_else(|| read(&format!("{pfx}_KEY")))
+        .or_else(|| spec(provider)?.extra_env.iter().find_map(|name| read(name)))
 }
 
 /// asx `getGrokAuthFile`: parse `~/.grok/auth.json`.
@@ -725,18 +930,23 @@ fn grok_failure_if_no_success(successful_responses: usize, errors: &[String]) ->
     })
 }
 
-async fn zai_usage(account: &str) -> Usage {
-    let Some(key) = get_secret("zai", account) else {
+/// Percent-of-quota usage (Z.AI). The endpoint is absolute because Z.AI serves quota off a
+/// different host than its API.
+async fn percent_quota_usage(
+    spec: &'static KeyProviderSpec,
+    account: &str,
+    url: &str,
+    auth: AuthStyle,
+) -> Usage {
+    let Some(key) = get_secret(spec.id, account) else {
         return Usage {
             headline: "API key (no live quota data)".into(),
             ..Default::default()
         };
     };
-    let client = http_client();
-    // ⚠ Z.AI quota uses `Authorization: <raw key>` with NO `Bearer` prefix.
-    let res = client
-        .get(ZAI_QUOTA_URL)
-        .header("Authorization", &key)
+    let res = http_client()
+        .get(url)
+        .header("Authorization", auth.header(&key))
         .header("Accept-Language", "en-US,en")
         .header("Content-Type", "application/json")
         .send()
@@ -745,34 +955,137 @@ async fn zai_usage(account: &str) -> Usage {
         Ok(res) => {
             let status = res.status().as_u16();
             if !(200..300).contains(&status) {
-                return Usage::error("zai", format!("ZAI usage fetch failed: {status}"));
+                return Usage::error(
+                    spec.id,
+                    format!("{} usage fetch failed: {status}", spec.display),
+                );
             }
             let payload = res.json::<Value>().await.unwrap_or(Value::Null);
             match parse_zai_quota_used_pct(&payload) {
                 Some(used) => Usage {
-                    headline: "Z.AI".into(),
+                    headline: spec.display.into(),
                     meters: vec![Meter::new("5h", used.clamp(0.0, 100.0), None)],
                     ..Default::default()
                 },
                 None => Usage {
-                    headline: "Z.AI".into(),
+                    headline: spec.display.into(),
                     error: Some("no token quota returned".into()),
                     ..Default::default()
                 },
             }
         }
-        Err(_) => Usage::error("zai", "ZAI usage fetch: network error"),
+        Err(_) => Usage::error(
+            spec.id,
+            format!("{} usage fetch: network error", spec.display),
+        ),
     }
 }
 
-async fn test_zai_key(key: &str) -> anyhow::Result<()> {
-    let client = http_client();
-    let res = client
-        .get(format!("{ZAI_BASE_URL}/models"))
-        .header("Authorization", format!("Bearer {key}"))
+/// Kimi's balance payload: `{"code":0,"data":{"available_balance":..,"voucher_balance":..,
+/// "cash_balance":..},"status":true}`. Returns the three figures when the call succeeded.
+pub(crate) fn parse_currency_balance(payload: &Value) -> Option<(f64, Option<f64>, Option<f64>)> {
+    let data = payload.get("data").unwrap_or(payload);
+    let available = data.get("available_balance").and_then(Value::as_f64)?;
+    Some((
+        available,
+        data.get("cash_balance").and_then(Value::as_f64),
+        data.get("voucher_balance").and_then(Value::as_f64),
+    ))
+}
+
+/// Render a currency balance. `Meter` is percentage-only and a balance has no denominator, so this
+/// reports the figures as notes instead of inventing a full-scale meter.
+pub(crate) fn currency_balance_usage_from(
+    spec: &'static KeyProviderSpec,
+    endpoint_label: &str,
+    payload: &Value,
+) -> Usage {
+    match parse_currency_balance(payload) {
+        Some((available, cash, voucher)) => {
+            let mut notes = vec![format!("available balance {available:.2}")];
+            if let (Some(cash), Some(voucher)) = (cash, voucher) {
+                notes.push(format!("cash {cash:.2} · voucher {voucher:.2}"));
+            }
+            if available <= 0.0 {
+                notes.push("balance exhausted — requests will be rejected".into());
+            }
+            Usage {
+                headline: spec.display.into(),
+                plan: Some(endpoint_label.to_string()),
+                notes,
+                ..Default::default()
+            }
+        }
+        None => Usage {
+            headline: spec.display.into(),
+            plan: Some(endpoint_label.to_string()),
+            error: Some("no balance returned".into()),
+            ..Default::default()
+        },
+    }
+}
+
+async fn currency_balance_usage(
+    spec: &'static KeyProviderSpec,
+    account: &str,
+    path: &str,
+    auth: AuthStyle,
+) -> Usage {
+    let Some(key) = get_secret(spec.id, account) else {
+        return Usage {
+            headline: "API key (no live quota data)".into(),
+            ..Default::default()
+        };
+    };
+    let endpoint = match account_endpoint(spec, account) {
+        Ok(endpoint) => endpoint,
+        Err(error) => return Usage::error(spec.id, error.to_string()),
+    };
+    let res = http_client()
+        .get(join_url(endpoint.base, path))
+        .header("Authorization", auth.header(&key))
+        .send()
+        .await;
+    match res {
+        Ok(res) => {
+            let status = res.status().as_u16();
+            if !(200..300).contains(&status) {
+                // A key used against the wrong Kimi platform fails exactly here.
+                let hint = if status == 401 {
+                    format!(" (is this key issued by {}?)", endpoint.label)
+                } else {
+                    String::new()
+                };
+                return Usage::error(
+                    spec.id,
+                    format!("{} usage fetch failed: {status}{hint}", spec.display),
+                );
+            }
+            let payload = res.json::<Value>().await.unwrap_or(Value::Null);
+            currency_balance_usage_from(spec, endpoint.label, &payload)
+        }
+        Err(_) => Usage::error(
+            spec.id,
+            format!("{} usage fetch: network error", spec.display),
+        ),
+    }
+}
+
+/// Validate a pasted key against the account's endpoint before it is stored.
+async fn test_key(
+    spec: &'static KeyProviderSpec,
+    endpoint: &'static KeyEndpoint,
+    key: &str,
+) -> anyhow::Result<()> {
+    let Some(test) = spec.key_test else {
+        return Ok(());
+    };
+    let res = http_client()
+        .get(join_url(endpoint.base, test.path))
+        .header("Authorization", test.auth.header(key))
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("ZAI endpoint test failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("{} endpoint test failed: {e}", spec.display))?;
     if !res.status().is_success() {
         let status = res.status();
         let detail: String = res
@@ -782,8 +1095,23 @@ async fn test_zai_key(key: &str) -> anyhow::Result<()> {
             .chars()
             .take(240)
             .collect();
+        // Keys are platform-scoped; the most common cause of a 401 here is the wrong platform.
+        let hint = if status.as_u16() == 401 && spec.endpoints.len() > 1 {
+            format!(
+                "; this key must be issued by {} — pick another with --endpoint <{}>",
+                endpoint.label,
+                spec.endpoints
+                    .iter()
+                    .map(|entry| entry.id)
+                    .collect::<Vec<_>>()
+                    .join("|")
+            )
+        } else {
+            String::new()
+        };
         anyhow::bail!(
-            "ZAI endpoint test failed ({}{}{})",
+            "{} endpoint test failed ({}{}{}){hint}",
+            spec.display,
             status.as_u16(),
             status
                 .canonical_reason()
@@ -804,27 +1132,32 @@ async fn test_zai_key(key: &str) -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn usage(provider: &str, account: &str) -> Usage {
-    if provider == "grok" {
-        grok_usage(account).await
-    } else {
-        zai_usage(account).await
+    let Some(spec) = spec(provider) else {
+        return Usage::error(provider, format!("'{provider}' is not an API-key provider"));
+    };
+    match spec.quota {
+        QuotaStyle::GrokNative => grok_usage(account).await,
+        QuotaStyle::PercentQuota { url, auth } => {
+            percent_quota_usage(spec, account, url, auth).await
+        }
+        QuotaStyle::CurrencyBalance { path, auth } => {
+            currency_balance_usage(spec, account, path, auth).await
+        }
     }
 }
 
 pub(crate) async fn current_credential(provider: &str) -> Option<String> {
-    if provider == "grok" {
-        get_grok_auth_file().map(|a| a.to_string())
-    } else {
-        get_env_key(provider)
+    if spec(provider)?.native_oidc {
+        return get_grok_auth_file().map(|a| a.to_string());
     }
+    get_env_key(provider)
 }
 
 pub(crate) async fn current_email(provider: &str) -> Option<String> {
-    if provider == "grok" {
-        try_extract_grok_email()
-    } else {
-        None
-    }
+    spec(provider)?
+        .native_oidc
+        .then(try_extract_grok_email)
+        .flatten()
 }
 
 pub(crate) async fn load_current(
@@ -832,48 +1165,53 @@ pub(crate) async fn load_current(
     account: &str,
     label: Option<&str>,
 ) -> anyhow::Result<()> {
+    let spec = require_spec(provider)?;
     let mut val = get_env_key(provider);
-    if val.is_none() && provider == "grok" {
+    if val.is_none() && spec.native_oidc {
         if let Some(auth) = get_grok_auth_file() {
             val = Some(auth.to_string());
         }
     }
     let val = val.ok_or_else(|| {
         anyhow::anyhow!(
-            "No live {provider} credential found. Set the provider API key or log in first."
+            "No live {} credential found. Set the provider API key or log in first.",
+            spec.display
         )
     })?;
-    let email = if provider == "grok" {
-        try_extract_grok_email()
-    } else {
-        None
-    };
-    store_account_secret(provider, account, label, email, &val)?;
+    let email = spec.native_oidc.then(try_extract_grok_email).flatten();
+    store_account_secret(spec.id, account, label, email, &val)?;
     Ok(())
 }
 
 pub(crate) async fn switch_to(provider: &str, account: &str) -> anyhow::Result<()> {
-    let v = get_secret(provider, account)
-        .ok_or_else(|| anyhow::anyhow!("No key for {provider}/{account}"))?;
-    let env_name = if provider == "grok" {
-        "XAI_API_KEY".to_string()
-    } else {
-        format!("{}_API_KEY", provider.to_uppercase())
-    };
-    let previous_env = std::env::var_os(&env_name);
-    let previous_grok = (provider == "grok").then(get_grok_auth_file).flatten();
-    if provider == "grok" {
+    let spec = require_spec(provider)?;
+    let v = get_secret(spec.id, account)
+        .ok_or_else(|| anyhow::anyhow!("No key for {}/{account}", spec.id))?;
+    let previous_env: Vec<(&str, Option<std::ffi::OsString>)> = spec
+        .activate_env
+        .iter()
+        .map(|name| (*name, std::env::var_os(name)))
+        .collect();
+    let previous_grok = spec.native_oidc.then(get_grok_auth_file).flatten();
+
+    let exported = if spec.native_oidc {
         write_grok_auth(&v)?;
-        std::env::set_var("XAI_API_KEY", grok_bearer(&v));
+        grok_bearer(&v)
     } else {
-        std::env::set_var(&env_name, &v);
+        v.clone()
+    };
+    for name in spec.activate_env {
+        std::env::set_var(name, &exported);
     }
-    if let Err(error) = set_active(provider, account) {
-        match previous_env {
-            Some(previous) => std::env::set_var(&env_name, previous),
-            None => std::env::remove_var(&env_name),
+
+    if let Err(error) = set_active(spec.id, account) {
+        for (name, previous) in previous_env {
+            match previous {
+                Some(previous) => std::env::set_var(name, previous),
+                None => std::env::remove_var(name),
+            }
         }
-        let rollback = if provider == "grok" {
+        let rollback = if spec.native_oidc {
             match previous_grok {
                 Some(previous) => write_restricted_file(&grok_auth_path(), &previous.to_string()),
                 None => match std::fs::remove_file(grok_auth_path()) {
@@ -886,14 +1224,15 @@ pub(crate) async fn switch_to(provider: &str, account: &str) -> anyhow::Result<(
             Ok(())
         };
         anyhow::bail!(
-            "could not update active {provider} marker: {error}; native rollback={rollback:?}"
+            "could not update active {} marker: {error}; native rollback={rollback:?}",
+            spec.id
         );
     }
     Ok(())
 }
 
 pub(crate) async fn clear_current(provider: &str) -> anyhow::Result<()> {
-    if provider == "grok" {
+    if require_spec(provider)?.native_oidc {
         match std::fs::remove_file(grok_auth_path()) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -904,29 +1243,49 @@ pub(crate) async fn clear_current(provider: &str) -> anyhow::Result<()> {
 }
 
 pub(crate) fn login_command(provider: &str) -> Option<Vec<String>> {
-    if provider == "grok" {
-        Some(vec!["grok".into(), "login".into()])
-    } else {
-        None
-    }
+    let argv = spec(provider)?.login_command?;
+    Some(argv.iter().map(|s| s.to_string()).collect())
 }
 
-/// asx key-adapter `login` (Z.AI only): validate the key, then store + activate.
+/// Whether `aas login <provider>` should prompt for an API key rather than shelling out.
+pub(crate) fn takes_api_key_login(provider: &str) -> bool {
+    spec(provider).is_some_and(KeyProviderSpec::takes_api_key_login)
+}
+
+/// The endpoints a provider's login may choose between (empty when it has no table entry).
+pub(crate) fn endpoints(provider: &str) -> &'static [KeyEndpoint] {
+    spec(provider).map(|entry| entry.endpoints).unwrap_or(&[])
+}
+
+/// asx key-adapter `login`: validate the key against the selected endpoint, then store + activate.
+/// `endpoint` names a table entry (`--endpoint kimi-code`); `None` uses the provider default.
 pub(crate) async fn validate_and_store_key(
     provider: &str,
     account: &str,
     key: &str,
+    endpoint: Option<&str>,
 ) -> anyhow::Result<()> {
-    if provider != "zai" {
-        anyhow::bail!("validate_and_store_key is only supported for zai");
+    let spec = require_spec(provider)?;
+    if !spec.takes_api_key_login() {
+        anyhow::bail!("{} does not support API-key login", spec.display);
     }
     let key = key.trim();
     if key.is_empty() {
-        anyhow::bail!("No Z.AI API key provided.");
+        anyhow::bail!("No {} API key provided.", spec.display);
     }
-    test_zai_key(key).await?;
-    store_account_secret(provider, account, None, None, key)?;
-    set_active(provider, account)?;
+    let endpoint = resolve_endpoint(spec, endpoint)?;
+    test_key(spec, endpoint, key).await?;
+    store_account_secret(spec.id, account, None, None, key)?;
+    // Record which platform issued this key. Written after the credential so a failed store never
+    // leaves an endpoint pointing at a credential that does not exist.
+    if spec.endpoints.len() > 1 {
+        let store = AccountStore::open_default();
+        if let Some(mut record) = store.get(spec.id, account)? {
+            record.set_endpoint(Some(endpoint.base));
+            store.add(record)?;
+        }
+    }
+    set_active(spec.id, account)?;
     Ok(())
 }
 
@@ -942,6 +1301,106 @@ pub(crate) fn refresh_outcome(provider: &str) -> RefreshOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_table_covers_every_key_provider() {
+        for id in ["grok", "zai", "kimi"] {
+            assert!(spec(id).is_some(), "{id} missing from the table");
+        }
+        // Aliases resolve to the same entry.
+        assert_eq!(spec("moonshot").map(|s| s.id), Some("kimi"));
+        assert_eq!(spec("xai").map(|s| s.id), Some("grok"));
+        // Providers with their own adapters are not key providers.
+        assert!(spec("claude").is_none());
+        assert!(spec("codex").is_none());
+
+        // Grok logs in natively; the others take a pasted key.
+        assert!(!takes_api_key_login("grok"));
+        assert!(takes_api_key_login("zai"));
+        assert!(takes_api_key_login("kimi"));
+        assert_eq!(
+            login_command("grok"),
+            Some(vec!["grok".into(), "login".into()])
+        );
+        assert_eq!(login_command("kimi"), None);
+    }
+
+    #[test]
+    fn endpoint_resolution_accepts_ids_and_bases_but_rejects_foreign_hosts() {
+        let kimi = spec("kimi").unwrap();
+        assert_eq!(resolve_endpoint(kimi, None).unwrap().id, "moonshot-ai");
+        assert_eq!(
+            resolve_endpoint(kimi, Some("kimi-code")).unwrap().id,
+            "kimi-code"
+        );
+        assert_eq!(
+            resolve_endpoint(kimi, Some("https://api.moonshot.cn"))
+                .unwrap()
+                .id,
+            "moonshot-cn"
+        );
+        // A blank value is not a selection.
+        assert_eq!(
+            resolve_endpoint(kimi, Some("  ")).unwrap().id,
+            "moonshot-ai"
+        );
+        // An arbitrary host must never become a credential destination.
+        assert!(resolve_endpoint(kimi, Some("https://evil.example")).is_err());
+        assert!(resolve_endpoint(kimi, Some("moonshot-ai.evil")).is_err());
+
+        // Single-host providers still resolve to their one entry.
+        let zai = spec("zai").unwrap();
+        assert_eq!(resolve_endpoint(zai, None).unwrap().id, "coding");
+        assert!(resolve_endpoint(zai, Some("kimi-code")).is_err());
+    }
+
+    #[test]
+    fn auth_style_matches_each_provider_contract() {
+        // Z.AI's quota endpoint rejects a `Bearer` prefix; everything else expects one.
+        assert_eq!(AuthStyle::RawKey.header("k"), "k");
+        assert_eq!(AuthStyle::Bearer.header("k"), "Bearer k");
+    }
+
+    #[test]
+    fn join_url_does_not_double_or_drop_separators() {
+        assert_eq!(join_url("https://h", "/v1/x"), "https://h/v1/x");
+        assert_eq!(join_url("https://h/", "/v1/x"), "https://h/v1/x");
+        assert_eq!(
+            join_url("https://h/coding/", "v1/x"),
+            "https://h/coding/v1/x"
+        );
+    }
+
+    #[test]
+    fn currency_balance_reports_figures_without_faking_a_meter() {
+        let kimi = spec("kimi").unwrap();
+        let payload = json!({
+            "code": 0,
+            "data": { "available_balance": 49.58894, "voucher_balance": 46.58893, "cash_balance": 3.00001 },
+            "status": true
+        });
+        assert_eq!(
+            parse_currency_balance(&payload).map(|(a, _, _)| a),
+            Some(49.58894)
+        );
+        let usage = currency_balance_usage_from(kimi, "platform.kimi.ai", &payload);
+        assert_eq!(usage.headline, "Kimi");
+        assert_eq!(usage.plan.as_deref(), Some("platform.kimi.ai"));
+        // A balance has no denominator, so it must not be rendered as a percentage meter.
+        assert!(usage.meters.is_empty());
+        assert!(usage.notes.iter().any(|n| n.contains("49.59")));
+        assert!(usage.error.is_none());
+
+        // An exhausted balance is called out, because Kimi rejects requests at zero.
+        let empty = json!({ "data": { "available_balance": 0.0 } });
+        let usage = currency_balance_usage_from(kimi, "platform.kimi.ai", &empty);
+        assert!(usage.notes.iter().any(|n| n.contains("exhausted")));
+
+        // A shape we do not recognise is an error, never a silent "0 used".
+        let usage = currency_balance_usage_from(kimi, "platform.kimi.ai", &json!({"data": {}}));
+        assert!(usage.error.is_some());
+        assert!(usage.meters.is_empty());
+    }
 
     #[test]
     fn percent_scaling() {

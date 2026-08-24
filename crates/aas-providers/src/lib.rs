@@ -16,6 +16,7 @@ mod key_adapter;
 mod pi;
 mod snapshot;
 
+pub use key_adapter::KeyEndpoint;
 pub use snapshot::{
     resolve_scope, snapshot, snapshot_sorted, snapshot_sorted_with_cache, AccountUsage,
     UsageCacheMode,
@@ -28,6 +29,7 @@ pub enum Provider {
     Codex,
     Grok,
     Zai,
+    Kimi,
     Cursor,
     Pi,
 }
@@ -49,19 +51,21 @@ pub fn get_adapter(name: &str) -> Option<Provider> {
         "codex" => Some(Provider::Codex),
         "grok" => Some(Provider::Grok),
         "zai" => Some(Provider::Zai),
+        "kimi" => Some(Provider::Kimi),
         "cursor" => Some(Provider::Cursor),
         "pi" => Some(Provider::Pi),
         _ => None,
     }
 }
 
-/// asx `listKnownProviders()` order: `[claude, codex, zai, grok, cursor, pi]`.
-pub fn all_providers() -> [Provider; 6] {
+/// asx `listKnownProviders()` order, with third-party key providers grouped after the natives.
+pub fn all_providers() -> [Provider; 7] {
     [
         Provider::Claude,
         Provider::Codex,
         Provider::Zai,
         Provider::Grok,
+        Provider::Kimi,
         Provider::Cursor,
         Provider::Pi,
     ]
@@ -85,6 +89,7 @@ impl Provider {
             Provider::Codex => "codex",
             Provider::Grok => "grok",
             Provider::Zai => "zai",
+            Provider::Kimi => "kimi",
             Provider::Cursor => "cursor",
             Provider::Pi => "pi",
         }
@@ -97,6 +102,7 @@ impl Provider {
             Provider::Codex => codex::usage(account).await,
             Provider::Grok => key_adapter::usage("grok", account).await,
             Provider::Zai => key_adapter::usage("zai", account).await,
+            Provider::Kimi => key_adapter::usage("kimi", account).await,
             Provider::Cursor => cursor::usage(account),
             Provider::Pi => pi::usage(account).await,
         }
@@ -109,6 +115,7 @@ impl Provider {
             Provider::Codex => codex::current_credential().await,
             Provider::Grok => key_adapter::current_credential("grok").await,
             Provider::Zai => key_adapter::current_credential("zai").await,
+            Provider::Kimi => key_adapter::current_credential("kimi").await,
             Provider::Cursor => cursor::current_credential().await,
             Provider::Pi => pi::current_credential().await,
         }
@@ -121,6 +128,7 @@ impl Provider {
             Provider::Codex => codex::current_email().await,
             Provider::Grok => key_adapter::current_email("grok").await,
             Provider::Zai => key_adapter::current_email("zai").await,
+            Provider::Kimi => key_adapter::current_email("kimi").await,
             Provider::Cursor => cursor::current_email().await,
             Provider::Pi => pi::current_email().await,
         }
@@ -134,6 +142,7 @@ impl Provider {
             Provider::Codex => codex::load_current(account, label).await,
             Provider::Grok => key_adapter::load_current("grok", account, label).await,
             Provider::Zai => key_adapter::load_current("zai", account, label).await,
+            Provider::Kimi => key_adapter::load_current("kimi", account, label).await,
             Provider::Cursor => cursor::load_current(account, label).await,
             Provider::Pi => pi::load_current(account, label).await,
         }
@@ -147,6 +156,7 @@ impl Provider {
             Provider::Codex => codex::switch_to(account).await,
             Provider::Grok => key_adapter::switch_to("grok", account).await,
             Provider::Zai => key_adapter::switch_to("zai", account).await,
+            Provider::Kimi => key_adapter::switch_to("kimi", account).await,
             Provider::Cursor => cursor::switch_to(account).await,
             Provider::Pi => pi::switch_to(account).await,
         }
@@ -160,6 +170,7 @@ impl Provider {
             Provider::Codex => codex::clear_current().await,
             Provider::Grok => key_adapter::clear_current("grok").await,
             Provider::Zai => key_adapter::clear_current("zai").await,
+            Provider::Kimi => key_adapter::clear_current("kimi").await,
             Provider::Cursor => cursor::clear_current().await,
             Provider::Pi => pi::clear_current().await,
         }
@@ -172,7 +183,7 @@ impl Provider {
             Provider::Codex => codex::is_expired(account).await,
             // Key/marker providers have no expiry.
             Provider::Grok => key_adapter::is_grok_expired(account),
-            Provider::Zai | Provider::Cursor | Provider::Pi => false,
+            Provider::Zai | Provider::Kimi | Provider::Cursor | Provider::Pi => false,
         }
     }
 
@@ -219,6 +230,7 @@ impl Provider {
             Provider::Codex => codex::refresh(account).await,
             Provider::Grok => key_adapter::refresh_grok(account).await,
             Provider::Zai => key_adapter::refresh_outcome("zai"),
+            Provider::Kimi => key_adapter::refresh_outcome("kimi"),
             Provider::Cursor => cursor::refresh_outcome(),
             Provider::Pi => RefreshOutcome {
                 ok: true,
@@ -235,6 +247,7 @@ impl Provider {
             Provider::Codex => codex::login_command(),
             Provider::Grok => key_adapter::login_command("grok"),
             Provider::Zai => key_adapter::login_command("zai"),
+            Provider::Kimi => key_adapter::login_command("kimi"),
             Provider::Cursor => cursor::login_command(),
             Provider::Pi => None,
         }
@@ -251,14 +264,35 @@ impl Provider {
         }
     }
 
-    /// Validate an API key against the provider and store it (Z.AI only; error otherwise).
-    pub async fn validate_and_store_key(&self, account: &str, key: &str) -> anyhow::Result<()> {
-        match self {
-            Provider::Zai => {
-                let _lock = self.lifecycle_lock().await.map_err(anyhow::Error::msg)?;
-                key_adapter::validate_and_store_key("zai", account, key).await
-            }
-            other => anyhow::bail!("{} does not support API-key login", other.id()),
+    /// Validate an API key against the provider and store it. `endpoint` names one of the
+    /// provider's hosts (`aas login kimi --endpoint kimi-code`); `None` uses its default.
+    pub async fn validate_and_store_key(
+        &self,
+        account: &str,
+        key: &str,
+        endpoint: Option<&str>,
+    ) -> anyhow::Result<()> {
+        if !self.takes_api_key_login() {
+            anyhow::bail!("{} does not support API-key login", self.id());
+        }
+        let _lock = self.lifecycle_lock().await.map_err(anyhow::Error::msg)?;
+        key_adapter::validate_and_store_key(self.id(), account, key, endpoint).await
+    }
+
+    /// Whether `aas login <provider>` prompts for a pasted API key instead of shelling out to a
+    /// native login command.
+    pub fn takes_api_key_login(&self) -> bool {
+        key_adapter::takes_api_key_login(self.id())
+    }
+
+    /// The hosts this provider's login can target, when it has more than one. Kimi's platforms
+    /// issue keys that are not interchangeable, so the choice is part of login.
+    pub fn endpoints(&self) -> &'static [KeyEndpoint] {
+        let all = key_adapter::endpoints(self.id());
+        if all.len() > 1 {
+            all
+        } else {
+            &[]
         }
     }
 
@@ -298,7 +332,10 @@ mod tests {
         assert_eq!(Provider::Zai.id(), "zai");
         assert_eq!(Provider::Pi.id(), "pi");
         let order: Vec<&str> = all_providers().iter().map(|p| p.id()).collect();
-        assert_eq!(order, ["claude", "codex", "zai", "grok", "cursor", "pi"]);
+        assert_eq!(
+            order,
+            ["claude", "codex", "zai", "grok", "kimi", "cursor", "pi"]
+        );
     }
 
     #[tokio::test]
@@ -308,8 +345,30 @@ mod tests {
             .await
             .is_err());
         assert!(Provider::Claude
-            .validate_and_store_key("x", "k")
+            .validate_and_store_key("x", "k", None)
             .await
             .is_err());
+    }
+
+    #[test]
+    fn api_key_login_and_endpoint_choice_come_from_the_provider_table() {
+        assert!(Provider::Zai.takes_api_key_login());
+        assert!(Provider::Kimi.takes_api_key_login());
+        // Grok logs in through its own CLI, so a pasted key is not its login path.
+        assert!(!Provider::Grok.takes_api_key_login());
+        assert!(!Provider::Claude.takes_api_key_login());
+
+        // Only providers with several incompatible platforms surface an endpoint choice.
+        assert!(Provider::Zai.endpoints().is_empty());
+        assert!(Provider::Grok.endpoints().is_empty());
+        let kimi: Vec<&str> = Provider::Kimi.endpoints().iter().map(|e| e.id).collect();
+        assert_eq!(kimi, ["moonshot-ai", "kimi-code", "moonshot-cn"]);
+    }
+
+    #[test]
+    fn kimi_resolves_through_its_moonshot_alias() {
+        assert_eq!(get_adapter("kimi"), Some(Provider::Kimi));
+        assert_eq!(get_adapter("moonshot"), Some(Provider::Kimi));
+        assert_eq!(Provider::Kimi.id(), "kimi");
     }
 }

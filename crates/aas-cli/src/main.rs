@@ -168,6 +168,10 @@ enum Command {
         /// Headless / no browser: use the provider's device-code flow (codex).
         #[arg(long, visible_alias = "headless")]
         device_auth: bool,
+        /// API host for providers that run several (kimi: moonshot-ai | kimi-code | moonshot-cn).
+        /// Keys are scoped to the platform that issued them.
+        #[arg(long, value_name = "ID")]
+        endpoint: Option<String>,
         #[command(flatten)]
         share: ShareArgs,
     },
@@ -287,8 +291,20 @@ async fn main() {
             name,
             long_lived,
             device_auth,
+            endpoint,
             share,
-        } => cmd_login(&store, provider, name, long_lived, device_auth, &share).await,
+        } => {
+            cmd_login(
+                &store,
+                provider,
+                name,
+                long_lived,
+                device_auth,
+                endpoint.as_deref(),
+                &share,
+            )
+            .await
+        }
         Command::Switch { provider, name } => cmd_switch(&store, &provider, name.as_deref()).await,
         Command::Rename { from, to } => cmd_rename(&store, &from, &to),
         Command::Remove { args } => cmd_remove(&store, &args),
@@ -587,6 +603,7 @@ fn provider_title(provider: &str) -> &'static str {
         "claude" => "Claude",
         "codex" => "Codex",
         "zai" => "Zai",
+        "kimi" => "Kimi",
         "grok" => "Grok",
         "cursor" => "Cursor",
         "pi" => "Pi",
@@ -736,7 +753,7 @@ async fn cmd_load(
                     ui::hint(format!("shell env:     eval \"$(aas export {prov})\""));
                 } else {
                     ui::error(format!("Unknown provider: {prov}"));
-                    ui::hint("providers: claude · codex · grok · zai · cursor · pi");
+                    ui::hint("providers: claude · codex · grok · zai · kimi · cursor · pi");
                     ui::hint("`load` snapshots the currently logged-in credential, e.g.:  aas load codex");
                 }
                 std::process::exit(1);
@@ -789,6 +806,7 @@ async fn cmd_login(
     name: Option<String>,
     long_lived: bool,
     device_auth: bool,
+    endpoint: Option<&str>,
     share: &ShareArgs,
 ) -> anyhow::Result<()> {
     // Resolve provider (explicit, or inferred from an existing account name).
@@ -796,7 +814,7 @@ async fn cmd_login(
         (Some(p), n) => (p.clone(), n.clone()),
         (None, _) => {
             ui::error("Specify a provider to log in.");
-            ui::hint("providers:  claude · codex · grok · zai · pi");
+            ui::hint("providers:  claude · codex · grok · zai · kimi · pi");
             ui::hint("example:    aas login claude work");
             std::process::exit(2);
         }
@@ -825,6 +843,7 @@ async fn cmd_login(
         long_lived,
         device_auth,
         system_home,
+        endpoint,
     )
     .await?;
     if let Some(final_name) = final_name {
@@ -983,7 +1002,7 @@ async fn cmd_refresh(
         let account = store.get(&prov, &name)?;
         let system_home = account.and_then(|item| item.profile_type) == Some(ProfileType::System);
         let relogged =
-            login::run_login_flow(adapter, Some(&name), false, false, system_home).await?;
+            login::run_login_flow(adapter, Some(&name), false, false, system_home, None).await?;
         if relogged.is_some() {
             return Ok(());
         }
