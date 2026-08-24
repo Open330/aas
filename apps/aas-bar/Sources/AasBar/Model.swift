@@ -325,7 +325,11 @@ final class UsageModel: ObservableObject {
             updated = Date()
             loadError = nil
             refreshNotice = nil
-            saveCache()
+            do {
+                try saveCache()
+            } catch {
+                refreshNotice = "Updated, but secure cache write failed"
+            }
         } catch is CancellationError {
             loadError = nil
             refreshNotice = "Refresh cancelled"
@@ -337,27 +341,40 @@ final class UsageModel: ObservableObject {
 
     // MARK: Cache (survives relaunch; shown until the user hits Refresh)
 
-    private static func cacheURL() -> URL {
+    private static func cacheURL() throws -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
         let dir = base.appendingPathComponent("aas-bar", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: dir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: dir.path
+        )
         return dir.appendingPathComponent("usage-cache.json")
     }
 
     private func loadCache() {
-        guard let data = try? Data(contentsOf: Self.cacheURL()),
+        guard let url = try? Self.cacheURL(),
+              let data = try? Data(contentsOf: url),
               let cached = try? JSONDecoder().decode(CachedUsage.self, from: data)
         else { return }
         accounts = cached.accounts
         updated = cached.updatedAt
     }
 
-    private func saveCache() {
+    private func saveCache() throws {
         let payload = CachedUsage(accounts: accounts, updatedAt: updated ?? Date())
-        if let data = try? JSONEncoder().encode(payload) {
-            try? data.write(to: Self.cacheURL())
-        }
+        let data = try JSONEncoder().encode(payload)
+        let url = try Self.cacheURL()
+        try data.write(to: url, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: url.path
+        )
     }
 
     /// Locate the `aas` binary: `AAS_BIN` override, then common install dirs, then `PATH`.
