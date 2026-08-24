@@ -3,7 +3,7 @@
 #   irm https://raw.githubusercontent.com/open330/aas/main/install.ps1 | iex
 #
 # Env overrides:
-#   $env:AAS_VERSION = "v0.1.9"           # pin a version (default: latest)
+#   $env:AAS_VERSION = "v0.1.10"           # pin a version (default: latest)
 #   $env:AAS_BIN_DIR = "$HOME\bin"        # install location
 #   $env:AAS_SKIP_ATTESTATION = "1"         # skip provenance verification (not recommended)
 #   $env:AAS_DOWNLOAD_BASE = "https://..."  # release-asset base URL (testing/mirror use)

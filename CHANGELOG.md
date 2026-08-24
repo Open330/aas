@@ -5,6 +5,22 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-08-24
+
+### Fixed
+
+- `aas usage` no longer fails with a bare 404 for Kimi accounts on the subscription console. Quota
+  reporting is now chosen per API host rather than per provider: Kimi's per-token platform serves a
+  balance, while the subscription console publishes no quota endpoint at all and answers only
+  `/v1/me`. The console now reports the account's plan tier and states that the host publishes no
+  quota, and a failed identity lookup degrades to the same note instead of masquerading as a quota
+  error.
+- `aas export` emits `KIMI_API_KEY` and `MOONSHOT_API_KEY` for Kimi accounts, instead of reporting
+  "Nothing to export".
+- The proxy's fallback model catalog follows the account's host. Kimi's subscription console serves
+  `kimi-for-coding`, not the `kimi-k2-*` line, so the built-in fallback previously offered models
+  that host does not have. Live discovery is unchanged and remains authoritative.
+
 ## [0.1.9] - 2026-08-24
 
 ### Added
@@ -168,7 +184,8 @@ All notable user-facing changes are recorded here. The format follows
 - Hardened account storage, provider adapters, proxy authentication, retries, installers, and
   portable app packaging.
 
-[Unreleased]: https://github.com/Open330/aas/compare/v0.1.9...HEAD
+[Unreleased]: https://github.com/Open330/aas/compare/v0.1.10...HEAD
+[0.1.10]: https://github.com/Open330/aas/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/Open330/aas/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/Open330/aas/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/Open330/aas/compare/v0.1.6...v0.1.7
