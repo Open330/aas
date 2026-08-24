@@ -31,7 +31,7 @@ fn lock_models() -> std::sync::MutexGuard<'static, ()> {
 /// `~/.../asx/models.json` on the dev machine can't leak in).
 fn reset_model_env() {
     clear_remote_model_cache();
-    for p in ["CODEX", "ZAI", "CLAUDE", "GROK"] {
+    for p in ["CODEX", "ZAI", "CLAUDE", "GROK", "KIMI"] {
         std::env::remove_var(format!("ASX_{p}_MODELS"));
     }
     std::env::set_var(
@@ -1148,9 +1148,13 @@ async fn server_rejects_invalid_and_oversized_inference_bodies() {
 // ---------------------------------------------------------------------------
 
 /// A stand-in Kimi host. Records the body it was handed so the test can assert the proxy relayed
-/// the agent's request instead of rebuilding it.
+/// the agent's request instead of rebuilding it, and whether model discovery came knocking.
+///
+/// `/v1/models` deliberately fails: a served catalog would land in the process-global model cache
+/// and race every other test in this file. Recording the hit proves discovery used this host.
 async fn fake_anthropic_upstream(
     seen: std::sync::Arc<std::sync::Mutex<Option<Value>>>,
+    models_hit: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> (String, tokio::task::JoinHandle<()>) {
     use axum::{routing::post, Json, Router};
 
@@ -1158,7 +1162,10 @@ async fn fake_anthropic_upstream(
     let app = Router::new()
         .route(
             "/v1/models",
-            axum::routing::get(|| async { Json(json!({ "data": [{ "id": "kimi-test-model" }] })) }),
+            axum::routing::get(move || {
+                models_hit.store(true, std::sync::atomic::Ordering::SeqCst);
+                async { axum::http::StatusCode::NOT_FOUND }
+            }),
         )
         .route(
             "/v1/messages",
@@ -1188,12 +1195,11 @@ async fn fake_anthropic_upstream(
 
 #[tokio::test]
 async fn anthropic_backend_relays_the_request_instead_of_translating_it() {
-    use crate::models::clear_remote_model_cache;
     use crate::server::{start_proxy, Credential, ProxyStartOptions};
 
-    clear_remote_model_cache();
     let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
-    let (base, upstream) = fake_anthropic_upstream(seen.clone()).await;
+    let models_hit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (base, upstream) = fake_anthropic_upstream(seen.clone(), models_hit.clone()).await;
 
     let handle = start_proxy(ProxyStartOptions {
         source_provider: "claude".into(),
@@ -1211,7 +1217,7 @@ async fn anthropic_backend_relays_the_request_instead_of_translating_it() {
 
     // Exactly the fields the COMMON round trip would drop.
     let sent = json!({
-        "model": "kimi-test-model",
+        "model": "kimi-k2-turbo-preview",
         "system": [{"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}],
         "thinking": {"type": "enabled", "budget_tokens": 2048},
         "messages": [{
@@ -1255,7 +1261,11 @@ async fn anthropic_backend_relays_the_request_instead_of_translating_it() {
         "ephemeral"
     );
     assert_eq!(got["messages"][0]["content"][1]["type"], "image");
-    assert_eq!(got["model"], "kimi-test-model");
+    // Some real upstream model is always sent; which one the catalog resolves to is covered by
+    // `passthrough_rewrites_the_picker_id_to_the_real_upstream_model`, which pins the catalog.
+    assert!(got["model"].as_str().is_some_and(|m| !m.is_empty()));
+    // Discovery must query the account's own host, not a hardcoded one.
+    assert!(models_hit.load(std::sync::atomic::Ordering::SeqCst));
 
     handle.stop().await;
     upstream.abort();
@@ -1263,11 +1273,9 @@ async fn anthropic_backend_relays_the_request_instead_of_translating_it() {
 
 #[tokio::test]
 async fn anthropic_backend_relays_an_upstream_error_verbatim() {
-    use crate::models::clear_remote_model_cache;
     use crate::server::{start_proxy, Credential, ProxyStartOptions};
     use axum::{routing::post, Json, Router};
 
-    clear_remote_model_cache();
     // A wrong-platform key is the most likely real failure; the client must see the real status.
     let app = Router::new().route(
         "/v1/messages",
@@ -1317,4 +1325,50 @@ async fn anthropic_backend_relays_an_upstream_error_verbatim() {
 
     handle.stop().await;
     upstream.abort();
+}
+
+#[test]
+fn passthrough_rewrites_the_picker_id_to_the_real_upstream_model() {
+    use crate::adapters::kimi::KimiBackend;
+    use crate::types::BackendAdapter;
+
+    let _g = lock_models();
+    reset_model_env();
+    // id "kimi-real-high" -> upstream model "kimi-real", so an unrewritten body is detectable.
+    std::env::set_var("ASX_KIMI_MODELS", "kimi-real:high");
+
+    let backend = KimiBackend::new(None);
+    let up = backend
+        .passthrough(
+            "claude",
+            &json!({ "model": "kimi-real-high", "messages": [] }),
+            "sk-test",
+        )
+        .unwrap();
+    let sent: Value = serde_json::from_str(&up.body).unwrap();
+    assert_eq!(sent["model"], "kimi-real");
+
+    // An id the catalog does not know still resolves to a real model rather than being forwarded.
+    let up = backend
+        .passthrough(
+            "claude",
+            &json!({ "model": "not-in-catalog", "messages": [] }),
+            "sk-test",
+        )
+        .unwrap();
+    let sent: Value = serde_json::from_str(&up.body).unwrap();
+    assert_eq!(sent["model"], "kimi-real");
+
+    reset_model_env();
+}
+
+#[test]
+fn kimi_default_catalog_is_used_when_discovery_and_overrides_are_absent() {
+    let _g = lock_models();
+    reset_model_env();
+    let kimi = backend_choices("kimi");
+    assert!(!kimi.is_empty());
+    assert_eq!(kimi[0].id, "kimi-k2-turbo-preview");
+    // The alias resolves to the same catalog.
+    assert_eq!(backend_choices("moonshot")[0].id, kimi[0].id);
 }
