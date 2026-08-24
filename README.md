@@ -3,7 +3,7 @@
 # aas — Agent Account Switcher
 
 A single-binary, dependency-free **multi-account switcher for LLM coding agents**
-(Claude Code, Codex, Grok/xAI, Z.AI, Cursor, Pi). Rust rewrite of
+(Claude Code, Codex, Grok/xAI, Z.AI, Kimi/Moonshot, Cursor, Pi). Rust rewrite of
 [`asx`](https://github.com/enif-lee/asx).
 
 - Store each account's credential in its own `0600` file / OS keychain entry and switch instantly.
@@ -132,7 +132,7 @@ ssh -t jiun-mini 'aas import ~/aas-vault.age'
 | `list [provider\|account]` (alias `ls`) `-u`,`-d`, `--sort name\|added\|stored` | List all accounts or filter by provider/account. The default is provider-registry order then account name; `stored` preserves the `accounts.json` array order. `-u` shows live usage; `-d` dumps stored credentials. |
 | `usage [provider\|account]` (alias `u`) `--json`, `--fresh`, `--sort name\|added\|stored` | Usage for all accounts or one provider/account (shorthand for `list -u`), using a shared 10-minute success cache and deterministic order. `--fresh` bypasses the success cache but still honors rate-limit backoff. `--json` is the integration contract used by aas-bar and BarShelf. |
 | `status [provider]` | Show the active account per provider. |
-| `login [provider] [name]` `--long-lived`, `--device-auth`/`--headless`, *share flags* | Login and store a new **isolated** profile. `--long-lived` uses Claude's `setup-token`; `--device-auth` uses a browserless device-code flow. |
+| `login [provider] [name]` `--long-lived`, `--device-auth`/`--headless`, `--endpoint <id>`, *share flags* | Login and store a new **isolated** profile. `--long-lived` uses Claude's `setup-token`; `--device-auth` uses a browserless device-code flow; `--endpoint` picks the API host for providers that run several (kimi). |
 | `load [provider] [name]` | Snapshot the **currently logged-in** credential as a **system** profile (auto-scans providers if none given). |
 | `switch <provider> <name>` or `switch <account>` (alias `s`) | Make a stored account the active credential. The one-argument form resolves a globally unique stored account name. |
 | `exec <name> [target] [args…]` (alias `e`) | Run the native CLI under a profile. If `target` ≠ the profile's provider, requests route through the local **ASX Proxy** (cross-provider). `-b` full-access bypass; cross-run share flags `-s/-i/--share/--isolate/--keep-context`; `--` passes the rest to the agent. |
@@ -154,7 +154,26 @@ agent conversation history, or machine-specific active-account markers.
 (default), `--isolated`, `--share <a,b,…>`, `--isolate <a,b,…>` over the categories
 `sessions, skills, agents, hooks, settings`.
 
-**Providers:** `claude`, `codex`, `grok` (alias `xai`), `zai`, `cursor`, `pi`.
+**Providers:** `claude`, `codex`, `grok` (alias `xai`), `zai`, `kimi` (alias `moonshot`),
+`cursor`, `pi`.
+
+**Kimi / Moonshot.** Kimi serves an Anthropic-compatible API, so Claude Code runs on it directly:
+
+```bash
+aas login kimi work --endpoint moonshot-ai   # paste the API key; validated before it is stored
+aas exec work claude                         # Claude Code, Kimi backend
+```
+
+Kimi runs several platforms whose API keys are **not** interchangeable — a key from one returns
+401 on the others — so `--endpoint` picks the one that issued the key and it is recorded on the
+account: `moonshot-ai` (platform.kimi.ai, per-token billing, the default), `kimi-code`
+(Kimi Code Console, subscription), `moonshot-cn` (mainland China). Only these hosts are accepted,
+so a tampered `accounts.json` cannot redirect a credential elsewhere.
+
+Because Kimi speaks the same wire as the agent, these requests are **relayed** rather than
+translated: the proxy rewrites only the model id and the credential, leaving `cache_control`,
+thinking blocks and image parts intact. Prompt caching therefore keeps working, which matters on a
+per-token-billed backend.
 
 Colors respect `NO_COLOR` and only apply on a TTY.
 
@@ -178,7 +197,7 @@ See [`widgets/barshelf-aas-usage/`](widgets/barshelf-aas-usage/) for details
 ## Status
 
 The port covers the `asx` P1–P5 surface plus the current post-v0.3.0 proxy/provider updates:
-Pi, GPT-5.6 Sol/Terra/Luna, live Grok/Z.AI model discovery, Claude tier aliases,
+Pi, GPT-5.6 Sol/Terra/Luna, live Grok/Z.AI/Kimi model discovery, Claude tier aliases,
 Anthropic `count_tokens`, strict tool-argument normalization, and Grok OIDC refresh. It includes
 storage/keychain/import, provider adapters,
 parallel `usage`, account management, same- and cross-provider `exec`, the translating proxy,
