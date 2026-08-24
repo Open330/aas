@@ -39,11 +39,15 @@ impl AuthStyle {
 /// One selectable API host. Kimi runs several platforms whose keys are NOT interchangeable (a key
 /// from one returns 401 on the others), so the host is recorded per account. Single-host providers
 /// simply have one entry.
+///
+/// Quota reporting hangs off the endpoint rather than the provider: Kimi's per-token platform
+/// serves a balance, while its subscription console serves no quota API at all.
 #[derive(Clone, Copy, Debug)]
 pub struct KeyEndpoint {
     pub id: &'static str,
     pub label: &'static str,
     pub base: &'static str,
+    quota: QuotaStyle,
 }
 
 /// How live quota is reported.
@@ -56,6 +60,9 @@ enum QuotaStyle {
     /// Currency balance relative to the account's endpoint (Kimi `/v1/users/me/balance`). There is
     /// no denominator, so this renders as a note rather than a percentage meter.
     CurrencyBalance { path: &'static str, auth: AuthStyle },
+    /// The host exposes identity but no quota (Kimi Code Console). Report the plan the account is
+    /// on and say plainly that no quota is published, rather than failing a call that cannot work.
+    IdentityOnly { path: &'static str, auth: AuthStyle },
 }
 
 /// Validation call issued before a pasted key is stored.
@@ -75,7 +82,6 @@ pub(crate) struct KeyProviderSpec {
     /// Selectable API hosts; the first is the default for a new account.
     pub endpoints: &'static [KeyEndpoint],
     key_test: Option<KeyTest>,
-    quota: QuotaStyle,
     /// Provider keeps native OAuth credentials on disk (Grok's `~/.grok/auth.json`).
     native_oidc: bool,
     /// Native login argv, when the provider ships its own login command.
@@ -99,9 +105,9 @@ const KEY_PROVIDERS: &[KeyProviderSpec] = &[
             id: "xai",
             label: "api.x.ai",
             base: "https://api.x.ai",
+            quota: QuotaStyle::GrokNative,
         }],
         key_test: None,
-        quota: QuotaStyle::GrokNative,
         native_oidc: true,
         login_command: Some(&["grok", "login"]),
     },
@@ -114,16 +120,16 @@ const KEY_PROVIDERS: &[KeyProviderSpec] = &[
             id: "coding",
             label: "api.z.ai coding plan",
             base: "https://api.z.ai/api/coding/paas/v4",
+            // Z.AI quota uses `Authorization: <raw key>` with NO `Bearer` prefix.
+            quota: QuotaStyle::PercentQuota {
+                url: "https://api.z.ai/api/monitor/usage/quota/limit",
+                auth: AuthStyle::RawKey,
+            },
         }],
         key_test: Some(KeyTest {
             path: "/models",
             auth: AuthStyle::Bearer,
         }),
-        // Z.AI quota uses `Authorization: <raw key>` with NO `Bearer` prefix.
-        quota: QuotaStyle::PercentQuota {
-            url: "https://api.z.ai/api/monitor/usage/quota/limit",
-            auth: AuthStyle::RawKey,
-        },
         native_oidc: false,
         login_command: None,
     },
@@ -140,26 +146,36 @@ const KEY_PROVIDERS: &[KeyProviderSpec] = &[
                 id: "moonshot-ai",
                 label: "platform.kimi.ai — per-token billing",
                 base: "https://api.moonshot.ai",
+                quota: QuotaStyle::CurrencyBalance {
+                    path: "/v1/users/me/balance",
+                    auth: AuthStyle::Bearer,
+                },
             },
             KeyEndpoint {
                 id: "kimi-code",
                 label: "Kimi Code Console — subscription",
                 base: "https://api.kimi.com/coding",
+                // Verified against the live host: every balance/quota/usage path 404s, while
+                // `/v1/me` returns the account's plan tier. Report that instead of failing.
+                quota: QuotaStyle::IdentityOnly {
+                    path: "/v1/me",
+                    auth: AuthStyle::Bearer,
+                },
             },
             KeyEndpoint {
                 id: "moonshot-cn",
                 label: "api.moonshot.cn — mainland China",
                 base: "https://api.moonshot.cn",
+                quota: QuotaStyle::CurrencyBalance {
+                    path: "/v1/users/me/balance",
+                    auth: AuthStyle::Bearer,
+                },
             },
         ],
         key_test: Some(KeyTest {
             path: "/v1/models",
             auth: AuthStyle::Bearer,
         }),
-        quota: QuotaStyle::CurrencyBalance {
-            path: "/v1/users/me/balance",
-            auth: AuthStyle::Bearer,
-        },
         native_oidc: false,
         login_command: None,
     },
@@ -1027,6 +1043,7 @@ pub(crate) fn currency_balance_usage_from(
 
 async fn currency_balance_usage(
     spec: &'static KeyProviderSpec,
+    endpoint: &'static KeyEndpoint,
     account: &str,
     path: &str,
     auth: AuthStyle,
@@ -1036,10 +1053,6 @@ async fn currency_balance_usage(
             headline: "API key (no live quota data)".into(),
             ..Default::default()
         };
-    };
-    let endpoint = match account_endpoint(spec, account) {
-        Ok(endpoint) => endpoint,
-        Err(error) => return Usage::error(spec.id, error.to_string()),
     };
     let res = http_client()
         .get(join_url(endpoint.base, path))
@@ -1068,6 +1081,82 @@ async fn currency_balance_usage(
             spec.id,
             format!("{} usage fetch: network error", spec.display),
         ),
+    }
+}
+
+/// Kimi Code Console's `/v1/me`: identity plus the account's plan tier. There is no quota field.
+pub(crate) fn parse_identity_plan(payload: &Value) -> Option<String> {
+    let data = payload.get("data").unwrap_or(payload);
+    data.get("user_level_name")
+        .or_else(|| data.get("plan"))
+        .or_else(|| data.get("subscription"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// Report what the host actually publishes. This endpoint has no quota API at all — every
+/// balance/quota/usage path returns 404 — so saying so is the correct answer, not an error.
+pub(crate) fn identity_only_usage_from(
+    spec: &'static KeyProviderSpec,
+    endpoint: &'static KeyEndpoint,
+    payload: &Value,
+) -> Usage {
+    Usage {
+        headline: spec.display.into(),
+        plan: parse_identity_plan(payload).or_else(|| Some(endpoint.label.to_string())),
+        notes: vec!["subscription plan — this host publishes no quota endpoint".into()],
+        ..Default::default()
+    }
+}
+
+async fn identity_only_usage(
+    spec: &'static KeyProviderSpec,
+    endpoint: &'static KeyEndpoint,
+    account: &str,
+    path: &str,
+    auth: AuthStyle,
+) -> Usage {
+    let Some(key) = get_secret(spec.id, account) else {
+        return Usage {
+            headline: "API key (no live quota data)".into(),
+            ..Default::default()
+        };
+    };
+    match http_client()
+        .get(join_url(endpoint.base, path))
+        .header("Authorization", auth.header(&key))
+        .send()
+        .await
+    {
+        Ok(res) if res.status().is_success() => {
+            let payload = res.json::<Value>().await.unwrap_or(Value::Null);
+            identity_only_usage_from(spec, endpoint, &payload)
+        }
+        // Identity is a nicety here; failing to fetch it must not look like a quota failure.
+        Ok(res) => {
+            let status = res.status().as_u16();
+            let hint = if status == 401 {
+                format!(" (is this key issued by {}?)", endpoint.label)
+            } else {
+                String::new()
+            };
+            Usage {
+                headline: spec.display.into(),
+                plan: Some(endpoint.label.to_string()),
+                notes: vec![format!(
+                    "subscription plan — no quota endpoint; identity lookup returned {status}{hint}"
+                )],
+                ..Default::default()
+            }
+        }
+        Err(_) => Usage {
+            headline: spec.display.into(),
+            plan: Some(endpoint.label.to_string()),
+            notes: vec!["subscription plan — no quota endpoint; identity lookup failed".into()],
+            ..Default::default()
+        },
     }
 }
 
@@ -1135,13 +1224,20 @@ pub(crate) async fn usage(provider: &str, account: &str) -> Usage {
     let Some(spec) = spec(provider) else {
         return Usage::error(provider, format!("'{provider}' is not an API-key provider"));
     };
-    match spec.quota {
+    let endpoint = match account_endpoint(spec, account) {
+        Ok(endpoint) => endpoint,
+        Err(error) => return Usage::error(spec.id, error.to_string()),
+    };
+    match endpoint.quota {
         QuotaStyle::GrokNative => grok_usage(account).await,
         QuotaStyle::PercentQuota { url, auth } => {
             percent_quota_usage(spec, account, url, auth).await
         }
         QuotaStyle::CurrencyBalance { path, auth } => {
-            currency_balance_usage(spec, account, path, auth).await
+            currency_balance_usage(spec, endpoint, account, path, auth).await
+        }
+        QuotaStyle::IdentityOnly { path, auth } => {
+            identity_only_usage(spec, endpoint, account, path, auth).await
         }
     }
 }
@@ -1369,6 +1465,59 @@ mod tests {
             join_url("https://h/coding/", "v1/x"),
             "https://h/coding/v1/x"
         );
+    }
+
+    #[test]
+    fn quota_strategy_is_per_endpoint_not_per_provider() {
+        let kimi = spec("kimi").unwrap();
+        let by_id = |id: &str| kimi.endpoints.iter().find(|e| e.id == id).unwrap();
+        // Verified against the live hosts: the per-token platform serves a balance, the
+        // subscription console 404s every quota path but answers /v1/me.
+        assert!(matches!(
+            by_id("moonshot-ai").quota,
+            QuotaStyle::CurrencyBalance { .. }
+        ));
+        assert!(matches!(
+            by_id("kimi-code").quota,
+            QuotaStyle::IdentityOnly { .. }
+        ));
+        assert!(matches!(
+            by_id("moonshot-cn").quota,
+            QuotaStyle::CurrencyBalance { .. }
+        ));
+        assert!(matches!(
+            spec("zai").unwrap().endpoints[0].quota,
+            QuotaStyle::PercentQuota { .. }
+        ));
+        assert!(matches!(
+            spec("grok").unwrap().endpoints[0].quota,
+            QuotaStyle::GrokNative
+        ));
+    }
+
+    #[test]
+    fn identity_only_host_reports_its_plan_instead_of_a_quota_failure() {
+        let kimi = spec("kimi").unwrap();
+        let endpoint = kimi.endpoints.iter().find(|e| e.id == "kimi-code").unwrap();
+        // Shape taken from the live /v1/me response.
+        let payload = json!({
+            "user_id": "x", "status": "USER_STATUS_NORMAL", "region": "REGION_OVERSEA",
+            "user_level": 30, "user_level_name": "Vivace"
+        });
+        assert_eq!(parse_identity_plan(&payload).as_deref(), Some("Vivace"));
+
+        let usage = identity_only_usage_from(kimi, endpoint, &payload);
+        assert_eq!(usage.headline, "Kimi");
+        assert_eq!(usage.plan.as_deref(), Some("Vivace"));
+        // No quota exists on this host, so there must be no meter and no error.
+        assert!(usage.meters.is_empty());
+        assert!(usage.error.is_none());
+        assert!(usage.notes.iter().any(|n| n.contains("no quota endpoint")));
+
+        // Missing plan falls back to the host label rather than going blank.
+        let usage = identity_only_usage_from(kimi, endpoint, &json!({}));
+        assert_eq!(usage.plan.as_deref(), Some(endpoint.label));
+        assert!(usage.error.is_none());
     }
 
     #[test]

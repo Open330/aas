@@ -31,7 +31,7 @@ impl BackendChoice {
     }
 }
 
-fn defaults(provider: &str) -> Vec<BackendChoice> {
+fn defaults(provider: &str, endpoint: Option<&str>) -> Vec<BackendChoice> {
     let p = provider.to_lowercase();
     if p == "codex" {
         let mut out = vec![
@@ -92,16 +92,23 @@ fn defaults(provider: &str) -> Vec<BackendChoice> {
         ];
     }
     if p == "kimi" || p == "moonshot" {
-        // Kimi ships new model ids often and they differ per platform, so these are only the
-        // fallback when live discovery (`/v1/models`) and explicit overrides both come up empty.
-        return [
-            "kimi-k2-turbo-preview",
-            "kimi-k2-0905-preview",
-            "moonshot-v1-128k",
-        ]
-        .iter()
-        .map(|m| BackendChoice::new(*m, *m, None))
-        .collect();
+        // Kimi's platforms publish different catalogs — the subscription console serves
+        // `kimi-for-coding`, the per-token platform serves the `kimi-k2-*` line — so the fallback
+        // must follow the account's host. Live discovery (`/v1/models`) stays authoritative; this
+        // applies only when discovery and explicit overrides both come up empty.
+        let ids: &[&str] = if endpoint
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .contains("api.kimi.com")
+        {
+            &["kimi-for-coding", "kimi-for-coding-highspeed"]
+        } else {
+            &["kimi-k2-turbo-preview", "kimi-k2-0905-preview"]
+        };
+        return ids
+            .iter()
+            .map(|m| BackendChoice::new(*m, *m, None))
+            .collect();
     }
     vec![BackendChoice::new("asx-proxy", "asx-proxy", None)]
 }
@@ -227,10 +234,15 @@ fn put_cache(provider: &str, choices: &[BackendChoice]) {
 }
 
 pub fn backend_choices(provider: &str) -> Vec<BackendChoice> {
+    backend_choices_for(provider, None)
+}
+
+/// As [`backend_choices`], but able to fall back to the catalog of a specific API host.
+pub fn backend_choices_for(provider: &str, endpoint: Option<&str>) -> Vec<BackendChoice> {
     from_env(provider)
         .or_else(|| from_config_file(provider))
         .or_else(|| from_cache(provider))
-        .unwrap_or_else(|| defaults(provider))
+        .unwrap_or_else(|| defaults(provider, endpoint))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -356,7 +368,12 @@ pub fn pick_tier_choice(list: &[BackendChoice], tier: AgentTier) -> BackendChoic
 /// Map an agent-requested id back to a concrete choice. Exact id/model wins, then Claude's
 /// tier aliases, then the provider default.
 pub fn resolve_choice(provider: &str, id: &str) -> BackendChoice {
-    let list = backend_choices(provider);
+    resolve_choice_for(provider, None, id)
+}
+
+/// As [`resolve_choice`], but able to fall back to the catalog of a specific API host.
+pub fn resolve_choice_for(provider: &str, endpoint: Option<&str>, id: &str) -> BackendChoice {
+    let list = backend_choices_for(provider, endpoint);
     if let Some(exact) = list
         .iter()
         .find(|choice| choice.id == id || choice.model == id)
@@ -574,7 +591,7 @@ pub async fn refresh_backend_choices(
         put_cache(&provider, &remote);
         return remote;
     }
-    backend_choices(&provider)
+    backend_choices_for(&provider, endpoint)
 }
 
 #[cfg(test)]

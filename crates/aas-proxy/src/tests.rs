@@ -6,8 +6,8 @@ use crate::adapters::codex::{CodexAgent, CodexBackend};
 use crate::adapters::grok::{GrokAgent, GrokBackend};
 use crate::adapters::zai::{is_zai_overload, ZaiBackend};
 use crate::models::{
-    backend_choices, clear_remote_model_cache, detect_agent_tier, grok_models_to_choices,
-    resolve_choice, AgentTier,
+    backend_choices, backend_choices_for, clear_remote_model_cache, detect_agent_tier,
+    grok_models_to_choices, resolve_choice, resolve_choice_for, AgentTier,
 };
 use crate::retry::{
     backoff_ms, classify_body, is_retryable_fetch_error, should_return_stream, BodyDecision,
@@ -1371,4 +1371,25 @@ fn kimi_default_catalog_is_used_when_discovery_and_overrides_are_absent() {
     assert_eq!(kimi[0].id, "kimi-k2-turbo-preview");
     // The alias resolves to the same catalog.
     assert_eq!(backend_choices("moonshot")[0].id, kimi[0].id);
+}
+
+#[test]
+fn kimi_fallback_catalog_follows_the_account_host() {
+    let _g = lock_models();
+    reset_model_env();
+    // The subscription console and the per-token platform publish different catalogs, so the
+    // fallback must not offer models the account's host does not serve.
+    let coding = backend_choices_for("kimi", Some("https://api.kimi.com/coding"));
+    assert_eq!(coding[0].id, "kimi-for-coding");
+    let token_billed = backend_choices_for("kimi", Some("https://api.moonshot.ai"));
+    assert_eq!(token_billed[0].id, "kimi-k2-turbo-preview");
+    // An unknown or absent host falls back to the per-token catalog, not to nothing.
+    assert_eq!(
+        backend_choices_for("kimi", None)[0].id,
+        "kimi-k2-turbo-preview"
+    );
+    assert_eq!(
+        resolve_choice_for("kimi", Some("https://api.kimi.com/coding"), "anything").model,
+        "kimi-for-coding"
+    );
 }

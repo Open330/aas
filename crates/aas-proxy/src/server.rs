@@ -6,7 +6,7 @@
 //! ```
 
 use crate::adapters::{pick_agent, pick_backend};
-use crate::models::{backend_choices, refresh_backend_choices};
+use crate::models::{backend_choices_for, refresh_backend_choices};
 use crate::retry::{fetch_passthrough_with_retry, fetch_upstream_with_retry, UpstreamOutcome};
 use crate::sse::{SseFramer, ToolAccumulator};
 use crate::types::{
@@ -71,6 +71,8 @@ impl ProxyHandle {
 struct ProxyState {
     agent: Option<Arc<dyn AgentAdapter>>,
     backend: Option<Arc<dyn BackendAdapter>>,
+    /// The backend account's API host, for providers whose catalog is host-specific.
+    backend_endpoint: Option<String>,
     agent_provider: String,
     backend_provider: String,
     cred: String,
@@ -114,6 +116,7 @@ pub async fn start_proxy(options: ProxyStartOptions) -> anyhow::Result<ProxyHand
     let state = Arc::new(ProxyState {
         agent: pick_agent(&agent_provider),
         backend: pick_backend(&backend_provider, options.target_endpoint.as_deref()),
+        backend_endpoint: options.target_endpoint.clone(),
         agent_provider,
         backend_provider,
         cred,
@@ -250,7 +253,7 @@ async fn handle(State(st): State<Arc<ProxyState>>, req: Request) -> Response {
     let path = req.uri().path().to_string();
 
     if is_models(&method, &path) {
-        let choices = backend_choices(&st.backend_provider);
+        let choices = backend_choices_for(&st.backend_provider, st.backend_endpoint.as_deref());
         let body = match &st.agent {
             Some(a) => a.format_models(&choices),
             None => {

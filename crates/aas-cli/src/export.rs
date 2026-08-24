@@ -107,6 +107,13 @@ pub fn cmd_export(store: &AccountStore, name: &str, shell: Shell) -> anyhow::Res
                 vars.push(("ZAI_KEY", k.clone()));
             }
         }
+        "kimi" => {
+            if let Some(k) = &secret {
+                // Both names are in circulation: Kimi's own docs use the Moonshot spelling.
+                vars.push(("KIMI_API_KEY", k.clone()));
+                vars.push(("MOONSHOT_API_KEY", k.clone()));
+            }
+        }
         "pi" if !system => vars.push(("PI_CODING_AGENT_DIR", home)),
         _ => {}
     }

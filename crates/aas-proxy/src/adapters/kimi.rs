@@ -10,7 +10,7 @@
 //! account rather than hardcoded.
 
 use crate::adapters::claude::{anth_tool_choice, common_to_anth_messages, ClaudeBackend};
-use crate::models::resolve_choice;
+use crate::models::resolve_choice_for;
 use crate::types::{BackendAdapter, CommonEvent, CommonRequest, UpstreamRequest};
 use serde_json::{json, Value};
 
@@ -70,7 +70,7 @@ impl BackendAdapter for KimiBackend {
             .and_then(Value::as_str)
             .unwrap_or_default();
         // The agent picked one of our catalog ids; map it back to the real upstream model.
-        let choice = resolve_choice("kimi", requested);
+        let choice = resolve_choice_for("kimi", Some(&self.base), requested);
         body["model"] = json!(choice.model);
         Some(UpstreamRequest {
             url: self.messages_url(),
@@ -80,7 +80,7 @@ impl BackendAdapter for KimiBackend {
     }
 
     fn build_request(&self, req: &CommonRequest, cred: &str) -> UpstreamRequest {
-        let choice = resolve_choice("kimi", &req.model);
+        let choice = resolve_choice_for("kimi", Some(&self.base), &req.model);
         let mut body = json!({
             "model": choice.model,
             "messages": common_to_anth_messages(&req.messages),
