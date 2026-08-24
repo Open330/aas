@@ -34,7 +34,7 @@
           ]
         ],
         "maxOutputBytes": 1048576,
-        "sensitiveOutput": false
+        "sensitiveOutput": true
       }
     ],
     "network": [],

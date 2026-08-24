@@ -40,7 +40,8 @@ aas reads my existing asx state, so my current logins should already appear.
 
 ## Install
 
-macOS / Linux (single static binary — no Node, no runtime):
+macOS / Linux (the installed `aas` binary is static; the secure installer also requires the
+[GitHub CLI](https://cli.github.com/) to verify release provenance):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/open330/aas/main/install.sh | sh
@@ -52,8 +53,11 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/open330/aas/main/install.ps1 | iex
 ```
 
-The installers fetch the latest published GitHub Release, verify its SHA-256 checksum, and run
-the downloaded binary before replacing an existing installation.
+The installers fetch the latest published GitHub Release, verify its SHA-256 checksum and GitHub
+build-provenance attestation against this repository's release workflow, then run the downloaded
+binary before replacing an existing installation. Constrained/offline hosts may explicitly set
+`AAS_SKIP_ATTESTATION=1`, which gives up publisher authentication and retains checksum-only
+integrity verification.
 
 From source:
 

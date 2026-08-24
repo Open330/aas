@@ -7,10 +7,13 @@
 # Env overrides:
 #   AAS_VERSION=v0.1.8   pin a version (default: latest)
 #   AAS_BIN_DIR=~/.local/bin   install location
+#   AAS_SKIP_ATTESTATION=1     skip GitHub provenance verification (not recommended)
+#   AAS_DOWNLOAD_BASE=https://...   release-asset base URL (testing/mirror use)
 
 set -eu
 
 REPO="open330/aas"
+SIGNER_WORKFLOW="Open330/aas/.github/workflows/release.yml"
 BIN="aas"
 
 log() { printf '%s\n' "$*" >&2; }
@@ -39,7 +42,10 @@ esac
 asset="${BIN}-${target}.tar.gz"
 checksum_asset="${BIN}-${target}.sha256"
 version="${AAS_VERSION:-latest}"
-if [ "$version" = "latest" ]; then
+if [ -n "${AAS_DOWNLOAD_BASE:-}" ]; then
+  url="${AAS_DOWNLOAD_BASE%/}/${asset}"
+  checksum_url="${AAS_DOWNLOAD_BASE%/}/${checksum_asset}"
+elif [ "$version" = "latest" ]; then
   url="https://github.com/${REPO}/releases/latest/download/${asset}"
   checksum_url="https://github.com/${REPO}/releases/latest/download/${checksum_asset}"
 else
@@ -83,6 +89,17 @@ elif have shasum; then
   (cd "$tmp" && shasum -a 256 -c "$checksum_asset") || die "checksum verification failed"
 else
   die "need sha256sum or shasum to verify the release"
+fi
+
+# The checksum and archive share one release channel, so checksum verification alone cannot
+# authenticate the publisher. GitHub's signed provenance binds the archive digest to this exact
+# repository and release workflow. An explicit opt-out is available for constrained/offline hosts.
+if [ "${AAS_SKIP_ATTESTATION:-0}" != "1" ]; then
+  have gh || die "GitHub CLI (gh) is required for release attestation verification; install gh or explicitly set AAS_SKIP_ATTESTATION=1"
+  gh attestation verify "$tmp/$asset" \
+    --repo "$REPO" \
+    --signer-workflow "$SIGNER_WORKFLOW" \
+    --deny-self-hosted-runners >/dev/null || die "release attestation verification failed"
 fi
 
 tar -xzf "$tmp/$asset" -C "$tmp" || die "extract failed"

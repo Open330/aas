@@ -37,24 +37,33 @@ jobs:
 
   quality-rust:
     needs: validate
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: ${{ env.RELEASE_REF }}
           persist-credentials: false
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - if: runner.os == 'Linux'
+        run: cargo fmt --all -- --check
+      - if: runner.os == 'Linux'
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --all-targets --all-features --locked
       - name: Strict rustdoc
+        if: runner.os == 'Linux'
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --all-features --no-deps --locked
       - name: Dependency policy
+        if: runner.os == 'Linux'
         run: |
           cargo install cargo-deny --version 0.19.9 --locked
           cargo deny check advisories bans licenses sources
-      - run: sh -n install.sh apps/aas-bar/build-app.sh
+      - if: runner.os == 'Linux'
+        run: sh -n install.sh apps/aas-bar/build-app.sh
 
   quality-swift:
     needs: validate
@@ -164,6 +173,87 @@ jobs:
           Expand-Archive -Path '${{ steps.package.outputs.zip }}' -DestinationPath smoke
           & ./smoke/aas.exe --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Exercise POSIX installer with release candidate
+        if: matrix.smoke && matrix.archive == 'tar'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCHIVE: ${{ steps.package.outputs.tar }}
+          CHECKSUM: ${{ steps.package.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          host_os="$(uname -s)"
+          host_arch="$(uname -m)"
+          compatible=0
+          if { [ "$host_os" = Darwin ] && [ "$host_arch" = arm64 ] && [ "$TARGET" = aarch64-apple-darwin ]; } ||
+             { [ "$host_os" = Darwin ] && [ "$host_arch" = x86_64 ] && [ "$TARGET" = x86_64-apple-darwin ]; } ||
+             { [ "$host_os" = Linux ] && [ "$host_arch" = x86_64 ] && [ "$TARGET" = x86_64-unknown-linux-musl ]; }; then
+            compatible=1
+          fi
+          [ "$compatible" = 1 ] || exit 0
+          fixture="$RUNNER_TEMP/aas-installer-fixture"
+          install_dir="$RUNNER_TEMP/aas-installer-bin"
+          mkdir -p "$fixture" "$install_dir"
+          cp "$ARCHIVE" "$fixture/aas-$TARGET.tar.gz"
+          cp "$CHECKSUM" "$fixture/aas-$TARGET.sha256"
+          python3 -m http.server 18765 --bind 127.0.0.1 --directory "$fixture" >/dev/null 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          sleep 1
+          AAS_DOWNLOAD_BASE=http://127.0.0.1:18765 \
+            AAS_BIN_DIR="$install_dir" \
+            AAS_SKIP_ATTESTATION=1 \
+            sh ./install.sh
+          "$install_dir/aas" --version
+          printf '%064d  %s\n' 0 "aas-$TARGET.tar.gz" >"$fixture/aas-$TARGET.sha256"
+          if AAS_DOWNLOAD_BASE=http://127.0.0.1:18765 \
+             AAS_BIN_DIR="$install_dir" \
+             AAS_SKIP_ATTESTATION=1 \
+             sh ./install.sh; then
+            echo "installer accepted an invalid checksum" >&2
+            exit 1
+          fi
+          "$install_dir/aas" --version
+      - name: Exercise Windows installer with release candidate
+        if: matrix.smoke && matrix.archive == 'zip'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCHIVE: ${{ steps.package.outputs.zip }}
+          CHECKSUM: ${{ steps.package.outputs.sha256 }}
+        run: |
+          $fixture = Join-Path $env:RUNNER_TEMP "aas-installer-fixture"
+          $installDir = Join-Path $env:RUNNER_TEMP "aas-installer-bin"
+          New-Item -ItemType Directory -Force -Path $fixture, $installDir | Out-Null
+          Copy-Item $env:ARCHIVE (Join-Path $fixture "aas-$env:TARGET.zip")
+          Copy-Item $env:CHECKSUM (Join-Path $fixture "aas-$env:TARGET.sha256")
+          $server = Start-Process python -ArgumentList @(
+            "-m", "http.server", "18766", "--bind", "127.0.0.1", "--directory", $fixture
+          ) -PassThru -WindowStyle Hidden
+          $originalUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+          try {
+            Start-Sleep -Seconds 1
+            $env:AAS_DOWNLOAD_BASE = "http://127.0.0.1:18766"
+            $env:AAS_BIN_DIR = $installDir
+            $env:AAS_SKIP_ATTESTATION = "1"
+            # A prefix entry must not be mistaken for the exact installation directory.
+            [Environment]::SetEnvironmentVariable("Path", "$installDir-old", "User")
+            & ./install.ps1
+            & (Join-Path $installDir "aas.exe") --version
+            $installedEntries = @([Environment]::GetEnvironmentVariable("Path", "User") -split [Regex]::Escape([string][IO.Path]::PathSeparator))
+            if ($installDir -notin $installedEntries) {
+              throw "installer did not add the exact PATH entry after a prefix collision"
+            }
+            ("0" * 64) + "  aas-$env:TARGET.zip" |
+              Set-Content -NoNewline (Join-Path $fixture "aas-$env:TARGET.sha256")
+            $rejected = $false
+            try { & ./install.ps1 } catch { $rejected = $true }
+            if (-not $rejected) { throw "installer accepted an invalid checksum" }
+            & (Join-Path $installDir "aas.exe") --version
+          } finally {
+            [Environment]::SetEnvironmentVariable("Path", $originalUserPath, "User")
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+          }
       - name: Upload Unix release candidate
         if: matrix.archive == 'tar'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

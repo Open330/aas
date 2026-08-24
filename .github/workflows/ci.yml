@@ -10,22 +10,30 @@ permissions:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
       - name: Formatting
+        if: runner.os == 'Linux'
         run: cargo fmt --all -- --check
       - name: Clippy
+        if: runner.os == 'Linux'
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Tests
         run: cargo test --workspace --all-targets --all-features --locked
       - name: Rustdoc
+        if: runner.os == 'Linux'
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --all-features --no-deps --locked
       - name: Dependency policy
+        if: runner.os == 'Linux'
         run: |
           cargo install cargo-deny --version 0.19.9 --locked
           cargo deny check advisories bans licenses sources
@@ -69,6 +77,24 @@ jobs:
       - name: Lint GitHub workflows
         if: runner.os != 'Windows'
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      - name: Validate BarShelf widget contract
+        if: runner.os != 'Windows'
+        run: |
+          jq -e '
+            .schemaVersion == 1 and
+            .entry.kind == "workflow" and
+            .entry.main == "workflow.json" and
+            .permissions.exec[0].command == "aas" and
+            .permissions.exec[0].allowedArgs == [["usage", "--json"]] and
+            .permissions.exec[0].sensitiveOutput == true
+          ' widgets/barshelf-aas-usage/widget.json >/dev/null
+          jq -e '
+            .schemaVersion == 1 and
+            .kind == "workflow" and
+            .sources.usage.use == "exec" and
+            .sources.usage.with.command == ["aas", "usage", "--json"] and
+            (.view | type == "object")
+          ' widgets/barshelf-aas-usage/workflow.json >/dev/null
       - name: Parse PowerShell installer
         if: runner.os == 'Windows'
         shell: pwsh
