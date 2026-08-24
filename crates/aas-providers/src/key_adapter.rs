@@ -144,6 +144,29 @@ struct GrokRefresh {
     expires_in: i64,
 }
 
+fn grok_token_endpoint(entry: &Value) -> Result<reqwest::Url, String> {
+    let issuer = entry
+        .get("oidc_issuer")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("https://auth.x.ai");
+    let mut url = reqwest::Url::parse(issuer)
+        .map_err(|error| format!("invalid Grok OIDC issuer: {error}"))?;
+    let valid_origin = url.scheme() == "https"
+        && url.host_str() == Some("auth.x.ai")
+        && url.port_or_known_default() == Some(443)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && matches!(url.path(), "" | "/");
+    if !valid_origin {
+        return Err("refusing untrusted Grok OIDC issuer; expected https://auth.x.ai".into());
+    }
+    url.set_path("/oauth2/token");
+    Ok(url)
+}
+
 async fn grok_refresh_grant(entry: &Value) -> Result<GrokRefresh, String> {
     let refresh_token = entry
         .get("refresh_token")
@@ -155,15 +178,15 @@ async fn grok_refresh_grant(entry: &Value) -> Result<GrokRefresh, String> {
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "no OIDC client id stored".to_string())?;
-    let issuer = entry
-        .get("oidc_issuer")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("https://auth.x.ai")
-        .trim_end_matches('/');
+    let endpoint = grok_token_endpoint(entry)?;
     let version = aas_core::platform::grok_version();
-    let response = http_client()
-        .post(format!("{issuer}/oauth2/token"))
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| format!("could not build Grok refresh client: {error}"))?;
+    let response = client
+        .post(endpoint)
         .header("content-type", "application/x-www-form-urlencoded")
         .header("x-grok-client-version", &version)
         .header("x-grok-client-surface", "grok-build")
@@ -968,6 +991,20 @@ mod tests {
             grok_auth_file_from_credential("raw"),
             json!({"asx": {"key": "raw"}})
         );
+    }
+
+    #[test]
+    fn grok_refresh_endpoint_rejects_untrusted_issuers() {
+        assert_eq!(
+            grok_token_endpoint(&json!({})).unwrap().as_str(),
+            "https://auth.x.ai/oauth2/token"
+        );
+        assert!(grok_token_endpoint(&json!({"oidc_issuer":"http://auth.x.ai"})).is_err());
+        assert!(grok_token_endpoint(&json!({"oidc_issuer":"https://evil.example"})).is_err());
+        assert!(
+            grok_token_endpoint(&json!({"oidc_issuer":"https://auth.x.ai@evil.example"})).is_err()
+        );
+        assert!(grok_token_endpoint(&json!({"oidc_issuer":"https://auth.x.ai/redirect"})).is_err());
     }
 
     #[test]

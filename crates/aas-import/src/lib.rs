@@ -7,8 +7,9 @@
 //! profile home).
 
 use aas_core::model::AccountRecord;
+use aas_core::naming::normalize_provider_key;
 use aas_core::secure_store;
-use aas_core::store::AccountStore;
+use aas_core::store::{AccountStore, StoreError};
 use age::secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
@@ -93,14 +94,14 @@ pub fn export_bundle() -> anyhow::Result<Bundle> {
     let accounts = store
         .list(None)?
         .into_iter()
-        .map(|a| {
-            let credential = secure_store::get_secret(&a.provider, &a.name);
-            BundleAccount {
+        .map(|a| -> anyhow::Result<BundleAccount> {
+            let credential = secure_store::get_secret_result(&a.provider, &a.name)?;
+            Ok(BundleAccount {
                 record: a,
                 credential,
-            }
+            })
         })
-        .collect();
+        .collect::<anyhow::Result<Vec<_>>>()?;
     Ok(Bundle {
         version: 1,
         exported_at: Some(aas_core::model::now_iso()),
@@ -120,42 +121,131 @@ pub struct RestoreReport {
     pub failed: Vec<String>,
 }
 
+fn restore_secret(provider: &str, name: &str, previous: Option<&str>) -> std::io::Result<()> {
+    match previous {
+        Some(raw) => secure_store::set_secret(provider, name, raw),
+        None => secure_store::clear_secret_value(provider, name),
+    }
+}
+
+fn restore_account(
+    store: &AccountStore,
+    provider: &str,
+    name: &str,
+    previous: Option<AccountRecord>,
+) -> Result<(), StoreError> {
+    match previous {
+        Some(record) => store.add(record).map(|_| ()),
+        None => store.remove(provider, name).map(|_| ()),
+    }
+}
+
 /// Recreate accounts + credentials from a bundle on this host.
 pub fn import_bundle(bundle: &Bundle) -> RestoreReport {
     let store = AccountStore::open_default();
     let mut report = RestoreReport::default();
     for ba in &bundle.accounts {
         let id = format!("{}/{}", ba.record.provider, ba.record.name);
+        let provider_key = normalize_provider_key(&ba.record.provider);
+        let _lifecycle = match aas_core::keyed_lock::acquire("credential-lifecycle", &provider_key)
+        {
+            Ok(lock) => lock,
+            Err(error) => {
+                report
+                    .failed
+                    .push(format!("{id}: could not acquire lifecycle lock: {error}"));
+                continue;
+            }
+        };
+        if let Err(error) = store.validate_account_identity(&ba.record.provider, &ba.record.name) {
+            let detail = format!("{id}: {error}");
+            if matches!(
+                error,
+                StoreError::NameConflict { .. } | StoreError::StorageConflict { .. }
+            ) {
+                report.conflicts.push(detail);
+            } else {
+                report.failed.push(detail);
+            }
+            continue;
+        }
+        let previous_account = match store.get(&ba.record.provider, &ba.record.name) {
+            Ok(record) => record,
+            Err(error) => {
+                report.failed.push(format!("{id}: {error}"));
+                continue;
+            }
+        };
+        let previous_secret =
+            match secure_store::get_secret_result(&ba.record.provider, &ba.record.name) {
+                Ok(secret) => secret,
+                Err(error) => {
+                    report.failed.push(format!(
+                        "{id}: could not read existing credential before import: {error}"
+                    ));
+                    continue;
+                }
+            };
+
+        if let Some(credential) = &ba.credential {
+            if let Err(error) = secure_store::set_secret_with_safe_fallback(
+                &ba.record.provider,
+                &ba.record.name,
+                credential,
+            ) {
+                let rollback = restore_secret(
+                    &ba.record.provider,
+                    &ba.record.name,
+                    previous_secret.as_deref(),
+                )
+                .err();
+                report.failed.push(format!(
+                    "{id}: could not store credential: {error}; rollback={rollback:?}"
+                ));
+                continue;
+            }
+        }
+
         match store.add(ba.record.clone()) {
             Ok(_) => {
                 report.accounts += 1;
-                match &ba.credential {
-                    Some(c) => {
-                        // Prefer native storage (keychain on macOS Claude); if that fails — e.g.
-                        // a locked keychain over a non-interactive SSH session — fall back to the
-                        // profile-home file, which get_secret reads when the keychain is empty.
-                        let ok = secure_store::set_secret(&ba.record.provider, &ba.record.name, c)
-                            .is_ok()
-                            || secure_store::set_secret_file(
-                                &ba.record.provider,
-                                &ba.record.name,
-                                c,
-                            )
-                            .is_ok();
-                        if ok {
-                            aas_core::usage_cache::clear(&format!(
-                                "{}/{}",
-                                ba.record.provider, ba.record.name
-                            ));
-                            report.credentials += 1;
-                        } else {
-                            report.failed.push(id);
-                        }
-                    }
-                    None => report.without_credential.push(id),
+                if ba.credential.is_some() {
+                    report.credentials += 1;
+                    aas_core::usage_cache::clear(&id);
+                } else {
+                    report.without_credential.push(id);
                 }
             }
-            Err(_) => report.conflicts.push(id),
+            Err(error) => {
+                let account_rollback = restore_account(
+                    &store,
+                    &ba.record.provider,
+                    &ba.record.name,
+                    previous_account,
+                )
+                .err();
+                let secret_rollback = if ba.credential.is_some() {
+                    restore_secret(
+                        &ba.record.provider,
+                        &ba.record.name,
+                        previous_secret.as_deref(),
+                    )
+                    .err()
+                } else {
+                    None
+                };
+                let detail = format!(
+                    "{id}: {error}; account rollback={account_rollback:?}; credential rollback={secret_rollback:?}"
+                );
+                if matches!(
+                    error,
+                    StoreError::NameConflict { .. } | StoreError::StorageConflict { .. }
+                ) {
+                    report.conflicts.push(detail);
+                } else {
+                    report.failed.push(detail);
+                }
+            }
         }
     }
     report
@@ -164,6 +254,9 @@ pub fn import_bundle(bundle: &Bundle) -> RestoreReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn bundle_round_trip_preserves_account_metadata_and_credential() {
@@ -220,5 +313,39 @@ mod tests {
             Some("very-secret")
         );
         assert!(decrypt_bundle(&encrypted, "wrong passphrase").is_err());
+    }
+
+    #[test]
+    fn credential_storage_failure_does_not_leave_account_metadata() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "aas-import-rollback-{}-{}",
+            std::process::id(),
+            nonce
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("profiles"), "blocks profile creation").unwrap();
+        std::env::set_var("AAS_CONFIG_DIR", &dir);
+        let bundle = Bundle {
+            version: 1,
+            exported_at: None,
+            accounts: vec![BundleAccount {
+                record: AccountRecord::new("codex", "victim"),
+                credential: Some("secret".into()),
+            }],
+        };
+
+        let report = import_bundle(&bundle);
+        assert_eq!(report.accounts, 0);
+        assert_eq!(report.credentials, 0);
+        assert_eq!(report.failed.len(), 1);
+        assert!(AccountStore::open_default().list(None).unwrap().is_empty());
+
+        std::env::remove_var("AAS_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

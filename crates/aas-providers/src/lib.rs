@@ -68,12 +68,14 @@ pub fn all_providers() -> [Provider; 6] {
 }
 
 impl Provider {
-    async fn operation_lock(&self, scope: &'static str, account: &str) -> Result<File, String> {
-        let key = format!("{}/{}", self.id(), account);
-        tokio::task::spawn_blocking(move || aas_core::keyed_lock::acquire(scope, &key))
-            .await
-            .map_err(|error| format!("{scope} lock task failed: {error}"))?
-            .map_err(|error| format!("could not acquire {scope} lock: {error}"))
+    async fn lifecycle_lock(&self) -> Result<File, String> {
+        let key = self.id().to_string();
+        tokio::task::spawn_blocking(move || {
+            aas_core::keyed_lock::acquire("credential-lifecycle", &key)
+        })
+        .await
+        .map_err(|error| format!("credential lifecycle lock task failed: {error}"))?
+        .map_err(|error| format!("could not acquire credential lifecycle lock: {error}"))
     }
 
     /// Canonical provider id.
@@ -126,6 +128,7 @@ impl Provider {
 
     /// Snapshot the live system credential into the vault under `account`.
     pub async fn load_current(&self, account: &str, label: Option<&str>) -> anyhow::Result<()> {
+        let _lock = self.lifecycle_lock().await.map_err(anyhow::Error::msg)?;
         match self {
             Provider::Claude => claude::load_current(account, label).await,
             Provider::Codex => codex::load_current(account, label).await,
@@ -138,6 +141,7 @@ impl Provider {
 
     /// Make `account` the active credential for this provider (writes native store + marker).
     pub async fn switch_to(&self, account: &str) -> anyhow::Result<()> {
+        let _lock = self.lifecycle_lock().await.map_err(anyhow::Error::msg)?;
         match self {
             Provider::Claude => claude::switch_to(account).await,
             Provider::Codex => codex::switch_to(account).await,
@@ -150,6 +154,7 @@ impl Provider {
 
     /// Clear the *local* provider session (keychain entry / auth file) without revoking tokens.
     pub async fn clear_current(&self) -> anyhow::Result<()> {
+        let _lock = self.lifecycle_lock().await.map_err(anyhow::Error::msg)?;
         match self {
             Provider::Claude => claude::clear_current().await,
             Provider::Codex => codex::clear_current().await,
@@ -173,7 +178,7 @@ impl Provider {
 
     /// Refresh (rotate) the stored credential under a per-account cross-process lock.
     pub async fn refresh(&self, account: &str) -> RefreshOutcome {
-        let _lock = match self.operation_lock("refresh", account).await {
+        let _lock = match self.lifecycle_lock().await {
             Ok(lock) => lock,
             Err(message) => {
                 return RefreshOutcome {
@@ -192,7 +197,7 @@ impl Provider {
         if !self.is_expired(account).await {
             return None;
         }
-        let _lock = match self.operation_lock("refresh", account).await {
+        let _lock = match self.lifecycle_lock().await {
             Ok(lock) => lock,
             Err(message) => {
                 return Some(RefreshOutcome {
@@ -238,7 +243,10 @@ impl Provider {
     /// Store a manually issued long-lived token (Claude only; error otherwise).
     pub async fn load_long_lived_token(&self, account: &str, token: &str) -> anyhow::Result<()> {
         match self {
-            Provider::Claude => claude::load_long_lived_token(account, token).await,
+            Provider::Claude => {
+                let _lock = self.lifecycle_lock().await.map_err(anyhow::Error::msg)?;
+                claude::load_long_lived_token(account, token).await
+            }
             other => anyhow::bail!("{} does not support long-lived tokens", other.id()),
         }
     }
@@ -246,7 +254,10 @@ impl Provider {
     /// Validate an API key against the provider and store it (Z.AI only; error otherwise).
     pub async fn validate_and_store_key(&self, account: &str, key: &str) -> anyhow::Result<()> {
         match self {
-            Provider::Zai => key_adapter::validate_and_store_key("zai", account, key).await,
+            Provider::Zai => {
+                let _lock = self.lifecycle_lock().await.map_err(anyhow::Error::msg)?;
+                key_adapter::validate_and_store_key("zai", account, key).await
+            }
             other => anyhow::bail!("{} does not support API-key login", other.id()),
         }
     }
@@ -254,7 +265,10 @@ impl Provider {
     /// Store a complete Pi auth.json supplied through the headless `PI_AUTH_JSON` flow.
     pub async fn load_pi_auth_json(&self, account: &str, raw: &str) -> anyhow::Result<()> {
         match self {
-            Provider::Pi => pi::load_raw_and_activate(account, raw),
+            Provider::Pi => {
+                let _lock = self.lifecycle_lock().await.map_err(anyhow::Error::msg)?;
+                pi::load_raw_and_activate(account, raw)
+            }
             other => anyhow::bail!("{} does not accept PI_AUTH_JSON", other.id()),
         }
     }

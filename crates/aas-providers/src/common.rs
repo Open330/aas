@@ -46,9 +46,17 @@ pub(crate) fn store_account_secret(
     email: Option<String>,
     secret: &str,
 ) -> anyhow::Result<()> {
+    let provider_key = aas_core::naming::normalize_provider_key(provider);
+    // Adapters normally run under Provider's provider-wide lifecycle lock. Keep a narrower commit
+    // lock as a safety net for internal/direct callers and tests without making the outer lock
+    // recursively acquire itself.
+    let _commit =
+        aas_core::keyed_lock::acquire("credential-commit", &provider_key).map_err(|error| {
+            anyhow::anyhow!("could not acquire {provider_key} commit lock: {error}")
+        })?;
     let store = AccountStore::open_default();
     let previous_account = store.get(provider, name)?;
-    let previous_secret = secure_store::get_secret(provider, name);
+    let previous_secret = secure_store::get_secret_result(provider, name)?;
 
     let mut record = AccountRecord::new(provider, name);
     record.label = Some(label.unwrap_or(name).to_string());
@@ -76,7 +84,7 @@ pub(crate) fn store_account_secret(
                 }
             }
             None => {
-                if let Err(rollback) = secure_store::delete_secret(provider, name) {
+                if let Err(rollback) = secure_store::clear_secret_value(provider, name) {
                     rollback_errors.push(format!("credential={rollback}"));
                 }
             }
@@ -154,6 +162,46 @@ mod tests {
             secure_store::get_secret("codex", winner).as_deref(),
             Some(expected)
         );
+
+        std::env::remove_var("AAS_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn concurrent_same_account_commits_matching_metadata_and_secret() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir =
+            std::env::temp_dir().join(format!("aas-provider-transaction-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("AAS_CONFIG_DIR", &dir);
+        let barrier = Arc::new(Barrier::new(3));
+        let threads: Vec<_> = ["alpha", "beta"]
+            .into_iter()
+            .map(|identity| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store_account_secret(
+                        "codex",
+                        "target",
+                        None,
+                        Some(format!("{identity}@example.com")),
+                        identity,
+                    )
+                })
+            })
+            .collect();
+        barrier.wait();
+        for thread in threads {
+            thread.join().unwrap().unwrap();
+        }
+
+        let account = AccountStore::open_default()
+            .get("codex", "target")
+            .unwrap()
+            .unwrap();
+        let secret = secure_store::get_secret("codex", "target").unwrap();
+        let expected_email = format!("{secret}@example.com");
+        assert_eq!(account.email.as_deref(), Some(expected_email.as_str()));
 
         std::env::remove_var("AAS_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(dir);
