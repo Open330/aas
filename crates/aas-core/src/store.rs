@@ -54,6 +54,17 @@ fn canonical_provider(p: &str) -> String {
     p.to_lowercase()
 }
 
+/// A portable collision key for profile homes. AAS bundles move between hosts, so accepting two
+/// names that only work on a case-sensitive source filesystem would corrupt credentials when the
+/// same store reaches default macOS or Windows filesystems.
+fn storage_collision_key(provider: &str, name: &str) -> String {
+    crate::naming::safe_profile_dir_name(provider, name).to_ascii_lowercase()
+}
+
+fn contains_terminal_control(value: &str) -> bool {
+    value.chars().any(char::is_control)
+}
+
 pub struct AccountStore {
     dir: PathBuf,
 }
@@ -155,6 +166,22 @@ impl AccountStore {
                     "provider and account name must be non-empty".into(),
                 ));
             }
+            if contains_terminal_control(&account.name)
+                || contains_terminal_control(&account.provider)
+                || account
+                    .label
+                    .as_deref()
+                    .is_some_and(contains_terminal_control)
+                || account
+                    .email
+                    .as_deref()
+                    .is_some_and(contains_terminal_control)
+            {
+                return Err(StoreError::Invariant(
+                    "provider, account name, label, and email must not contain terminal control characters"
+                        .into(),
+                ));
+            }
             if let Some((provider, name)) = names.insert(
                 account.name.as_str(),
                 (account.provider.as_str(), account.name.as_str()),
@@ -164,7 +191,7 @@ impl AccountStore {
                     account.name, account.provider, account.name
                 )));
             }
-            let key = crate::naming::safe_profile_dir_name(&account.provider, &account.name);
+            let key = storage_collision_key(&account.provider, &account.name);
             if let Some((provider, name)) =
                 storage.insert(key, (account.provider.as_str(), account.name.as_str()))
             {
@@ -185,12 +212,11 @@ impl AccountStore {
         provider: &str,
         name: &str,
     ) -> Result<(), StoreError> {
-        let requested = crate::naming::safe_profile_dir_name(provider, name);
+        let requested = storage_collision_key(provider, name);
         if let Some(existing) = store.accounts.iter().find(|account| {
             !(canonical_provider(&account.provider) == canonical_provider(provider)
                 && account.name == name)
-                && crate::naming::safe_profile_dir_name(&account.provider, &account.name)
-                    == requested
+                && storage_collision_key(&account.provider, &account.name) == requested
         }) {
             return Err(StoreError::StorageConflict {
                 provider: provider.to_string(),
@@ -203,6 +229,16 @@ impl AccountStore {
     }
 
     pub fn validate_account_identity(&self, provider: &str, name: &str) -> Result<(), StoreError> {
+        if provider.is_empty() || name.is_empty() {
+            return Err(StoreError::Invariant(
+                "provider and account name must be non-empty".into(),
+            ));
+        }
+        if contains_terminal_control(provider) || contains_terminal_control(name) {
+            return Err(StoreError::Invariant(
+                "provider and account name must not contain terminal control characters".into(),
+            ));
+        }
         self.with_shared(|| {
             let store = self.load_unlocked()?;
             self.validate_storage_key_in(&store, provider, name)?;
@@ -330,19 +366,42 @@ impl AccountStore {
     pub fn remove(&self, provider: &str, name: &str) -> Result<bool, StoreError> {
         self.with_exclusive(|| {
             let prov = canonical_provider(provider);
-            let mut store = self.load_unlocked()?;
-            let before = store.accounts.len();
-            store
+            let original_store = self.load_unlocked()?;
+            // Validate/snapshot active state before committing accounts.json. An error must mean
+            // the caller's logical state was not changed.
+            let original_active = self.load_active_unlocked()?;
+            let mut updated_store = original_store.clone();
+            let before = updated_store.accounts.len();
+            updated_store
                 .accounts
                 .retain(|a| !(canonical_provider(&a.provider) == prov && a.name == name));
-            let changed = store.accounts.len() < before;
+            let changed = updated_store.accounts.len() < before;
             if changed {
-                self.save_unlocked(&store)?;
-                let mut active = self.load_active_unlocked()?;
-                if active.get(&prov).and_then(|v| v.as_str()) == Some(name) {
-                    active.remove(&prov);
-                    active.insert("updated".into(), serde_json::Value::String(now_iso()));
-                    self.save_active_unlocked(&active)?;
+                let mut updated_active = original_active.clone();
+                let active_dirty =
+                    updated_active.get(&prov).and_then(|v| v.as_str()) == Some(name);
+                if active_dirty {
+                    updated_active.remove(&prov);
+                    updated_active
+                        .insert("updated".into(), serde_json::Value::String(now_iso()));
+                }
+
+                if let Err(error) = self.save_unlocked(&updated_store) {
+                    let store_rollback = self.save_unlocked(&original_store).err();
+                    return Err(StoreError::Transaction(format!(
+                        "{error}; store rollback={store_rollback:?}"
+                    )));
+                }
+                if active_dirty {
+                    if let Err(error) = self.save_active_unlocked(&updated_active) {
+                        // save_active_unlocked is atomic, but it may report a late durability
+                        // error after replacement. Restore both snapshots defensively.
+                        let active_rollback = self.save_active_unlocked(&original_active).err();
+                        let store_rollback = self.save_unlocked(&original_store).err();
+                        return Err(StoreError::Transaction(format!(
+                            "{error}; active rollback={active_rollback:?}; store rollback={store_rollback:?}"
+                        )));
+                    }
                 }
             }
             Ok(changed)
@@ -685,6 +744,56 @@ mod tests {
         let error = s.add(AccountRecord::new("codex", "a?b")).unwrap_err();
         assert!(matches!(error, StoreError::StorageConflict { .. }));
         assert_eq!(s.list(None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn case_only_storage_collision_is_rejected_portably() {
+        let s = AccountStore::at(tmp());
+        s.add(AccountRecord::new("codex", "Work")).unwrap();
+        let error = s.add(AccountRecord::new("codex", "work")).unwrap_err();
+        assert!(matches!(error, StoreError::StorageConflict { .. }));
+        assert_eq!(s.list(None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn terminal_control_characters_are_rejected() {
+        let s = AccountStore::at(tmp());
+        let mut record = AccountRecord::new("codex", "safe");
+        record.email = Some("victim@example.com\u{1b}]52;c;payload\u{7}".into());
+        assert!(matches!(s.add(record), Err(StoreError::Invariant(_))));
+        assert!(matches!(
+            s.add(AccountRecord::new("codex", "bad\rname")),
+            Err(StoreError::Invariant(_))
+        ));
+    }
+
+    #[test]
+    fn remove_does_not_commit_when_active_state_is_corrupt() {
+        let dir = tmp();
+        let s = AccountStore::at(&dir);
+        s.add(AccountRecord::new("codex", "victim")).unwrap();
+        std::fs::write(dir.join(".active.json"), "{not-json").unwrap();
+        assert!(matches!(
+            s.remove("codex", "victim"),
+            Err(StoreError::Corrupt { .. })
+        ));
+        assert!(s.get("codex", "victim").unwrap().is_some());
+    }
+
+    #[test]
+    fn remove_rolls_back_account_when_active_write_fails() {
+        let dir = tmp();
+        let s = AccountStore::at(&dir);
+        s.add(AccountRecord::new("codex", "victim")).unwrap();
+        s.set_active("codex", "victim").unwrap();
+        std::fs::create_dir(dir.join(".active.json.bak")).unwrap();
+
+        assert!(matches!(
+            s.remove("codex", "victim"),
+            Err(StoreError::Transaction(_))
+        ));
+        assert!(s.get("codex", "victim").unwrap().is_some());
+        assert_eq!(s.get_active("codex").unwrap().as_deref(), Some("victim"));
     }
 
     #[test]

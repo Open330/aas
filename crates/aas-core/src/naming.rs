@@ -79,15 +79,19 @@ pub fn native_cred_file(provider: &str) -> &'static str {
 /// asx `safeProfileDirName`: `{normKey}-{name}` with `[^A-Za-z0-9_.-]` → `_`.
 pub fn safe_profile_dir_name(provider: &str, name: &str) -> String {
     let raw = format!("{}-{}", normalize_provider_key(provider), name);
-    raw.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-') {
-                c
-            } else {
-                '_'
+    let mut safe = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-') {
+            safe.push(c);
+        } else {
+            // The inherited JavaScript sanitizer operates on UTF-16 code units. Preserve that
+            // layout exactly so astral characters map to two underscores in both tools.
+            for _ in 0..c.len_utf16() {
+                safe.push('_');
             }
-        })
-        .collect()
+        }
+    }
+    safe
 }
 
 pub fn profile_home(provider: &str, name: &str) -> PathBuf {
@@ -135,6 +139,7 @@ mod tests {
             safe_profile_dir_name("claude-code", "june@rtzr"),
             "claude-june_rtzr"
         );
+        assert_eq!(safe_profile_dir_name("codex", "a😀b"), "codex-a__b");
     }
 
     #[test]

@@ -64,40 +64,91 @@ pub fn claude_keychain_service(config_dir: Option<&Path>) -> String {
     }
 }
 
-/// asx `currentUser()` — the keychain account name.
+#[cfg(unix)]
+fn os_current_user() -> Option<String> {
+    use std::ffi::CStr;
+    use std::mem::MaybeUninit;
+
+    let uid = unsafe { libc::geteuid() };
+    let configured = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
+    let size = if configured > 0 {
+        usize::try_from(configured).unwrap_or(16 * 1024)
+    } else {
+        16 * 1024
+    }
+    .clamp(1024, 1024 * 1024);
+    let mut buffer = vec![0_u8; size];
+    let mut entry = MaybeUninit::<libc::passwd>::uninit();
+    let mut result = std::ptr::null_mut();
+    let status = unsafe {
+        libc::getpwuid_r(
+            uid,
+            entry.as_mut_ptr(),
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            &mut result,
+        )
+    };
+    if status != 0 || result.is_null() {
+        return None;
+    }
+    let entry = unsafe { entry.assume_init() };
+    if entry.pw_name.is_null() {
+        return None;
+    }
+    let user = unsafe { CStr::from_ptr(entry.pw_name) }
+        .to_string_lossy()
+        .into_owned();
+    (!user.is_empty()).then_some(user)
+}
+
+#[cfg(not(unix))]
+fn os_current_user() -> Option<String> {
+    std::env::var("USERNAME").ok().filter(|s| !s.is_empty())
+}
+
+/// asx `currentUser()` — the keychain account name. Sanitized SSH, launchd, and GUI
+/// environments may omit `$USER`, so resolve the effective OS account before using a placeholder.
 pub fn current_user() -> String {
     std::env::var("USER")
         .ok()
         .filter(|s| !s.is_empty())
-        .or({
-            #[cfg(unix)]
-            {
-                // best-effort fallback via getlogin-equivalent is not in std; USER covers macOS.
-                None
-            }
-            #[cfg(not(unix))]
-            {
-                std::env::var("USERNAME").ok()
-            }
-        })
+        .or_else(os_current_user)
         .unwrap_or_else(|| "user".to_string())
 }
 
 /// Read a generic-password credential from the macOS Keychain via the `security` CLI.
-/// Returns `None` on any failure or empty value. (No-op-ish off macOS: `security` missing → None.)
-pub fn read_credential(service: &str) -> Option<String> {
+/// Only an explicit item-not-found status is absence; locked/unavailable Keychain failures remain
+/// errors so rename/import cannot silently orphan or overwrite credentials.
+pub fn read_credential_result(service: &str) -> io::Result<Option<String>> {
     let user = current_user();
     with_keychain_lock(|| {
         let out = Command::new("security")
             .args(["find-generic-password", "-s", service, "-a", &user, "-w"])
-            .output()
-            .ok()?;
+            .output()?;
+        if out.status.code() == Some(44) {
+            return Ok(None);
+        }
         if !out.status.success() {
-            return None;
+            let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            return Err(io::Error::other(format!(
+                "security find-generic-password failed for {service}{}",
+                if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {detail}")
+                }
+            )));
         }
         let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        (!s.is_empty()).then_some(s)
+        Ok((!s.is_empty()).then_some(s))
     })
+}
+
+/// Best-effort Keychain read for display/usage paths where absence and temporary unavailability
+/// are both represented as no live credential. Mutating transactions use `read_credential_result`.
+pub fn read_credential(service: &str) -> Option<String> {
+    read_credential_result(service).ok().flatten()
 }
 
 pub fn credential_fits_security_cli(raw: &str) -> bool {
