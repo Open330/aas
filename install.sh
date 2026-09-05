@@ -5,7 +5,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/open330/aas/main/install.sh | sh
 #
 # Env overrides:
-#   AAS_VERSION=v0.1.10   pin a version (default: latest)
+#   AAS_VERSION=v0.1.11   pin a version (default: latest)
 #   AAS_BIN_DIR=~/.local/bin   install location
 #   AAS_SKIP_ATTESTATION=1     skip GitHub provenance verification (not recommended)
 #   AAS_DOWNLOAD_BASE=https://...   release-asset base URL (testing/mirror use)

@@ -5,6 +5,8 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-09-05
+
 ### Fixed
 
 - `aas exec <codex-account>` no longer stops at Codex's "Hooks need review" prompt on a profile's
