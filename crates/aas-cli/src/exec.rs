@@ -9,7 +9,7 @@ use aas_core::naming::{
     safe_profile_dir_name,
 };
 use aas_core::store::AccountStore;
-use aas_core::{platform, secure_store, share};
+use aas_core::{codex_hooks, platform, secure_store, share};
 use aas_providers::get_adapter;
 use aas_proxy::{inject_proxy_endpoint, start_proxy, Credential, ProxyStartOptions};
 use std::collections::HashMap;
@@ -138,6 +138,22 @@ fn seed_agent_home(provider_key: &str, dir: &Path) {
     if std::fs::write(&p, serde_json::to_string(&json).unwrap_or_default()).is_ok() {
         set_0600(&p);
     }
+}
+
+/// Give a Codex profile home the hook trust already granted to the system config it shares.
+/// Best effort: on any failure Codex simply falls back to its interactive trust prompt.
+fn seed_codex_hook_trust(provider_key: &str, home: &Path) {
+    if provider_key != "codex" {
+        return;
+    }
+    let Some(system_home) = platform::system_home_for("codex") else {
+        return;
+    };
+    let _ = codex_hooks::seed_profile_hook_trust(
+        &system_home.join("config.toml"),
+        &home.join("config.toml"),
+        &platform::profiles_dir(),
+    );
 }
 
 fn claude_long_lived_token(raw: &str) -> Option<String> {
@@ -272,6 +288,9 @@ pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyh
             env.insert(spec.home_env.into(), home.display().to_string());
             seed_agent_home(&normalize_provider_key(&agent_provider), &home);
             share::link_shared_state(&profile_provider, &home, false, acct.share.as_deref());
+            // After the symlinks exist: a shared Codex config.toml is trusted per config *path*,
+            // so a fresh (or renamed) profile would re-prompt "Hooks need review" without this.
+            seed_codex_hook_trust(&normalize_provider_key(&agent_provider), &home);
         }
     } else {
         let home = cross_session_home(&agent_provider, &account_name);

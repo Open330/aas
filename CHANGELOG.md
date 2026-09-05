@@ -5,6 +5,17 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `aas exec <codex-account>` no longer stops at Codex's "Hooks need review" prompt on a profile's
+  first run. Codex records hook trust against the *absolute path of the config file* that declared
+  the hook, and `aas` symlinks the shared `config.toml` into each profile home — so every profile,
+  and every profile again after an account rename, looked like a brand-new source of untrusted
+  hooks. The trust already granted to the Codex system config is now copied onto the profile's
+  config path before launch, and entries left behind by renamed or removed profiles are pruned.
+  Nothing is trusted that the user had not already trusted in `~/.codex/config.toml`, and a profile
+  with an isolated (non-shared) `config.toml` is left untouched.
+
 ## [0.1.10] - 2026-08-24
 
 ### Fixed

@@ -6,6 +6,7 @@
 //! (The one subprocess here is the macOS `security` CLI, used by `secure_store`/`keychain`.)
 
 pub mod backoff;
+pub mod codex_hooks;
 pub mod execargs;
 pub mod jwt;
 pub mod keychain;
