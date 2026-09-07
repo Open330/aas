@@ -5,6 +5,7 @@ mod exec;
 mod export;
 mod login;
 mod render;
+mod shim;
 mod ui;
 
 use aas_core::model::{sort_accounts, AccountSort, ProfileType};
@@ -210,6 +211,16 @@ enum Command {
     },
     /// Standalone cross-provider proxy for `<name>`'s backend, targeting a `<frontend>` agent.
     Proxy { name: String, frontend: String },
+    /// Print the active account for `<provider>`. Exits 1 when none is set.
+    Active {
+        #[arg(value_name = "PROVIDER")]
+        provider: String,
+    },
+    /// Put the bare provider CLI (`claude`, `codex`, …) on the active account.
+    Shim {
+        #[command(subcommand)]
+        action: shim::ShimAction,
+    },
 }
 
 #[tokio::main]
@@ -316,6 +327,12 @@ async fn main() {
         } => cmd_refresh(&store, &provider, name.as_deref(), no_login).await,
         Command::Exec { name, rest } => exec::cmd_exec(&store, &name, &rest).await,
         Command::Proxy { name, frontend } => exec::cmd_proxy(&store, &name, &frontend).await,
+        Command::Active { provider } => cmd_active(&store, &provider),
+        Command::Shim { action } => match action {
+            shim::ShimAction::Install { providers } => shim::install(&providers),
+            shim::ShimAction::Uninstall { providers } => shim::uninstall(&providers),
+            shim::ShimAction::Status => shim::status(),
+        },
     };
     if let Err(e) = result {
         ui::error(e);
@@ -636,6 +653,22 @@ fn usage_json_response(items: &[aas_providers::AccountUsage]) -> UsageJsonRespon
         accounts,
         provider_groups,
         worst_remaining_pct,
+    }
+}
+
+/// Machine-readable half of `status`, for scripts and the generated shims: just the name on
+/// stdout, or exit 1 so a caller can fall back without parsing anything.
+fn cmd_active(store: &AccountStore, provider: &str) -> anyhow::Result<()> {
+    let key = normalize_provider_key(provider);
+    match store.get_active(&key)? {
+        Some(name) => {
+            println!("{name}");
+            Ok(())
+        }
+        None => {
+            eprintln!("no active account for {key}");
+            std::process::exit(1);
+        }
     }
 }
 

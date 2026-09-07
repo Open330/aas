@@ -65,6 +65,11 @@ fn agent_spec(provider: &str) -> Option<AgentSpec> {
     }
 }
 
+/// The native CLI `aas exec` launches for `provider`, if it has one.
+pub(crate) fn agent_bin(provider: &str) -> Option<&'static str> {
+    agent_spec(provider).map(|spec| spec.bin)
+}
+
 fn agents_dir() -> PathBuf {
     platform::profiles_dir().join(".agents")
 }
