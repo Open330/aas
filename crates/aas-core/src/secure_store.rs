@@ -22,8 +22,27 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static SECRET_WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
 static SECRET_REMOVE_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// `AAS_NO_KEYCHAIN=1` keeps Claude credentials out of the macOS Keychain.
+///
+/// A non-interactive SSH session cannot reach the login Keychain: a GUI login does not unlock it
+/// for that session, and securityd will not prompt where there is no UI. The Keychain is therefore
+/// not a dependable store on a host reached over SSH — a credential written while it happened to
+/// be unlocked becomes unreadable again as soon as it relocks, and `get_secret` (which cannot
+/// distinguish "locked" from "absent") reports it as missing. Setting this makes such a host use
+/// the profile's owner-only `.credentials.json` instead, which is the store every non-macOS host
+/// already uses. Put it in `~/.zshenv`, not `~/.zshrc`: `ssh host '<cmd>'` is non-interactive and
+/// never reads the latter.
+///
+/// This governs the aas-managed profile store only. Where the *native* Claude credential lives is
+/// Claude Code's decision, so `switch` is deliberately left alone.
+fn keychain_disabled() -> bool {
+    std::env::var("AAS_NO_KEYCHAIN")
+        .map(|value| !value.is_empty() && value != "0")
+        .unwrap_or(false)
+}
+
 fn is_mac_claude(provider: &str) -> bool {
-    cfg!(target_os = "macos") && provider.to_lowercase().contains("claude")
+    cfg!(target_os = "macos") && !keychain_disabled() && provider.to_lowercase().contains("claude")
 }
 
 fn claude_profile_service(provider: &str, name: &str) -> String {
@@ -498,6 +517,28 @@ mod tests {
     use super::*;
 
     use crate::ENV_LOCK;
+
+    #[test]
+    fn keychain_opt_out_forces_the_file_store() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        std::env::remove_var("AAS_NO_KEYCHAIN");
+        assert_eq!(is_mac_claude("claude"), cfg!(target_os = "macos"));
+
+        std::env::set_var("AAS_NO_KEYCHAIN", "1");
+        assert!(
+            !is_mac_claude("claude"),
+            "opt-out must route Claude credentials to the file store"
+        );
+
+        // An explicit "0" (and an empty value) means the Keychain stays in use, so exporting the
+        // variable as off cannot silently move credentials.
+        std::env::set_var("AAS_NO_KEYCHAIN", "0");
+        assert_eq!(is_mac_claude("claude"), cfg!(target_os = "macos"));
+        std::env::set_var("AAS_NO_KEYCHAIN", "");
+        assert_eq!(is_mac_claude("claude"), cfg!(target_os = "macos"));
+
+        std::env::remove_var("AAS_NO_KEYCHAIN");
+    }
 
     #[test]
     fn file_provider_roundtrip() {

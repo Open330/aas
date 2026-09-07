@@ -21,6 +21,19 @@ All notable user-facing changes are recorded here. The format follows
 - `aas active <provider>` prints the active account name on stdout and exits 1 when none is set —
   the machine-readable counterpart to `status`, used by the shims.
 
+### Added
+
+- `AAS_NO_KEYCHAIN=1` keeps Claude credentials out of the macOS Keychain, storing them in the
+  profile's owner-only `.credentials.json` instead. A non-interactive SSH session cannot reach the
+  login Keychain — a GUI login does not unlock it for that session, and securityd will not prompt
+  where there is no UI — so on a Mac administered over SSH the Keychain silently stops being a
+  dependable store: a credential written while it happened to be unlocked reads back as *missing*
+  once it relocks, because `get_secret` cannot tell "locked" from "absent". Opting such a host out
+  gives it the same file store every non-macOS host already uses. Set it in `~/.zshenv`, not
+  `~/.zshrc`, since `ssh host '<cmd>'` is non-interactive and never reads the latter. This governs
+  the aas-managed profile store only; where the *native* Claude credential lives stays Claude
+  Code's decision.
+
 ### Fixed
 
 - `aas usage` works again for Claude accounts holding a long-lived `setup-token` credential. Such

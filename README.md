@@ -155,6 +155,12 @@ ssh -t jiun-mini 'aas import ~/aas-vault.age'
 | `proxy <name> <frontend>` | Start a standalone ASX Proxy for `<name>`'s backend and print env to point a `<frontend>` agent at it. |
 | `import [file]` | No arg: adopt/inspect existing `asx` state. With a file (or `-` for stdin): restore a bundle from `export --all` on another host. |
 
+On macOS, `AAS_NO_KEYCHAIN=1` stores Claude credentials in the profile's owner-only
+`.credentials.json` rather than the login Keychain. A non-interactive SSH session cannot reach that
+Keychain, so on a Mac you administer over SSH a credential written while it was unlocked reads back
+as *missing* once it relocks. Set it in `~/.zshenv` (not `~/.zshrc`, which `ssh host '<cmd>'` never
+reads). The trade is Keychain encryption for a 0600 file in a 0700 directory.
+
 Vault passphrases are read from the terminal without echo. For non-interactive automation, set
 `AAS_VAULT_PASSPHRASE` only for the lifetime of the command. Imports merge by provider/account:
 existing matching accounts are updated, while a name already owned by another provider is skipped.
