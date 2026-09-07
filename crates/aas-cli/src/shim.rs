@@ -31,6 +31,29 @@ pub enum ShimAction {
     Status,
 }
 
+/// Environment that means the caller has already chosen a backend or credential for `provider`.
+///
+/// Wrappers that point the agent at a third-party Anthropic-compatible endpoint (Kimi, GLM, an
+/// internal proxy) export their own base URL and token and then invoke the agent by name — which
+/// now finds the shim. Re-entering through `aas exec` would strip those credentials
+/// (`scrub_inherited_credentials`) and substitute the active account's, leaving the call pointed
+/// at the third-party endpoint while authenticating as Anthropic. An explicit choice must win.
+fn override_env(provider: &str) -> &'static [&'static str] {
+    match provider {
+        "claude" => &[
+            "CLAUDE_CONFIG_DIR",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+        ],
+        "codex" => &["CODEX_HOME", "OPENAI_API_KEY", "OPENAI_BASE_URL"],
+        "grok" => &["GROK_HOME", "XAI_API_KEY", "GROK_API_KEY"],
+        "pi" => &["PI_CODING_AGENT_DIR", "PI_AUTH_JSON"],
+        _ => &[],
+    }
+}
+
 pub fn shim_dir() -> PathBuf {
     asx_config_dir().join("shims")
 }
@@ -85,6 +108,19 @@ fn shim_body(provider: &str, real: &Path, aas: &Path) -> String {
     s.push_str("if [ -n \"${AAS_SHIM:-}\" ]; then\n");
     s.push_str(&format!("  exec {real} \"$@\"\n"));
     s.push_str("fi\n\n");
+    s.push_str(
+        "# An explicit backend choice in the environment wins: a wrapper that already set its\n",
+    );
+    s.push_str("# own endpoint or credential must not be rewritten to the active account.\n");
+    s.push_str(&format!(
+        "for _aas_var in {}; do\n",
+        override_env(provider).join(" ")
+    ));
+    s.push_str("  eval \"_aas_val=\\${$_aas_var:-}\"\n");
+    s.push_str("  if [ -n \"$_aas_val\" ]; then\n");
+    s.push_str(&format!("    exec {real} \"$@\"\n"));
+    s.push_str("  fi\n");
+    s.push_str("done\n\n");
     s.push_str("# No active account (or aas unavailable) must never block the real CLI.\n");
     s.push_str(&format!(
         "active=$({aas} active {provider} 2>/dev/null) || active=''\n"

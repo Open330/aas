@@ -36,6 +36,16 @@ All notable user-facing changes are recorded here. The format follows
 
 ### Fixed
 
+- Shims no longer hijack a call that already chose its own backend. Wrappers that point Claude Code
+  at a third-party Anthropic-compatible endpoint (Kimi, GLM, an internal proxy) export their own
+  base URL and token and then invoke `claude` by name — which finds the shim. Re-entering through
+  `aas exec` stripped those credentials and substituted the active account's, leaving the call
+  aimed at the third-party endpoint while authenticating as Anthropic. The wrapper now defers to
+  the real CLI whenever the environment already carries an endpoint or credential for that provider
+  (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CONFIG_DIR`, and the codex/grok/pi
+  equivalents). An empty value does not count as a choice, so the `CLAUDE_CODE_OAUTH_TOKEN=""` such
+  wrappers set to clear Anthropic auth still routes normally.
+
 - `aas usage` works again for Claude accounts holding a long-lived `setup-token` credential. Such
   a token carries inference scope only, so `/api/oauth/usage` answers 403
   `oauth_scope_insufficient` and those accounts reported no quota at all — the cost of migrating an
