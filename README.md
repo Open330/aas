@@ -120,7 +120,9 @@ ssh -t jiun-mini 'aas import ~/aas-vault.age'
   (`~/.codex/auth.json`, Claude keychain, …) so running `codex`/`claude` directly uses it.
   A Claude **long-lived** token is the exception — Claude Code only accepts one through
   `CLAUDE_CODE_OAUTH_TOKEN`, never from its credential store, so `switch` cannot materialize it
-  and the bare CLI keeps whatever it was already using. Install shims for that case.
+  and the bare CLI keeps whatever it was already using. Install shims for that case. (A long-lived
+  token also has inference scope only, so `usage` reads its quota from the rate-limit headers on a
+  minimal completion request rather than the usage endpoint, which answers 403 for it.)
 - **`shim install`** puts a wrapper for each agent CLI in `<config>/shims`, so a bare `claude` or
   `codex` re-enters through `aas exec <active>` and follows `switch` for *every* credential shape.
   Prepend the directory it prints to `PATH`. Because the active account is resolved per

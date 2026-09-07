@@ -23,6 +23,15 @@ All notable user-facing changes are recorded here. The format follows
 
 ### Fixed
 
+- `aas usage` works again for Claude accounts holding a long-lived `setup-token` credential. Such
+  a token carries inference scope only, so `/api/oauth/usage` answers 403
+  `oauth_scope_insufficient` and those accounts reported no quota at all — the cost of migrating an
+  account to the long-lived token that multiple machines can share. Anthropic returns the same
+  numbers as `anthropic-ratelimit-unified-*` headers on every `/v1/messages` response, which the
+  token *is* allowed to make, so quota for these accounts now comes from a minimal completion
+  request (~8 input and 1 output token, measured not to move the utilization it reports). Accounts
+  on a normal OAuth credential keep using the usage endpoint.
+
 - A recorded rate-limit backoff no longer outlives the credential it was recorded for. Every path
   that replaces or removes a credential cleared the usage snapshot but left the 429 backoff in
   place, so an account whose token had just been re-imported or re-logged-in kept being reported as

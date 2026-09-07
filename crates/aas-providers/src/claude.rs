@@ -180,6 +180,73 @@ pub(crate) fn parse_flexible_reset_ms(v: &Value) -> Option<i64> {
 }
 
 /// asx claude usage windows → meters. `five_hour|fiveHour` → "5h", `seven_day|sevenDay` → "7d".
+/// Model used for the quota probe. Deliberately the dateless alias: a pinned snapshot id is
+/// retired eventually, and a 404 there would silently cost every long-lived account its usage.
+const USAGE_PROBE_MODEL: &str = "claude-haiku-4-5";
+
+/// Read quota from the rate-limit headers Anthropic attaches to an inference response.
+///
+/// A long-lived `setup-token` credential carries inference scope only — `/api/oauth/usage` and
+/// `/api/oauth/profile` both answer 403 `oauth_scope_insufficient` for one — so the usage endpoint
+/// simply cannot serve these accounts. The same numbers ride on every `/v1/messages` response,
+/// which the token *is* allowed to make, so ask for the smallest possible completion and read the
+/// headers off it. The probe costs ~8 input and 1 output token and does not itself move the
+/// utilization it reports.
+///
+/// Returns the HTTP status alongside the meters so the caller can apply the same 401/429 handling
+/// it uses for the usage endpoint.
+async fn usage_meters_via_probe(token: &str) -> (u16, Vec<Meter>, Option<String>) {
+    let client = http_client();
+    let body = serde_json::json!({
+        "model": USAGE_PROBE_MODEL,
+        "max_tokens": 1,
+        "messages": [{ "role": "user", "content": "." }],
+    });
+    let response = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("Authorization", format!("Bearer {token}"))
+        .header("anthropic-version", "2023-06-01")
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .json(&body)
+        .send()
+        .await;
+    let Ok(response) = response else {
+        return (0, Vec::new(), None);
+    };
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+    let header = move |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+    let retry = header("retry-after");
+    (status, meters_from_ratelimit_headers(header), retry)
+}
+
+/// Turn `anthropic-ratelimit-unified-*` headers into the same meters the usage endpoint yields.
+pub(crate) fn meters_from_ratelimit_headers(header: impl Fn(&str) -> Option<String>) -> Vec<Meter> {
+    let mut meters = Vec::new();
+    for window in ["5h", "7d"] {
+        // Headers report a 0..1 fraction; `Meter::used_pct` (like the usage endpoint) is 0..100.
+        let Some(fraction) = header(&format!("anthropic-ratelimit-unified-{window}-utilization"))
+            .and_then(|raw| raw.trim().parse::<f64>().ok())
+        else {
+            continue;
+        };
+        let reset_ms = header(&format!("anthropic-ratelimit-unified-{window}-reset"))
+            .and_then(|raw| raw.trim().parse::<i64>().ok())
+            .map(|seconds| seconds * 1000);
+        meters.push(Meter::new(
+            window,
+            (fraction * 100.0).clamp(0.0, 100.0),
+            reset_ms,
+        ));
+    }
+    meters
+}
+
 pub(crate) fn build_claude_usage_meters(usage: &Value) -> Vec<Meter> {
     let mut meters = Vec::new();
     for (snake, camel, label) in [
@@ -414,7 +481,18 @@ pub(crate) async fn usage(account: &str) -> Usage {
         };
     };
 
-    let (status, usage_data, retry) = fetch_anthropic_json("/api/oauth/usage", &token).await;
+    // A long-lived token cannot read the usage endpoint (inference scope only), so take the
+    // numbers off an inference response's rate-limit headers instead.
+    let (status, meters, retry) = if long_lived {
+        usage_meters_via_probe(&token).await
+    } else {
+        let (status, usage_data, retry) = fetch_anthropic_json("/api/oauth/usage", &token).await;
+        let meters = usage_data
+            .as_ref()
+            .map(build_claude_usage_meters)
+            .unwrap_or_default();
+        (status, meters, retry)
+    };
     if status == 401 || status == 403 {
         return Usage {
             headline,
@@ -445,26 +523,16 @@ pub(crate) async fn usage(account: &str) -> Usage {
             ..Default::default()
         };
     }
-    let Some(usage_data) = usage_data else {
-        let why = if status == 0 {
-            "network error".to_string()
-        } else {
-            format!("HTTP {status}")
+    if meters.is_empty() {
+        let why = match status {
+            0 => "network error".to_string(),
+            200 => "no quota data returned".to_string(),
+            other => format!("HTTP {other}"),
         };
         return Usage {
             headline,
             plan,
             error: Some(format!("Unable to fetch usage ({why}).")),
-            ..Default::default()
-        };
-    };
-
-    let meters = build_claude_usage_meters(&usage_data);
-    if meters.is_empty() {
-        return Usage {
-            headline,
-            plan,
-            error: Some("no quota data returned.".into()),
             ..Default::default()
         };
     }
@@ -699,6 +767,44 @@ pub(crate) async fn load_long_lived_token(account: &str, token: &str) -> anyhow:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ratelimit_headers_become_usage_meters() {
+        let fake = |name: &str| -> Option<String> {
+            match name {
+                "anthropic-ratelimit-unified-5h-utilization" => Some("0.38".into()),
+                "anthropic-ratelimit-unified-5h-reset" => Some("1788781200".into()),
+                "anthropic-ratelimit-unified-7d-utilization" => Some("0.13".into()),
+                "anthropic-ratelimit-unified-7d-reset" => Some("1789246800".into()),
+                _ => None,
+            }
+        };
+        let meters = meters_from_ratelimit_headers(fake);
+        assert_eq!(meters.len(), 2);
+        // The header is a fraction; the meter (like the usage endpoint) is a percentage.
+        assert_eq!(meters[0].label, "5h");
+        assert!((meters[0].used_pct - 38.0).abs() < 1e-9);
+        assert_eq!(meters[0].reset_ms, Some(1_788_781_200_000));
+        assert_eq!(meters[1].label, "7d");
+        assert!((meters[1].used_pct - 13.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ratelimit_headers_skip_windows_that_are_absent_or_unparsable() {
+        let only_7d = |name: &str| -> Option<String> {
+            match name {
+                "anthropic-ratelimit-unified-5h-utilization" => Some("not-a-number".into()),
+                "anthropic-ratelimit-unified-7d-utilization" => Some("1.5".into()),
+                _ => None,
+            }
+        };
+        let meters = meters_from_ratelimit_headers(only_7d);
+        assert_eq!(meters.len(), 1);
+        assert_eq!(meters[0].label, "7d");
+        assert!((meters[0].used_pct - 100.0).abs() < 1e-9, "clamped to 100");
+        assert_eq!(meters[0].reset_ms, None);
+        assert!(meters_from_ratelimit_headers(|_| None).is_empty());
+    }
 
     #[test]
     fn oauth_token_extraction() {
