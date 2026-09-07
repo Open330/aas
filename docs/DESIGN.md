@@ -149,6 +149,8 @@ Summary:
 | `login [provider] [name]` `--long-lived` +share | | Fresh native login into an **isolated** profile home; `--long-lived` = Claude `setup-token`. |
 | `switch <provider> <name>` or `switch <account>` | `s` | Write a stored profile back to the provider's live store. |
 | `status [provider]` | | Show asx-tracked active account per provider. |
+| `active <provider>` | | Active account name on stdout, exit 1 when unset. Script/shim-facing form of `status`. |
+| `shim install\|uninstall [provider…]` / `shim status` | | Manage `<config>/shims` wrappers that re-enter through `aas exec <active>`, so the bare agent CLI follows `switch` even for credentials that cannot be written to the provider's native store (Claude long-lived tokens). |
 | `rename <from> <to>` | | Move profile home + update metadata + active markers. |
 | `remove [provider] <name>` | `rm` | Delete account + its secret/home. |
 | `exec <name> [target] [args…]` | `e` | Run the native CLI under a profile. `target`≠provider → cross-provider via proxy. `-b` bypass, `-d` debug, cross opts `-s/-i/--share/--isolate/--keep-context`, `--` passthrough. |

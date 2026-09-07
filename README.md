@@ -118,6 +118,13 @@ ssh -t jiun-mini 'aas import ~/aas-vault.age'
 
 - **`switch <name>`** writes the stored credential to the provider's native location
   (`~/.codex/auth.json`, Claude keychain, …) so running `codex`/`claude` directly uses it.
+  A Claude **long-lived** token is the exception — Claude Code only accepts one through
+  `CLAUDE_CODE_OAUTH_TOKEN`, never from its credential store, so `switch` cannot materialize it
+  and the bare CLI keeps whatever it was already using. Install shims for that case.
+- **`shim install`** puts a wrapper for each agent CLI in `<config>/shims`, so a bare `claude` or
+  `codex` re-enters through `aas exec <active>` and follows `switch` for *every* credential shape.
+  Prepend the directory it prints to `PATH`. Because the active account is resolved per
+  invocation, it also cannot drift away from a written-once native file.
 - **`exec <name>`** runs the agent under a profile-scoped home without touching your default.
 - **`export <name>`** prints the env (`CODEX_HOME=…`, `ZAI_API_KEY=…`, …) to activate a
   profile in the current shell only.
@@ -132,6 +139,8 @@ ssh -t jiun-mini 'aas import ~/aas-vault.age'
 | `list [provider\|account]` (alias `ls`) `-u`,`-d`, `--sort name\|added\|stored` | List all accounts or filter by provider/account. The default is provider-registry order then account name; `stored` preserves the `accounts.json` array order. `-u` shows live usage; `-d` dumps stored credentials. |
 | `usage [provider\|account]` (alias `u`) `--json`, `--fresh`, `--sort name\|added\|stored` | Usage for all accounts or one provider/account (shorthand for `list -u`), using a shared 10-minute success cache and deterministic order. `--fresh` bypasses the success cache but still honors rate-limit backoff. `--json` is the integration contract used by aas-bar and BarShelf. |
 | `status [provider]` | Show the active account per provider. |
+| `active <provider>` | Print just the active account name on stdout, exiting 1 when none is set — the machine-readable half of `status`, used by the shims. |
+| `shim install\|uninstall [provider…]`, `shim status` | Install wrappers in `<config>/shims` so the bare `claude`/`codex` follows `switch`. Required for Claude long-lived tokens, which cannot be written to the native store. Prepend the printed directory to `PATH`; `status` reports whether it actually precedes the real CLIs. |
 | `login [provider] [name]` `--long-lived`, `--device-auth`/`--headless`, `--endpoint <id>`, *share flags* | Login and store a new **isolated** profile. `--long-lived` uses Claude's `setup-token`; `--device-auth` uses a browserless device-code flow; `--endpoint` picks the API host for providers that run several (kimi). |
 | `load [provider] [name]` | Snapshot the **currently logged-in** credential as a **system** profile (auto-scans providers if none given). |
 | `switch <provider> <name>` or `switch <account>` (alias `s`) | Make a stored account the active credential. The one-argument form resolves a globally unique stored account name. |

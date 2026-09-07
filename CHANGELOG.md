@@ -5,6 +5,31 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `aas shim install` puts a small wrapper for each agent CLI in `<config>/shims`, so a bare
+  `claude` or `codex` runs under whichever account `aas` has active. `switch` already writes the
+  credential to the provider's native store, but that is impossible for a Claude **long-lived**
+  token: Claude Code accepts one only through `CLAUDE_CODE_OAUTH_TOKEN` and reports "Not logged in"
+  when the same credential is placed in its Keychain item or `.credentials.json`. After migrating
+  an account to a long-lived token, `switch` therefore stopped affecting the bare CLI. The wrapper
+  re-enters through `aas exec <active>`, the one path that knows how to hand every credential shape
+  to the agent, and resolves the account per invocation so it cannot drift from a written-once
+  file. Arguments are forwarded after `--` so agent flags that `aas exec` also defines (`--debug`,
+  `-b`) still reach the agent, and a missing active account or unavailable `aas` falls through to
+  the real CLI rather than failing the command.
+- `aas active <provider>` prints the active account name on stdout and exits 1 when none is set —
+  the machine-readable counterpart to `status`, used by the shims.
+
+### Fixed
+
+- A recorded rate-limit backoff no longer outlives the credential it was recorded for. Every path
+  that replaces or removes a credential cleared the usage snapshot but left the 429 backoff in
+  place, so an account whose token had just been re-imported or re-logged-in kept being reported as
+  rate limited until the window happened to expire, and a removed account left its entry behind
+  forever. Clearing the snapshot and the backoff is now a single operation used by import, login,
+  the Grok refresh, rename and remove.
+
 ## [0.1.11] - 2026-09-05
 
 ### Fixed

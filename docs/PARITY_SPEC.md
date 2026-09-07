@@ -7,7 +7,8 @@ contracts (endpoints/headers/JSON shapes) must **not** drift.
 
 This document separates inherited parity from aas-only extensions. As of v0.1.11, the extensions
 are deterministic account sorting, the typed `usage --json` integration contract, portable
-credential export/import, and optional passphrase-encrypted vault bundles; see §J.
+credential export/import, optional passphrase-encrypted vault bundles, and the `shim`/`active`
+pair that puts the bare agent CLI on the active account; see §J.
 
 ---
 
@@ -269,6 +270,16 @@ to safe effort tiers. Live model catalogs are fetched once per proxy process.
 - Successful usage snapshots are shared across processes for 10 minutes; `--fresh` bypasses this
   cache while still honoring persistent 429 backoff. Per-account fetch/refresh locks coalesce
   concurrent callers, and JSON adds `cached` plus `fetchedAtMs` provenance fields.
+- `shim install|uninstall|status` writes wrappers into `<config>/shims` that re-enter through
+  `aas exec <active>`, so a bare `claude`/`codex` follows `switch`. This exists because `switch`
+  cannot materialize every credential shape: Claude accepts a long-lived `setup-token` credential
+  only via `CLAUDE_CODE_OAUTH_TOKEN`, and reports "Not logged in" when it is placed in the Keychain
+  item or `.credentials.json` instead. Install resolves the real binary while skipping the shim
+  directory, the wrapper guards re-entry with `AAS_SHIM` (since `aas exec` resolves the agent
+  through `PATH`), and arguments are forwarded after `--` so flags both sides define reach the
+  agent. No active account, or an unavailable `aas`, falls through to the real CLI.
+- `active <provider>` prints the active account name on stdout and exits 1 when unset — the
+  script-facing form of `status`.
 - Parallel `list -u` / `usage` (fan-out fetch, ordered single render).
 - Deterministic display ordering: fixed provider registry order, then case-insensitive account
   name by default. `--sort added` uses `addedAt`; `--sort stored` preserves the `accounts.json`
