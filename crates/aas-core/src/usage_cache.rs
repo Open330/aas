@@ -117,6 +117,17 @@ pub fn clear(key: &str) {
     });
 }
 
+/// Drop every cached usage state for `key`: the snapshot **and** any recorded rate-limit backoff.
+///
+/// Use this whenever the credential or the account behind `key` changes. Clearing only the
+/// snapshot leaves a recorded 429 in force, so a credential that has since been replaced (or an
+/// account that no longer exists) keeps being reported as rate limited until the backoff happens
+/// to expire — the backoff outlives the failure that produced it.
+pub fn invalidate(key: &str) {
+    clear(key);
+    crate::backoff::clear(key);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,6 +141,39 @@ mod tests {
         assert!(entry.is_fresh(1_500, 500));
         assert!(!entry.is_fresh(1_501, 500));
         assert!(!entry.is_fresh(999, 500));
+    }
+
+    #[test]
+    fn invalidate_drops_the_snapshot_and_the_rate_limit_backoff() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!("aas-usage-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("AAS_CONFIG_DIR", &dir);
+
+        let key = "claude/work";
+        put(
+            key,
+            Entry {
+                fetched_at_ms: 1,
+                usage: Usage::default(),
+            },
+        )
+        .unwrap();
+        crate::backoff::record_rate_limit(key, 600_000);
+        assert!(get(key).is_some());
+        assert!(crate::backoff::rate_limited_until(key).is_some());
+
+        invalidate(key);
+
+        assert!(get(key).is_none(), "the usage snapshot should be gone");
+        assert!(
+            crate::backoff::rate_limited_until(key).is_none(),
+            "a recorded 429 must not outlive the credential it was recorded for"
+        );
+
+        std::env::remove_var("AAS_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

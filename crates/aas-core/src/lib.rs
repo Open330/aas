@@ -21,3 +21,8 @@ pub mod usage;
 pub mod usage_cache;
 
 pub use model::{AccountRecord, ProfileType, Store};
+
+/// Serializes tests that mutate process-wide state (`AAS_CONFIG_DIR`), since Cargo runs all of a
+/// crate's tests in one process across many threads.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

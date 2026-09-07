@@ -211,7 +211,7 @@ pub fn import_bundle(bundle: &Bundle) -> RestoreReport {
                 report.accounts += 1;
                 if ba.credential.is_some() {
                     report.credentials += 1;
-                    aas_core::usage_cache::clear(&id);
+                    aas_core::usage_cache::invalidate(&id);
                 } else {
                     report.without_credential.push(id);
                 }

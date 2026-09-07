@@ -884,8 +884,8 @@ fn cmd_rename(store: &AccountStore, from: &str, to: &str) -> anyhow::Result<()> 
             anyhow::anyhow!("could not acquire {provider_key} lifecycle lock: {error}")
         })?;
     store.rename(from, to)?;
-    aas_core::usage_cache::clear(&format!("{}/{from}", account.provider));
-    aas_core::usage_cache::clear(&format!("{}/{to}", account.provider));
+    aas_core::usage_cache::invalidate(&format!("{}/{from}", account.provider));
+    aas_core::usage_cache::invalidate(&format!("{}/{to}", account.provider));
     ui::success(format!("Renamed {from} → {to}"));
     Ok(())
 }
@@ -942,7 +942,7 @@ fn cmd_remove(store: &AccountStore, args: &[String]) -> anyhow::Result<()> {
             );
         }
     }
-    aas_core::usage_cache::clear(&format!("{prov}/{name}"));
+    aas_core::usage_cache::invalidate(&format!("{prov}/{name}"));
     Ok(())
 }
 

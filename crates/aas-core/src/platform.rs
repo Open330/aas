@@ -132,6 +132,7 @@ mod tests {
 
     #[test]
     fn asx_config_dir_env_override() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         std::env::set_var("AAS_CONFIG_DIR", "/tmp/aas-test-cfg");
         assert_eq!(asx_config_dir(), PathBuf::from("/tmp/aas-test-cfg"));
         std::env::remove_var("AAS_CONFIG_DIR");

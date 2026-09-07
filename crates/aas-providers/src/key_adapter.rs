@@ -562,7 +562,7 @@ pub(crate) async fn refresh_grok(account: &str) -> RefreshOutcome {
             needs_relogin: false,
         };
     }
-    aas_core::usage_cache::clear(&format!("grok/{account}"));
+    aas_core::usage_cache::invalidate(&format!("grok/{account}"));
 
     let is_system = AccountStore::open_default()
         .get("grok", account)

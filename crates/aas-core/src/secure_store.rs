@@ -496,9 +496,8 @@ fn set_0600(_path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::ENV_LOCK;
 
     #[test]
     fn file_provider_roundtrip() {
