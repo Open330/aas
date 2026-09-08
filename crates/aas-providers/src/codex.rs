@@ -238,10 +238,49 @@ fn run_codex_command(home: &Path, args: &[&str], timeout_secs: u64) -> bool {
     }
 }
 
+/// Outcome of asking the native `codex` CLI to refresh a profile's credential.
+///
+/// "The CLI ran and chose not to rewrite `auth.json`" is not a failure: codex refreshes lazily,
+/// so a credential it left alone is one it is still happy with. Collapsing that into the same
+/// answer as "codex could not run" made `aas refresh` report `native refresh failed` for accounts
+/// that were perfectly healthy — `codex login status` on the very same profile home answers
+/// `Logged in using ChatGPT`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NativeRefresh {
+    /// codex rewrote the credential; the new one is stored.
+    Rotated,
+    /// codex ran and left the credential as it was.
+    Unchanged,
+    /// codex could not run, or its result could not be read back or persisted.
+    Failed,
+}
+
+impl NativeRefresh {
+    fn outcome(self) -> RefreshOutcome {
+        match self {
+            NativeRefresh::Rotated => RefreshOutcome {
+                ok: true,
+                message: "refreshed via native codex".into(),
+                needs_relogin: false,
+            },
+            NativeRefresh::Unchanged => RefreshOutcome {
+                ok: true,
+                message: "codex left the credential unchanged — nothing to rotate".into(),
+                needs_relogin: false,
+            },
+            NativeRefresh::Failed => RefreshOutcome {
+                ok: false,
+                message: "native refresh failed".into(),
+                needs_relogin: true,
+            },
+        }
+    }
+}
+
 /// asx `attemptCodexNativeRefresh` — the doctor trick (blocking; call via spawn_blocking).
-fn codex_native_refresh_blocking(account: &str) -> bool {
+fn codex_native_refresh_blocking(account: &str) -> NativeRefresh {
     let Some(stored) = get_secret(PROVIDER, account) else {
-        return false;
+        return NativeRefresh::Failed;
     };
     let home = profile_home(PROVIDER, account);
     let auth_path = home.join("auth.json");
@@ -249,28 +288,28 @@ fn codex_native_refresh_blocking(account: &str) -> bool {
     let command_succeeded = run_codex_command(&home, &["doctor", "--summary"], 20)
         || run_codex_command(&home, &["login", "status"], 8);
     if !command_succeeded {
-        return false;
+        return NativeRefresh::Failed;
     }
 
     let Some(fresh) = std::fs::read_to_string(&auth_path).ok() else {
-        return false;
+        return NativeRefresh::Failed;
     };
     if fresh == stored {
-        return false;
+        return NativeRefresh::Unchanged;
     }
     if read_codex_auth_native().as_deref() == Some(stored.as_str())
         && write_codex_auth_native(&fresh).is_err()
     {
-        return false;
+        return NativeRefresh::Failed;
     }
-    true
+    NativeRefresh::Rotated
 }
 
-async fn attempt_codex_native_refresh(account: &str) -> bool {
+async fn attempt_codex_native_refresh(account: &str) -> NativeRefresh {
     let account = account.to_string();
     tokio::task::spawn_blocking(move || codex_native_refresh_blocking(&account))
         .await
-        .unwrap_or(false)
+        .unwrap_or(NativeRefresh::Failed)
 }
 
 /// One usage fetch. Returns `(Usage, auth_fail)`; `auth_fail` triggers the refresh+retry path.
@@ -362,7 +401,9 @@ pub(crate) async fn usage(account: &str) -> Usage {
     let account_id = codex_account_id(&data);
     let (mut result, auth_fail) = fetch_codex_usage(&token, account_id.as_deref(), &data).await;
 
-    if auth_fail && attempt_codex_native_refresh(account).await {
+    // Only a rotated credential is worth retrying with: if codex left the token as it was, the
+    // retry would repeat the same 401 it just produced.
+    if auth_fail && attempt_codex_native_refresh(account).await == NativeRefresh::Rotated {
         if let Some(r2) = get_secret(PROVIDER, account) {
             if let Ok(d2) = serde_json::from_str::<Value>(&r2) {
                 if let Some(t2) = d2
@@ -432,19 +473,7 @@ pub(crate) async fn is_expired(account: &str) -> bool {
 }
 
 pub(crate) async fn refresh(account: &str) -> RefreshOutcome {
-    if attempt_codex_native_refresh(account).await {
-        RefreshOutcome {
-            ok: true,
-            message: "refreshed via native codex".into(),
-            needs_relogin: false,
-        }
-    } else {
-        RefreshOutcome {
-            ok: false,
-            message: "native refresh failed".into(),
-            needs_relogin: true,
-        }
-    }
+    attempt_codex_native_refresh(account).await.outcome()
 }
 
 pub(crate) fn login_command() -> Option<Vec<String>> {
@@ -453,6 +482,28 @@ pub(crate) fn login_command() -> Option<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
+    use super::NativeRefresh;
+
+    #[test]
+    fn a_credential_codex_left_alone_is_not_a_refresh_failure() {
+        // codex refreshes lazily; "it did not rewrite auth.json" means the credential is still
+        // good, not that the rotation broke.
+        let unchanged = NativeRefresh::Unchanged.outcome();
+        assert!(unchanged.ok);
+        assert!(!unchanged.needs_relogin);
+
+        let rotated = NativeRefresh::Rotated.outcome();
+        assert!(rotated.ok);
+        assert!(!rotated.needs_relogin);
+
+        let failed = NativeRefresh::Failed.outcome();
+        assert!(!failed.ok);
+        assert!(
+            failed.needs_relogin,
+            "a real failure should prompt re-login"
+        );
+    }
+
     use super::*;
     use base64::Engine;
     use serde_json::json;

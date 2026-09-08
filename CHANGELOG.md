@@ -36,6 +36,14 @@ All notable user-facing changes are recorded here. The format follows
 
 ### Fixed
 
+- `aas refresh <codex-account>` no longer reports `native refresh failed` for a healthy account.
+  Codex refreshes lazily, so the CLI often runs and deliberately leaves `auth.json` alone; that was
+  collapsed into the same answer as "codex could not run at all". Accounts that `codex login status`
+  reports as `Logged in using ChatGPT` were being described as failing to refresh. The three
+  outcomes are now distinct — rotated, left unchanged, and genuinely failed — and only a rotated
+  credential is worth retrying a 401'd usage fetch with, since retrying an unchanged one just
+  repeats the same 401.
+
 - Shims no longer hijack a call that already chose its own backend. Wrappers that point Claude Code
   at a third-party Anthropic-compatible endpoint (Kimi, GLM, an internal proxy) export their own
   base URL and token and then invoke `claude` by name — which finds the shim. Re-entering through
