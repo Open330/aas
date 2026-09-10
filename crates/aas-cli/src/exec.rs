@@ -70,6 +70,29 @@ pub(crate) fn agent_bin(provider: &str) -> Option<&'static str> {
     agent_spec(provider).map(|spec| spec.bin)
 }
 
+/// Set by a shim to the absolute CLI it resolved at install time.
+pub(crate) const SHIM_BIN_ENV: &str = "AAS_SHIM_BIN";
+
+/// The recorded path, when it can still stand in for `bin`.
+///
+/// The variable describes one launch, so a nested `aas exec` that targets another agent must not
+/// inherit it: only a path that still names this agent's binary is usable.
+fn shim_bin_override(recorded: Option<PathBuf>, bin: &str) -> Option<PathBuf> {
+    let path = recorded?;
+    (path.file_name() == Some(std::ffi::OsStr::new(bin)) && path.is_file()).then_some(path)
+}
+
+/// The program to spawn for `spec`.
+///
+/// The shim's recorded path wins over looking `spec.bin` up on `PATH` again. That lookup finds
+/// whatever sits ahead of the shim, so a third-party wrapper around the same CLI (cmux wraps
+/// `codex` to inject its hook flags) runs a second time and contributes its arguments twice —
+/// which the agent rejects: "'--dangerously-bypass-hook-trust' cannot be used multiple times".
+fn agent_program(spec: &AgentSpec) -> PathBuf {
+    shim_bin_override(std::env::var_os(SHIM_BIN_ENV).map(PathBuf::from), spec.bin)
+        .unwrap_or_else(|| PathBuf::from(spec.bin))
+}
+
 fn agents_dir() -> PathBuf {
     platform::profiles_dir().join(".agents")
 }
@@ -262,6 +285,8 @@ pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyh
 
     let mut env: HashMap<String, String> = std::env::vars().collect();
     scrub_inherited_credentials(&mut env);
+    // The shim's hand-off covers this launch only; a nested run resolves its own agent.
+    env.remove(SHIM_BIN_ENV);
     let secret = secure_store::get_secret(&profile_provider, &account_name);
 
     // Claude long-lived token → env auth (same-provider claude only).
@@ -353,7 +378,7 @@ pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyh
     }
 
     // Spawn the native binary (interactive; stdio inherited).
-    let mut cmd = tokio::process::Command::new(spec.bin);
+    let mut cmd = tokio::process::Command::new(agent_program(&spec));
     cmd.env_clear().envs(&env).args(&forward);
     let code = match cmd.spawn() {
         Ok(mut child) => {
@@ -501,5 +526,25 @@ mod tests {
         assert!(!env.contains_key("OPENAI_API_KEY"));
         assert!(!env.contains_key("AAS_VAULT_PASSPHRASE"));
         assert!(!env.contains_key("CODEX_HOME"));
+    }
+
+    #[test]
+    fn shim_handoff_is_used_only_for_the_agent_it_names() {
+        let dir = std::env::temp_dir().join(format!("aas-exec-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let codex = dir.join("codex");
+        std::fs::write(&codex, "").unwrap();
+
+        assert_eq!(
+            shim_bin_override(Some(codex.clone()), "codex"),
+            Some(codex.clone())
+        );
+        // A nested run that launches a different agent must fall back to a PATH lookup.
+        assert_eq!(shim_bin_override(Some(codex), "claude"), None);
+        // So must a stale path left by an uninstalled CLI.
+        assert_eq!(shim_bin_override(Some(dir.join("claude")), "claude"), None);
+        assert_eq!(shim_bin_override(None, "codex"), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

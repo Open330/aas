@@ -6,7 +6,7 @@
 //! for it. A shim closes the gap uniformly — the bare command re-enters through
 //! `aas exec <active>`, which already knows how to hand each credential shape to the agent.
 
-use crate::exec::agent_bin;
+use crate::exec::{agent_bin, SHIM_BIN_ENV};
 use crate::ui;
 use aas_core::naming::normalize_provider_key;
 use aas_core::platform::asx_config_dir;
@@ -83,13 +83,27 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
+/// True when `dir` sits inside the system temp directory.
+fn under_temp_dir(dir: &Path) -> bool {
+    let tmp = std::env::temp_dir();
+    match (dir.canonicalize(), tmp.canonicalize()) {
+        (Ok(dir), Ok(tmp)) => dir.starts_with(tmp),
+        _ => dir.starts_with(&tmp),
+    }
+}
+
 /// Locate the provider's real CLI, skipping our own shim directory so a reinstall can never
 /// point a shim at itself.
+///
+/// The system temp directory is skipped for the same reason: wrappers that re-launch the agent
+/// install a per-session copy of it there (cmux wraps `codex` this way), so recording one both
+/// sends every launch back through the wrapper and goes stale the moment that directory is
+/// cleaned up.
 fn real_binary(bin: &str) -> Option<PathBuf> {
     let shims = shim_dir();
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
-        .filter(|dir| !same_dir(dir, &shims))
+        .filter(|dir| !same_dir(dir, &shims) && !under_temp_dir(dir))
         .map(|dir| dir.join(bin))
         .find(|candidate| is_executable(candidate))
 }
@@ -130,6 +144,15 @@ fn shim_body(provider: &str, real: &Path, aas: &Path) -> String {
     s.push_str("fi\n\n");
     s.push_str("AAS_SHIM=1\n");
     s.push_str("export AAS_SHIM\n");
+    s.push_str(
+        "# Hand the resolved CLI to `aas exec` so it does not look the agent up on PATH again:\n",
+    );
+    s.push_str(
+        "# a third-party wrapper around the same CLI sits ahead of this shim and would run\n",
+    );
+    s.push_str("# a second time, prepending its own flags twice.\n");
+    s.push_str(&format!("{}={real}\n", SHIM_BIN_ENV));
+    s.push_str(&format!("export {}\n", SHIM_BIN_ENV));
     s.push_str("# `--` forwards every argument verbatim, so agent flags (-d/--debug/-b) are not\n");
     s.push_str("# eaten by aas's own exec options.\n");
     s.push_str(&format!("exec {aas} exec \"$active\" -- \"$@\"\n"));
@@ -234,7 +257,9 @@ fn installed_shims(dir: &Path) -> Vec<&'static str> {
 /// True when the shim directory comes before the real CLI of every shim we installed.
 ///
 /// Only installed shims count: a provider we do not shim may legitimately sit earlier on PATH,
-/// and letting it drag the answer to "no" reports a broken setup that works fine.
+/// and letting it drag the answer to "no" reports a broken setup that works fine. Per-session
+/// wrappers under the temp directory are ignored for the same reason — one intercepts the name
+/// first, but it re-launches the agent and so still arrives here.
 fn path_has_precedence(dir: &Path) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
@@ -244,10 +269,9 @@ fn path_has_precedence(dir: &Path) -> bool {
         return false;
     };
     installed_shims(dir).into_iter().all(|bin| {
-        match entries
-            .iter()
-            .position(|entry| !same_dir(entry, dir) && is_executable(&entry.join(bin)))
-        {
+        match entries.iter().position(|entry| {
+            !same_dir(entry, dir) && !under_temp_dir(entry) && is_executable(&entry.join(bin))
+        }) {
             Some(real_at) => shim_at < real_at,
             None => true,
         }
@@ -281,4 +305,32 @@ pub fn status() -> anyhow::Result<()> {
         println!("  {bin:<8} → {real}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn body_hands_the_resolved_binary_to_exec() {
+        let body = shim_body(
+            "codex",
+            Path::new("/opt/bin/codex"),
+            Path::new("/usr/local/bin/aas"),
+        );
+        assert!(body.contains("AAS_SHIM_BIN='/opt/bin/codex'\nexport AAS_SHIM_BIN\n"));
+        // Set after every fall-through exec, so only the `aas exec` hand-off sees it.
+        let handoff = body.find("AAS_SHIM_BIN=").unwrap();
+        assert!(handoff > body.rfind("exec '/opt/bin/codex' \"$@\"").unwrap());
+        assert!(handoff < body.find("exec '/usr/local/bin/aas' exec").unwrap());
+    }
+
+    #[test]
+    fn per_session_wrappers_are_not_mistaken_for_an_installation() {
+        let wrapper = std::env::temp_dir().join("aas-shim-test-wrapper");
+        std::fs::create_dir_all(&wrapper).unwrap();
+        assert!(under_temp_dir(&wrapper));
+        assert!(!under_temp_dir(Path::new("/usr/local/bin")));
+        let _ = std::fs::remove_dir_all(&wrapper);
+    }
 }
