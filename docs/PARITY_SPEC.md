@@ -275,9 +275,12 @@ to safe effort tiers. Live model catalogs are fetched once per proxy process.
   cannot materialize every credential shape: Claude accepts a long-lived `setup-token` credential
   only via `CLAUDE_CODE_OAUTH_TOKEN`, and reports "Not logged in" when it is placed in the Keychain
   item or `.credentials.json` instead. Install resolves the real binary while skipping the shim
-  directory, the wrapper guards re-entry with `AAS_SHIM` (since `aas exec` resolves the agent
-  through `PATH`), and arguments are forwarded after `--` so flags both sides define reach the
-  agent. No active account, or an unavailable `aas`, falls through to the real CLI.
+  directory and the system temp directory (where per-session agent wrappers live), the wrapper
+  guards re-entry with `AAS_SHIM` and hands that binary to `aas exec` as `AAS_SHIM_BIN` (looking
+  the agent up on `PATH` again would re-enter a third-party wrapper sitting ahead of the shim,
+  which then prepends its own flags a second time), and arguments are forwarded after `--` so
+  flags both sides define reach the agent. No active account, or an unavailable `aas`, falls
+  through to the real CLI.
 - `active <provider>` prints the active account name on stdout and exits 1 when unset — the
   script-facing form of `status`.
 - Parallel `list -u` / `usage` (fan-out fetch, ordered single render).
