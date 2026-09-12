@@ -40,6 +40,13 @@ aas reads my existing asx state, so my current logins should already appear.
 
 ## Install
 
+Homebrew (macOS Apple Silicon/Intel, Linux `x86_64`/`arm64`) from the
+[Open330 tap](https://github.com/Open330/homebrew-tap):
+
+```bash
+brew install open330/tap/aas
+```
+
 macOS / Linux (the installed `aas` binary is static; the secure installer also requires the
 [GitHub CLI](https://cli.github.com/) to verify release provenance):
 
