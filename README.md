@@ -250,3 +250,6 @@ community expectations, and [CHANGELOG.md](CHANGELOG.md) for release history.
 
 [MIT](LICENSE). Bundled provider logos are trademarks of their respective owners and are used
 only for identification.
+
+---
+<p align="center"><sub>Part of <a href="https://github.com/Open330">Open330</a> · open source tools for AI-agent workflows · <a href="https://open330.github.io">open330.github.io</a></sub></p>
