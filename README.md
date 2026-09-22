@@ -95,6 +95,7 @@ aas switch codex personal
 
 # Run the native agent under a profile, without changing your default login
 aas exec work -- --version
+aas exec codex                             # a provider name runs its active account
 
 # Cross-provider: run Claude's UI on the codex backend (via the local proxy)
 aas exec personal.codex claude
@@ -135,6 +136,8 @@ ssh -t jiun-mini 'aas import ~/aas-vault.age'
   Prepend the directory it prints to `PATH`. Because the active account is resolved per
   invocation, it also cannot drift away from a written-once native file.
 - **`exec <name>`** runs the agent under a profile-scoped home without touching your default.
+  `<name>` is a stored account name, or a provider name — `aas exec codex` runs whatever
+  `aas status` lists as active for Codex.
 - **`export <name>`** prints the env (`CODEX_HOME=…`, `ZAI_API_KEY=…`, …) to activate a
   profile in the current shell only.
 
@@ -153,7 +156,7 @@ ssh -t jiun-mini 'aas import ~/aas-vault.age'
 | `login [provider] [name]` `--long-lived`, `--device-auth`/`--headless`, `--endpoint <id>`, *share flags* | Login and store a new **isolated** profile. `--long-lived` uses Claude's `setup-token`; `--device-auth` uses a browserless device-code flow; `--endpoint` picks the API host for providers that run several (kimi). |
 | `load [provider] [name]` | Snapshot the **currently logged-in** credential as a **system** profile (auto-scans providers if none given). |
 | `switch <provider> <name>` or `switch <account>` (alias `s`) | Make a stored account the active credential. The one-argument form resolves a globally unique stored account name. |
-| `exec <name> [target] [args…]` (alias `e`) | Run the native CLI under a profile. If `target` ≠ the profile's provider, requests route through the local **ASX Proxy** (cross-provider). `-b` full-access bypass; cross-run share flags `-s/-i/--share/--isolate/--keep-context`; `--` passes the rest to the agent. |
+| `exec <name> [target] [args…]` (alias `e`) | Run the native CLI under a profile. `<name>` is a stored account, or a provider whose active account should run (`aas exec codex`). If `target` ≠ the profile's provider, requests route through the local **ASX Proxy** (cross-provider). `-b` full-access bypass; cross-run share flags `-s/-i/--share/--isolate/--keep-context`; `--` passes the rest to the agent. |
 | `export [name]` or `export <provider> <name>` `--all`, `--vault`, `-o <file>`, `--shell posix\|fish\|powershell` | Print shell env to use a profile in the current shell (`eval "$(aas export <name>)"`), or `--all` for a portable bundle of **every account + credential**. `--vault` encrypts it with an age/scrypt passphrase. |
 | `sharing <name>` *share flags* | Show or change which state (sessions/skills/agents/hooks/settings) an isolated profile shares from the provider's home. |
 | `rename <from> <to>` | Rename an account (moves its profile home + markers). |
