@@ -5,7 +5,7 @@ commits `fa24cfa` and `0e819cd`). Every
 `file:line` points into `/Users/june/personal/asx/src/`. This is the port checklist; wire
 contracts (endpoints/headers/JSON shapes) must **not** drift.
 
-This document separates inherited parity from aas-only extensions. As of v0.1.11, the extensions
+This document separates inherited parity from aas-only extensions. As of v0.1.12, the extensions
 are deterministic account sorting, the typed `usage --json` integration contract, portable
 credential export/import, optional passphrase-encrypted vault bundles, and the `shim`/`active`
 pair that puts the bare agent CLI on the active account; see §J.

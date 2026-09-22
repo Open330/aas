@@ -5,6 +5,8 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-09-22
+
 ### Added
 
 - `aas shim install` puts a small wrapper for each agent CLI in `<config>/shims`, so a bare
