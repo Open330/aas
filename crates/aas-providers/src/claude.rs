@@ -10,7 +10,7 @@ use aas_core::keychain::{
     claude_keychain_service, credential_fits_security_cli, delete_credential, read_credential,
     write_credential,
 };
-use aas_core::platform::{claude_config_dir, claude_credentials_path};
+use aas_core::platform::{claude_credentials_path, claude_scoped_config_dir};
 use aas_core::secure_store::{get_secret, set_secret, write_restricted_file};
 use aas_core::usage::{Meter, Usage};
 use chrono::{SecondsFormat, TimeZone, Utc};
@@ -269,18 +269,21 @@ pub(crate) fn build_claude_usage_meters(usage: &Value) -> Vec<Meter> {
 // Live system credential (keychain / file).
 // ---------------------------------------------------------------------------
 
+/// Whether Claude's Keychain service is scoped to a config directory.
+///
+/// `claude_scoped_config_dir` resolves the same way `claude_credentials_path` does, so the two
+/// never disagree about which install is being read: a `CLAUDE_CONFIG_DIR` inherited from an
+/// agent aas launched names a profile home, and the native install behind it is the unscoped one.
 fn scoped_config() -> bool {
-    std::env::var("CLAUDE_CONFIG_DIR")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
+    claude_scoped_config_dir().is_some()
 }
 
 /// asx `readCurrentCredentials`.
 fn read_current_credentials() -> Option<String> {
     let file_path = claude_credentials_path();
     if cfg!(target_os = "macos") {
-        if scoped_config() {
-            let svc = claude_keychain_service(Some(&claude_config_dir()));
+        if let Some(dir) = claude_scoped_config_dir() {
+            let svc = claude_keychain_service(Some(&dir));
             if let Some(s) = read_credential(&svc) {
                 return Some(s);
             }
@@ -304,11 +307,7 @@ fn read_current_credentials() -> Option<String> {
 /// asx `writeActiveCredentials`.
 fn write_active_credentials(raw: &str) -> anyhow::Result<()> {
     if cfg!(target_os = "macos") {
-        let svc = if scoped_config() {
-            claude_keychain_service(Some(&claude_config_dir()))
-        } else {
-            claude_keychain_service(None)
-        };
+        let svc = claude_keychain_service(claude_scoped_config_dir().as_deref());
         let file = claude_credentials_path();
         let keychain_value = read_credential(&svc);
         if keychain_value.as_deref() == Some(raw) {
@@ -554,6 +553,11 @@ pub(crate) async fn current_credential() -> Option<String> {
     read_current_credentials()
 }
 
+/// The credential in Claude's native store, ignoring `CLAUDE_CODE_OAUTH_TOKEN`.
+pub(crate) fn native_credential() -> Option<String> {
+    read_current_credentials()
+}
+
 pub(crate) async fn current_email() -> Option<String> {
     if let Ok(tok) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN") {
         if !tok.is_empty() {
@@ -615,8 +619,8 @@ pub(crate) async fn switch_to(account: &str) -> anyhow::Result<()> {
 
 pub(crate) async fn clear_current() -> anyhow::Result<()> {
     if cfg!(target_os = "macos") {
-        let services: Vec<String> = if scoped_config() {
-            vec![claude_keychain_service(Some(&claude_config_dir()))]
+        let services: Vec<String> = if let Some(dir) = claude_scoped_config_dir() {
+            vec![claude_keychain_service(Some(&dir))]
         } else {
             vec![
                 claude_keychain_service(None),

@@ -36,6 +36,28 @@ All notable user-facing changes are recorded here. The format follows
 
 ### Fixed
 
+- `aas exec <account>` no longer drops the profile home when the caller's shell already points at
+  that same profile. `exec` exports `CLAUDE_CONFIG_DIR` (and `CODEX_HOME`, `GROK_HOME`,
+  `PI_CODING_AGENT_DIR`) to scope the agent, so every shell opened inside an agent inherits it —
+  and a tmux server started in one copies it into the global environment of every shell it will
+  ever spawn afterwards. On the next run the account's *own* value came back in, aas read the
+  profile's credential as the live system credential, concluded the account was already the system
+  profile, and launched the agent with no home at all. Claude then read `~/.claude`, where the
+  session was not, and answered `No conversation found`. A provider home that points inside aas's
+  own profiles root is now understood as one aas handed out, never as the user's install, so the
+  same account exec'd from inside itself gets its profile back. This also stops `aas list` from
+  marking such an account "current in system", `aas switch`/`aas load` from reading and writing the
+  profile's Keychain item instead of the system one, and — the sharpest of them — `aas exec`
+  against a *different* account from re-pointing that account's shared-state symlinks
+  (`projects/`, `todos/`, `settings.json`, …) at the inherited profile rather than `~/.claude`.
+- A system-profile launch keeps a provider home the caller exported themselves. `exec` clears
+  every inherited agent home so a parent's profile cannot leak into the child, then installs the
+  one it chose; a system profile installs none, which silently erased a custom install path too.
+- An account whose credential is only live through an ambient `CLAUDE_CODE_OAUTH_TOKEN` is no
+  longer mistaken for the system profile. `exec` injects that variable itself, so a shell opened
+  inside an aas-launched agent carries the very token the next launch compares against. Whether an
+  account has been materialized into the provider's native store is now answered by that store
+  alone.
 - `aas refresh <codex-account>` no longer reports `native refresh failed` for a healthy account.
   Codex refreshes lazily, so the CLI often runs and deliberately leaves `auth.json` alone; that was
   collapsed into the same answer as "codex could not run at all". Accounts that `codex login status`

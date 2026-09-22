@@ -3,7 +3,9 @@
 //! `dirs::config_dir()` matches asx's `getConfigBaseDir()` exactly on every platform:
 //! win `%APPDATA%`, macOS `~/Library/Application Support`, linux `$XDG_CONFIG_HOME | ~/.config`.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 pub fn home_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
@@ -49,15 +51,73 @@ fn home_dot_dir(name: &str) -> PathBuf {
     home_dir().join(format!(".{name}"))
 }
 
-fn env_home_or(var: &str, dot: &str) -> PathBuf {
-    match std::env::var(var) {
-        Ok(v) if !v.is_empty() => expand_home(&v),
-        _ => home_dot_dir(dot),
+/// Provider homes this process picked for itself, keyed by the variable that names them.
+///
+/// `aas login` signs in *into* a profile home and then reads the fresh credential back out of
+/// it, so that read has to resolve to the profile and not to the system install. An override
+/// records the choice this process made, which an inherited variable cannot express.
+fn home_overrides() -> &'static Mutex<HashMap<String, PathBuf>> {
+    static OVERRIDES: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
+    OVERRIDES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn lock_overrides() -> std::sync::MutexGuard<'static, HashMap<String, PathBuf>> {
+    home_overrides()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Resolve `var` to `dir` for the rest of this process, until [`clear_home_override`].
+pub fn set_home_override(var: &str, dir: &Path) {
+    lock_overrides().insert(var.to_string(), dir.to_path_buf());
+}
+
+pub fn clear_home_override(var: &str) {
+    lock_overrides().remove(var);
+}
+
+/// True when `dir` sits inside aas's own profiles root.
+///
+/// `aas exec` points the agent at a profile home through the provider's home variable, so every
+/// shell opened inside that agent inherits it — and a tmux server started there copies it into
+/// the global environment of every shell it will ever spawn. The value then comes back to the
+/// next `aas` run describing a directory aas chose, never the user's native install, so
+/// resolving a provider's system home has to look past it.
+pub fn is_managed_home(dir: &Path) -> bool {
+    let profiles = profiles_dir();
+    if dir.starts_with(&profiles) {
+        return true;
     }
+    match (dir.canonicalize(), profiles.canonicalize()) {
+        (Ok(dir), Ok(profiles)) => dir.starts_with(profiles),
+        _ => false,
+    }
+}
+
+/// The home named for `var` by this process's override or the caller's own environment.
+/// `None` means the provider's default applies — including when the variable only carries a
+/// profile home aas itself handed out.
+fn chosen_home(var: &str) -> Option<PathBuf> {
+    if let Some(dir) = lock_overrides().get(var) {
+        return Some(dir.clone());
+    }
+    let raw = std::env::var(var).ok().filter(|v| !v.is_empty())?;
+    let dir = expand_home(&raw);
+    (!is_managed_home(&dir)).then_some(dir)
+}
+
+fn env_home_or(var: &str, dot: &str) -> PathBuf {
+    chosen_home(var).unwrap_or_else(|| home_dot_dir(dot))
 }
 
 pub fn claude_config_dir() -> PathBuf {
     env_home_or("CLAUDE_CONFIG_DIR", "claude")
+}
+
+/// `CLAUDE_CONFIG_DIR` as the Claude install actually sees it. `Some` means the Keychain service
+/// is scoped to that directory; `None` means the plain, unscoped service.
+pub fn claude_scoped_config_dir() -> Option<PathBuf> {
+    chosen_home("CLAUDE_CONFIG_DIR")
 }
 
 pub fn claude_credentials_path() -> PathBuf {
@@ -82,10 +142,7 @@ pub fn grok_auth_path() -> PathBuf {
 
 /// Pi coding agent config root. Unlike the other agents this is `~/.pi/agent`, not `~/.pi`.
 pub fn pi_agent_dir() -> PathBuf {
-    match std::env::var("PI_CODING_AGENT_DIR") {
-        Ok(v) if !v.is_empty() => expand_home(&v),
-        _ => home_dot_dir("pi").join("agent"),
-    }
+    chosen_home("PI_CODING_AGENT_DIR").unwrap_or_else(|| home_dot_dir("pi").join("agent"))
 }
 
 pub fn pi_auth_path() -> PathBuf {
@@ -135,6 +192,38 @@ mod tests {
         let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         std::env::set_var("AAS_CONFIG_DIR", "/tmp/aas-test-cfg");
         assert_eq!(asx_config_dir(), PathBuf::from("/tmp/aas-test-cfg"));
+        std::env::remove_var("AAS_CONFIG_DIR");
+    }
+
+    #[test]
+    fn inherited_profile_home_is_not_the_system_home() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("AAS_CONFIG_DIR", "/tmp/aas-test-managed-home");
+        let profile = profiles_dir().join("claude-someone_claude");
+
+        // What `aas exec` exported for an earlier launch, inherited through a shell or a tmux
+        // server started inside it: a profile aas chose, not the user's install.
+        std::env::set_var("CLAUDE_CONFIG_DIR", &profile);
+        assert!(is_managed_home(&profile));
+        assert_eq!(claude_config_dir(), home_dir().join(".claude"));
+        assert_eq!(claude_scoped_config_dir(), None);
+        assert_eq!(system_home_for("claude"), Some(home_dir().join(".claude")));
+
+        // A home the caller picked for themselves still decides where the install lives.
+        std::env::set_var("CLAUDE_CONFIG_DIR", "/tmp/my-own-claude");
+        assert_eq!(claude_config_dir(), PathBuf::from("/tmp/my-own-claude"));
+        assert_eq!(
+            claude_scoped_config_dir(),
+            Some(PathBuf::from("/tmp/my-own-claude"))
+        );
+
+        // An override is this process's own decision (`aas login`), profile home or not.
+        set_home_override("CLAUDE_CONFIG_DIR", &profile);
+        assert_eq!(claude_config_dir(), profile);
+        assert_eq!(claude_scoped_config_dir(), Some(profile));
+        clear_home_override("CLAUDE_CONFIG_DIR");
+
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
         std::env::remove_var("AAS_CONFIG_DIR");
     }
 

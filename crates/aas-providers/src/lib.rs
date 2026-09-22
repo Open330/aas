@@ -121,6 +121,19 @@ impl Provider {
         }
     }
 
+    /// The credential the provider's *native* store holds, ignoring an ambient environment
+    /// override.
+    ///
+    /// `current_credential` answers "what would authenticate right now", which an exported
+    /// `CLAUDE_CODE_OAUTH_TOKEN` can decide on its own. Asking instead whether an account has
+    /// been materialized into the native store needs the store alone.
+    pub async fn native_credential(&self) -> Option<String> {
+        match self {
+            Provider::Claude => claude::native_credential(),
+            _ => self.current_credential().await,
+        }
+    }
+
     /// Email of the currently active login (used for auto-naming / metadata).
     pub async fn current_email(&self) -> Option<String> {
         match self {
