@@ -3,6 +3,7 @@
 
 use crate::ui;
 use aas_core::naming::{derive_account_name, normalize_provider_key, profile_home};
+use aas_core::platform;
 use aas_core::secure_store;
 use aas_core::store::AccountStore;
 use aas_providers::Provider;
@@ -115,18 +116,15 @@ async fn login_in_home(
         anyhow::bail!(message);
     }
 
-    // Load the newly logged-in session, with the home env var pointed at the profile home.
-    let restore = env.map(|(ev, h)| {
-        let prev = std::env::var(ev).ok();
-        std::env::set_var(ev, h);
-        (ev, prev)
-    });
+    // Load the newly logged-in session out of the profile home, not the system install.
+    // An override, rather than the environment variable itself: an inherited value naming a
+    // profile home is discounted when a provider home is resolved, and this one is deliberate.
+    if let Some((ev, home)) = env {
+        platform::set_home_override(ev, home);
+    }
     let res = provider.load_current(target, None).await;
-    if let Some((ev, prev)) = restore {
-        match prev {
-            Some(p) => std::env::set_var(ev, p),
-            None => std::env::remove_var(ev),
-        }
+    if let Some((ev, _)) = env {
+        platform::clear_home_override(ev);
     }
     res?;
     Ok(Some(target.to_string()))

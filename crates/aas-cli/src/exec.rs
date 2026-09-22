@@ -242,10 +242,35 @@ fn account_endpoint(store: &AccountStore, provider: &str, name: &str) -> Option<
         .and_then(|record| record.endpoint().map(str::to_string))
 }
 
+/// The credential in the provider's native store, if the adapter can read one.
+async fn native_credential(provider: &str) -> Option<String> {
+    match get_adapter(provider) {
+        Some(p) => p.native_credential().await,
+        None => None,
+    }
+}
+
+/// Is this account's credential the one the provider's native store already holds?
+///
+/// Only the native store counts. `aas exec` injects `CLAUDE_CODE_OAUTH_TOKEN` itself, so a shell
+/// opened inside one aas-launched agent carries the very token the next launch is about to
+/// compare against — and the account would look like the system profile purely because it was
+/// launched once already, losing its own home.
 async fn is_current_system_profile(provider: &str, name: &str) -> bool {
     let stored = secure_store::get_secret(provider, name);
-    let live = live_credential(provider).await;
+    let live = native_credential(provider).await;
     matches!((stored, live), (Some(s), Some(l)) if s == l)
+}
+
+/// `raw`, the caller's own value for a provider home, unless it only names a profile aas handed
+/// out.
+///
+/// `scrub_inherited_credentials` clears every agent home so a parent's profile cannot leak into
+/// the child. A system-profile launch installs none of its own, so without this the agent would
+/// lose a home the caller had deliberately exported and fall back to the default dot-directory.
+fn caller_system_home(raw: Option<String>) -> Option<String> {
+    let raw = raw.filter(|v| !v.is_empty())?;
+    (!platform::is_managed_home(&platform::expand_home(&raw))).then_some(raw)
 }
 
 pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyhow::Result<()> {
@@ -311,6 +336,9 @@ pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyh
                         "{profile_provider}/{account_name} is a system profile but is not current in system. Run: aas switch {account_name}"
                     );
                 }
+            }
+            if let Some(dir) = caller_system_home(std::env::var(spec.home_env).ok()) {
+                env.insert(spec.home_env.into(), dir);
             }
         } else {
             let home = profile_home(&profile_provider, &account_name);
@@ -509,6 +537,23 @@ mod tests {
         use std::os::unix::process::ExitStatusExt;
         let status = std::process::ExitStatus::from_raw(libc::SIGTERM);
         assert_eq!(exit_status_code(status), 128 + libc::SIGTERM);
+    }
+
+    #[test]
+    fn only_a_home_the_caller_chose_survives_a_system_profile_launch() {
+        let profile = platform::profiles_dir().join("claude-someone_claude");
+        let inherited = profile.display().to_string();
+
+        // Left over from an earlier `aas exec` — dropping it is the point.
+        assert_eq!(caller_system_home(Some(inherited)), None);
+        assert_eq!(caller_system_home(Some(String::new())), None);
+        assert_eq!(caller_system_home(None), None);
+
+        // The caller's own install has to reach the agent.
+        assert_eq!(
+            caller_system_home(Some("/opt/claude-home".to_string())),
+            Some("/opt/claude-home".to_string())
+        );
     }
 
     #[test]
