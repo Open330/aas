@@ -276,10 +276,21 @@ fn caller_system_home(raw: Option<String>) -> Option<String> {
     (!platform::is_managed_home(&platform::expand_home(&raw))).then_some(raw)
 }
 
+/// The account a run targets, or an error that says which of the two lookups failed.
+fn resolve_target(store: &AccountStore, name: &str) -> anyhow::Result<aas_core::AccountRecord> {
+    if let Some(account) = store.resolve_run_target(name)? {
+        return Ok(account);
+    }
+    if let Some(provider) = normalize_provider(name) {
+        anyhow::bail!(
+            "No active account for provider '{provider}'. Name an account, or run: aas switch <account>"
+        );
+    }
+    anyhow::bail!("Account not found: {name}");
+}
+
 pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyhow::Result<()> {
-    let Some(acct) = store.get_by_name(name)? else {
-        anyhow::bail!("Account not found: {name}");
-    };
+    let acct = resolve_target(store, name)?;
     let profile_provider = acct.provider.clone();
     let account_name = acct.name.clone();
 
@@ -478,9 +489,7 @@ async fn cleanup(proxy: Option<aas_proxy::ProxyHandle>, cross_home: &Option<Path
 }
 
 pub async fn cmd_proxy(store: &AccountStore, name: &str, frontend: &str) -> anyhow::Result<()> {
-    let Some(acct) = store.get_by_name(name)? else {
-        anyhow::bail!("Account not found: {name}");
-    };
+    let acct = resolve_target(store, name)?;
     let backend_provider = acct.provider.clone();
     let frontend_norm = normalize_provider(frontend).unwrap_or_else(|| frontend.to_lowercase());
     if !matches!(frontend_norm.as_str(), "claude" | "codex" | "grok" | "pi") {

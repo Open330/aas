@@ -5,6 +5,14 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `aas exec <provider>` (and the bare `aas <provider>`, and `aas proxy <provider> <frontend>`) runs
+  that provider's active account, so `aas exec codex` no longer answers `Account not found: codex`
+  for a name the rest of the CLI already understands. A stored account whose name happens to match
+  a provider still wins, so an account called `codex` keeps addressing that account; a provider
+  with no active account says so rather than guessing at one.
+
 ### Fixed
 
 - A shim's re-entry guard no longer reaches the agent it launched. The shim exports `AAS_SHIM` so
