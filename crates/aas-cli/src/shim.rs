@@ -104,8 +104,11 @@ fn shim_body(provider: &str, real: &Path, aas: &Path) -> String {
     s.push_str(
         "# Re-entry guard: `aas exec` resolves the agent through PATH and would otherwise\n",
     );
-    s.push_str("# find this shim again, recursing forever.\n");
+    s.push_str("# find this shim again, recursing forever. The guard is dropped before the\n");
+    s.push_str("# real CLI starts so nothing it spawns (shells, tmux/rmux servers, nested\n");
+    s.push_str("# agents) inherits it and silently bypasses account routing later.\n");
     s.push_str("if [ -n \"${AAS_SHIM:-}\" ]; then\n");
+    s.push_str("  unset AAS_SHIM\n");
     s.push_str(&format!("  exec {real} \"$@\"\n"));
     s.push_str("fi\n\n");
     s.push_str(
