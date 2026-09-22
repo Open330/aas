@@ -68,23 +68,29 @@ fn grok_bearer(raw: &str) -> Option<String> {
     }
 }
 
-pub fn cmd_export(store: &AccountStore, name: &str, shell: Shell) -> anyhow::Result<()> {
-    let Some(acct) = store.get_by_name(name)? else {
-        anyhow::bail!("Account not found: {name}");
-    };
-    let key = normalize_provider_key(&acct.provider);
-    let system = acct.profile_type == Some(ProfileType::System);
-    let home = profile_home(&acct.provider, &acct.name)
-        .display()
-        .to_string();
-    let secret = secure_store::get_secret(&acct.provider, &acct.name);
-
-    let mut vars: Vec<(&str, String)> = Vec::new();
-    match key.as_str() {
+/// The variables a shell needs in order to *be* `<provider>/<name>`.
+///
+/// Whatever `aas exec` installs for the same account, since both answer the same question — a
+/// credential the agent takes from the environment where one exists, and the profile home, which
+/// is where the session itself lives. A system profile uses the provider's default home and so
+/// names none.
+fn profile_env_vars(
+    key: &str,
+    system: bool,
+    home: String,
+    secret: Option<&str>,
+) -> Vec<(&'static str, String)> {
+    let mut vars: Vec<(&'static str, String)> = Vec::new();
+    match key {
         "claude" => {
-            if let Some(tok) = secret.as_deref().and_then(claude_long_lived_token) {
+            // A long-lived token reaches Claude Code only through the environment, and wins over
+            // whatever the config dir holds — so it accompanies the home rather than replacing it.
+            // Exporting it alone used to leave the agent authenticated as the account while
+            // writing its history and settings into `~/.claude`.
+            if let Some(tok) = secret.and_then(claude_long_lived_token) {
                 vars.push(("CLAUDE_CODE_OAUTH_TOKEN", tok));
-            } else if !system {
+            }
+            if !system {
                 vars.push(("CLAUDE_CONFIG_DIR", home));
             }
         }
@@ -97,26 +103,41 @@ pub fn cmd_export(store: &AccountStore, name: &str, shell: Shell) -> anyhow::Res
             if !system {
                 vars.push(("GROK_HOME", home));
             }
-            if let Some(k) = secret.as_deref().and_then(grok_bearer) {
+            if let Some(k) = secret.and_then(grok_bearer) {
                 vars.push(("XAI_API_KEY", k));
             }
         }
         "zai" => {
-            if let Some(k) = &secret {
-                vars.push(("ZAI_API_KEY", k.clone()));
-                vars.push(("ZAI_KEY", k.clone()));
+            if let Some(k) = secret {
+                vars.push(("ZAI_API_KEY", k.to_string()));
+                vars.push(("ZAI_KEY", k.to_string()));
             }
         }
         "kimi" => {
-            if let Some(k) = &secret {
+            if let Some(k) = secret {
                 // Both names are in circulation: Kimi's own docs use the Moonshot spelling.
-                vars.push(("KIMI_API_KEY", k.clone()));
-                vars.push(("MOONSHOT_API_KEY", k.clone()));
+                vars.push(("KIMI_API_KEY", k.to_string()));
+                vars.push(("MOONSHOT_API_KEY", k.to_string()));
             }
         }
         "pi" if !system => vars.push(("PI_CODING_AGENT_DIR", home)),
         _ => {}
     }
+    vars
+}
+
+pub fn cmd_export(store: &AccountStore, name: &str, shell: Shell) -> anyhow::Result<()> {
+    let Some(acct) = store.get_by_name(name)? else {
+        anyhow::bail!("Account not found: {name}");
+    };
+    let key = normalize_provider_key(&acct.provider);
+    let system = acct.profile_type == Some(ProfileType::System);
+    let home = profile_home(&acct.provider, &acct.name)
+        .display()
+        .to_string();
+    let secret = secure_store::get_secret(&acct.provider, &acct.name);
+
+    let vars = profile_env_vars(&key, system, home, secret.as_deref());
 
     if vars.is_empty() {
         if system {
@@ -254,5 +275,69 @@ pub fn run(
             ui::hint("e.g.  aas export codex work   |   aas export --all");
             std::process::exit(2);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LONG_LIVED: &str = r#"{"type":"claude-code-oauth-token","token":"sk-ant-oat01-test"}"#;
+    const OAUTH: &str = r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat02-test"}}"#;
+
+    fn names(vars: &[(&'static str, String)]) -> Vec<&'static str> {
+        vars.iter().map(|(k, _)| *k).collect()
+    }
+
+    #[test]
+    fn a_long_lived_claude_token_ships_with_the_profile_home() {
+        let vars = profile_env_vars("claude", false, "/p/claude-a".into(), Some(LONG_LIVED));
+        assert_eq!(
+            names(&vars),
+            ["CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR"],
+            "the token says who you are; the home says where the session lives"
+        );
+        assert_eq!(vars[0].1, "sk-ant-oat01-test");
+        assert_eq!(vars[1].1, "/p/claude-a");
+    }
+
+    #[test]
+    fn a_claude_system_profile_keeps_the_providers_default_home() {
+        assert_eq!(
+            names(&profile_env_vars(
+                "claude",
+                true,
+                "/p/claude-a".into(),
+                Some(LONG_LIVED)
+            )),
+            ["CLAUDE_CODE_OAUTH_TOKEN"]
+        );
+        assert!(profile_env_vars("claude", true, "/p/claude-a".into(), Some(OAUTH)).is_empty());
+    }
+
+    #[test]
+    fn an_ordinary_claude_credential_travels_in_the_profile_home() {
+        assert_eq!(
+            names(&profile_env_vars(
+                "claude",
+                false,
+                "/p/claude-a".into(),
+                Some(OAUTH)
+            )),
+            ["CLAUDE_CONFIG_DIR"]
+        );
+    }
+
+    #[test]
+    fn grok_already_pairs_its_home_with_its_key() {
+        assert_eq!(
+            names(&profile_env_vars(
+                "grok",
+                false,
+                "/p/grok-a".into(),
+                Some(r#"{"key":"xai-test"}"#)
+            )),
+            ["GROK_HOME", "XAI_API_KEY"]
+        );
     }
 }
