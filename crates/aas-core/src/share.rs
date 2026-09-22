@@ -314,9 +314,92 @@ pub fn link_shared_state(
 ) {
 }
 
+/// Point a Codex profile home at the package root the native install actually lives in.
+///
+/// Codex's installer derives where the standalone package goes from `CODEX_HOME`
+/// (`$CODEX_HOME/packages/standalone`) while always writing the launcher to `~/.local/bin`. Run
+/// `codex update` from inside `aas exec` and the update therefore lands in that one account's
+/// profile, and the launcher every other account shares is repointed into it — each profile
+/// drifting to whichever version it last updated itself to.
+///
+/// Linking the directory keeps one install behind every profile, so an in-session update moves
+/// them all together. Unlike the shared-state categories this is not opt-in: a profile that opts
+/// out of sharing still has to update the runtime it is running, not a private copy of it.
+#[cfg(unix)]
+pub fn link_codex_package_root(provider: &str, home: &std::path::Path) {
+    use std::os::unix::fs::symlink;
+
+    if crate::naming::normalize_provider_key(provider) != "codex" {
+        return;
+    }
+    let Some(base) = crate::platform::system_home_for("codex") else {
+        return;
+    };
+    let target = base.join("packages");
+    let link = home.join("packages");
+    // A system profile runs out of the native home already.
+    let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    if canon(&base) == canon(home) {
+        return;
+    }
+    // Only ever mirror an install that exists; never invent a package root.
+    if !target.is_dir() {
+        return;
+    }
+    match std::fs::symlink_metadata(&link) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            let _ = std::fs::remove_file(&link); // replace a stale link
+        }
+        Ok(_) => return, // a real directory is an update that already landed here — leave it
+        Err(_) => {}
+    }
+    let _ = symlink(&target, &link);
+}
+
+#[cfg(not(unix))]
+pub fn link_codex_package_root(_provider: &str, _home: &std::path::Path) {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_package_root_is_linked_regardless_of_sharing() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let root = std::env::temp_dir().join(format!("aas-pkgroot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let codex_home = root.join("codex");
+        let home = root.join("profile");
+        std::fs::create_dir_all(codex_home.join("packages/standalone")).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("CODEX_HOME", &codex_home);
+
+        // `Some(&[])` shares nothing; the package root is still linked.
+        link_shared_state("codex", &home, false, Some(&[]));
+        link_codex_package_root("codex", &home);
+        assert_eq!(
+            std::fs::read_link(home.join("packages")).unwrap(),
+            codex_home.join("packages"),
+            "an isolated profile still has to update the runtime it runs"
+        );
+
+        // A real directory is an update that already landed here — never clobbered.
+        let other = root.join("profile2");
+        std::fs::create_dir_all(other.join("packages/standalone")).unwrap();
+        link_codex_package_root("codex", &other);
+        assert!(other.join("packages").is_dir());
+        assert!(std::fs::read_link(other.join("packages")).is_err());
+
+        // Another provider's home is left alone.
+        let claude = root.join("claude-profile");
+        std::fs::create_dir_all(&claude).unwrap();
+        link_codex_package_root("claude", &claude);
+        assert!(!claude.join("packages").exists());
+
+        std::env::remove_var("CODEX_HOME");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn supported_categories() {

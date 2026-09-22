@@ -5,6 +5,18 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `codex update` run from inside `aas exec` no longer installs into the one account's profile.
+  Codex derives its package root from `CODEX_HOME` (`$CODEX_HOME/packages/standalone`) but always
+  writes the launcher to `~/.local/bin/codex`, so an in-session update unpacked the release into
+  that profile and repointed the launcher every other account shares into it — each profile
+  drifting to whichever version it last happened to update itself to, and the shared launcher
+  dangling if that account was ever renamed or removed. A profile home is now linked to the
+  package root of the native install, so one install sits behind every profile and an in-session
+  update moves them all together. Unlike the shared-state categories the link is not opt-in: a
+  profile that shares nothing still has to update the runtime it is running, not a private copy.
+
 ## [0.1.12] - 2026-09-22
 
 ### Added

@@ -349,6 +349,9 @@ pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyh
             // After the symlinks exist: a shared Codex config.toml is trusted per config *path*,
             // so a fresh (or renamed) profile would re-prompt "Hooks need review" without this.
             seed_codex_hook_trust(&normalize_provider_key(&agent_provider), &home);
+            // Codex resolves its package root from CODEX_HOME, so `codex update` run inside a
+            // session would install into this profile alone and repoint the shared launcher at it.
+            share::link_codex_package_root(&normalize_provider_key(&agent_provider), &home);
         }
     } else {
         let home = cross_session_home(&agent_provider, &account_name);
