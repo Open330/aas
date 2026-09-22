@@ -73,6 +73,9 @@ pub(crate) fn agent_bin(provider: &str) -> Option<&'static str> {
 /// Set by a shim to the absolute CLI it resolved at install time.
 pub(crate) const SHIM_BIN_ENV: &str = "AAS_SHIM_BIN";
 
+/// Set by a shim to stop `aas exec` re-entering it through PATH.
+pub(crate) const SHIM_GUARD_ENV: &str = "AAS_SHIM";
+
 /// The recorded path, when it can still stand in for `bin`.
 ///
 /// The variable describes one launch, so a nested `aas exec` that targets another agent must not
@@ -312,6 +315,11 @@ pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyh
     scrub_inherited_credentials(&mut env);
     // The shim's hand-off covers this launch only; a nested run resolves its own agent.
     env.remove(SHIM_BIN_ENV);
+    // The re-entry guard belongs to the hop from the shim to here, not to the agent. Left in
+    // place it reaches everything the agent starts — a shell, a tmux server that then holds it
+    // for every shell it will ever spawn — and each of those takes the shim's guard branch and
+    // runs the bare CLI unrouted, silently ignoring the active account.
+    env.remove(SHIM_GUARD_ENV);
     let secret = secure_store::get_secret(&profile_provider, &account_name);
 
     // Claude long-lived token → env auth (same-provider claude only).
@@ -557,6 +565,24 @@ mod tests {
             caller_system_home(Some("/opt/claude-home".to_string())),
             Some("/opt/claude-home".to_string())
         );
+    }
+
+    #[test]
+    fn the_shims_re_entry_guard_does_not_reach_the_agent() {
+        let mut env = HashMap::from([
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            (SHIM_GUARD_ENV.to_string(), "1".to_string()),
+            (SHIM_BIN_ENV.to_string(), "/opt/bin/codex".to_string()),
+        ]);
+        scrub_inherited_credentials(&mut env);
+        env.remove(SHIM_BIN_ENV);
+        env.remove(SHIM_GUARD_ENV);
+
+        // Both describe the hop from the shim into this process, not the launch itself. A tmux
+        // server started by the agent would otherwise hold the guard for every later shell.
+        assert!(!env.contains_key(SHIM_GUARD_ENV));
+        assert!(!env.contains_key(SHIM_BIN_ENV));
+        assert_eq!(env.get("PATH"), Some(&"/usr/bin".to_string()));
     }
 
     #[test]

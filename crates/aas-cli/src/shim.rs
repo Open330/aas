@@ -118,8 +118,10 @@ fn shim_body(provider: &str, real: &Path, aas: &Path) -> String {
     s.push_str(
         "# Re-entry guard: `aas exec` resolves the agent through PATH and would otherwise\n",
     );
-    s.push_str("# find this shim again, recursing forever.\n");
+    s.push_str("# find this shim again, recursing forever. The guard is dropped before the real\n");
+    s.push_str("# CLI starts so nothing it spawns inherits it and later bypasses routing.\n");
     s.push_str("if [ -n \"${AAS_SHIM:-}\" ]; then\n");
+    s.push_str("  unset AAS_SHIM\n");
     s.push_str(&format!("  exec {real} \"$@\"\n"));
     s.push_str("fi\n\n");
     s.push_str(
@@ -319,6 +321,9 @@ mod tests {
             Path::new("/usr/local/bin/aas"),
         );
         assert!(body.contains("AAS_SHIM_BIN='/opt/bin/codex'\nexport AAS_SHIM_BIN\n"));
+        // The guard is dropped on the way to the real CLI: exported into it, every shell and
+        // tmux server it starts would inherit it and skip routing from then on.
+        assert!(body.contains("if [ -n \"${AAS_SHIM:-}\" ]; then\n  unset AAS_SHIM\n  exec "));
         // Set after every fall-through exec, so only the `aas exec` hand-off sees it.
         let handoff = body.find("AAS_SHIM_BIN=").unwrap();
         assert!(handoff > body.rfind("exec '/opt/bin/codex' \"$@\"").unwrap());

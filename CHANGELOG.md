@@ -5,6 +5,17 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A shim's re-entry guard no longer reaches the agent it launched. The shim exports `AAS_SHIM` so
+  `aas exec` cannot resolve its way back into the shim through PATH, but the variable then stayed
+  set for the agent and everything the agent started — a shell, or a tmux server that holds it for
+  every shell it will ever spawn afterwards. Each of those took the shim's guard branch on the
+  first line and ran the bare CLI unrouted, so `claude` and `codex` quietly stopped following
+  `aas switch` for the rest of that server's life. `aas exec` now drops the guard alongside the
+  binary hand-off it already dropped, and the shim unsets it before handing over to the real CLI —
+  the two paths by which the agent can be reached.
+
 ## [0.1.13] - 2026-09-22
 
 ### Fixed
