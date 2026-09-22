@@ -417,6 +417,25 @@ impl AccountStore {
             .find(|a| canonical_provider(&a.provider) == prov && a.name == name))
     }
 
+    /// Resolve an `exec`/`proxy` target: a globally unique account name, or — when no account
+    /// carries that name — a provider name standing in for that provider's active account, so
+    /// `aas exec codex` runs whatever `aas status` lists as active for Codex.
+    ///
+    /// An account whose name happens to match a provider always wins, so naming an account
+    /// `codex` keeps addressing that account rather than the provider's active one.
+    pub fn resolve_run_target(&self, name: &str) -> Result<Option<AccountRecord>, StoreError> {
+        if let Some(account) = self.get_by_name(name)? {
+            return Ok(Some(account));
+        }
+        let Some(provider) = crate::naming::normalize_provider(name) else {
+            return Ok(None);
+        };
+        let Some(active) = self.get_active(&provider)? else {
+            return Ok(None);
+        };
+        self.get(&provider, &active)
+    }
+
     /// asx `getAccountByName`: unique-by-name lookup, error if >1 provider matches.
     pub fn get_by_name(&self, name: &str) -> Result<Option<AccountRecord>, StoreError> {
         let matches: Vec<AccountRecord> = self
@@ -700,6 +719,45 @@ mod tests {
         s.add(AccountRecord::new("codex", "x")).unwrap();
         s.add(AccountRecord::new("codex", "x")).unwrap();
         assert_eq!(s.list(Some("codex")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn run_target_resolves_an_account_name_or_a_provider_active_account() {
+        let s = AccountStore::at(tmp());
+        s.add(AccountRecord::new("codex", "work")).unwrap();
+        s.add(AccountRecord::new("claude", "home")).unwrap();
+
+        assert_eq!(
+            s.resolve_run_target("work").unwrap().map(|a| a.name),
+            Some("work".to_string())
+        );
+        // No active account yet: a provider name resolves to nothing rather than guessing.
+        assert!(s.resolve_run_target("codex").unwrap().is_none());
+
+        s.set_active("codex", "work").unwrap();
+        let resolved = s.resolve_run_target("codex").unwrap().unwrap();
+        assert_eq!(resolved.name, "work");
+        assert_eq!(resolved.provider, "codex");
+
+        // Aliases resolve like the provider they name; unknown words do not.
+        s.set_active("claude", "home").unwrap();
+        assert_eq!(
+            s.resolve_run_target("claude-code").unwrap().map(|a| a.name),
+            Some("home".to_string())
+        );
+        assert!(s.resolve_run_target("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn an_account_named_after_a_provider_wins_over_the_active_account() {
+        let s = AccountStore::at(tmp());
+        s.add(AccountRecord::new("claude", "codex")).unwrap();
+        s.add(AccountRecord::new("codex", "work")).unwrap();
+        s.set_active("codex", "work").unwrap();
+
+        let resolved = s.resolve_run_target("codex").unwrap().unwrap();
+        assert_eq!(resolved.provider, "claude");
+        assert_eq!(resolved.name, "codex");
     }
 
     #[test]

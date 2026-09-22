@@ -343,7 +343,7 @@ fn rewrite_default_exec_args(
         "rename", "remove", "rm", "sharing", "refresh", "exec", "e", "proxy", "help",
     ];
     if let Some(candidate) = first {
-        if !COMMANDS.contains(&candidate) && store.get_by_name(candidate)?.is_some() {
+        if !COMMANDS.contains(&candidate) && store.resolve_run_target(candidate)?.is_some() {
             args.insert(1, "exec".into());
         }
     }
@@ -1038,6 +1038,31 @@ mod tests {
             }
             _ => panic!("expected exec command"),
         }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_provider_name_is_rewritten_to_its_active_account() {
+        let (store, dir) = test_store();
+        store.add(AccountRecord::new("codex", "work")).unwrap();
+        store.set_active("codex", "work").unwrap();
+        let args = vec!["aas".into(), "codex".into()];
+
+        let rewritten = rewrite_default_exec_args(&store, args).unwrap();
+        assert_eq!(rewritten[1], "exec");
+        assert_eq!(rewritten[2], "codex");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_provider_with_no_active_account_is_left_alone() {
+        let (store, dir) = test_store();
+        store.add(AccountRecord::new("codex", "work")).unwrap();
+        let args = vec!["aas".into(), "codex".into()];
+
+        let rewritten = rewrite_default_exec_args(&store, args).unwrap();
+        assert_eq!(rewritten.len(), 2);
+        assert_eq!(rewritten[1], "codex");
         let _ = std::fs::remove_dir_all(dir);
     }
 
