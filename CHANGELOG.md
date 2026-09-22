@@ -36,6 +36,13 @@ All notable user-facing changes are recorded here. The format follows
 
 ### Fixed
 
+- `aas export <claude-account>` now names the profile home alongside a long-lived token instead of
+  only the token. Claude Code accepts such a token only through `CLAUDE_CODE_OAUTH_TOKEN` and
+  prefers it over whatever the config dir holds, so the two belong together — as `aas exec` has
+  always installed them. Exporting the token alone left the shell authenticated as the account
+  while the agent wrote its history, settings and todos into `~/.claude`, silently losing the
+  profile isolation for exactly the accounts that use a long-lived token. `grok` already exported
+  its home and its key together.
 - `aas exec <account>` no longer drops the profile home when the caller's shell already points at
   that same profile. `exec` exports `CLAUDE_CONFIG_DIR` (and `CODEX_HOME`, `GROK_HOME`,
   `PI_CODING_AGENT_DIR`) to scope the agent, so every shell opened inside an agent inherits it —
