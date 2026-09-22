@@ -5,6 +5,13 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `aas exec <provider>` (and `aas <provider>`, and `aas proxy <provider> <frontend>`) now runs that
+  provider's active account, so `aas exec codex` no longer fails with "Account not found: codex".
+  A stored account whose name matches a provider still wins, and a provider with no active account
+  reports that instead of guessing.
+
 ## [0.1.11] - 2026-09-05
 
 ### Fixed
