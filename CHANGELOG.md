@@ -5,6 +5,8 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-09-22
+
 ### Fixed
 
 - `codex update` run from inside `aas exec` no longer installs into the one account's profile.
