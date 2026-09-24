@@ -144,12 +144,52 @@ ssh -t jiun-mini 'aas import ~/aas-vault.age'
 `load` is different: it snapshots the **currently logged-in** native credential into a profile
 (`aas load codex`), rather than activating a stored one.
 
+## Agent skill and account fallback
+
+The bundled [aas skill](skills/aas/SKILL.md) teaches agents to discover registered
+accounts, inspect quota, and retry unfinished work with an authorized alternate.
+From a checkout, install it into your agent's skill directory (for example,
+`~/.codex/skills/aas/SKILL.md` or `~/.claude/skills/aas/SKILL.md`). Shared aas profiles
+inherit their provider's skills unless skill sharing has been disabled.
+
+```bash
+# Rank quota candidates; omit --provider to inspect all providers.
+aas candidates --provider codex --exclude primary.codex --json
+
+# Explicit HTTP 429 fallback; repeat --fallback for more accounts.
+aas exec primary.codex --fallback backup.codex -- <agent arguments>
+```
+
+`candidates` returns `{ "schemaVersion": 1, "accounts": [...] }`. Entries contain
+`id`, `name` (the exec argument), `provider`, `active`, `eligible`, `reason`,
+`cached`, `fetchedAtMs`, `remainingPct`, `usageCooldownUntilMs`, and `meters`.
+Eligible entries sort first, then by remaining quota descending and ID ascending.
+Reasons are `quota_available`, `excluded`, `usage_rate_limited`, `usage_error`,
+`usage_unknown`, or `quota_exhausted`. Eligibility is quota evidence, not a model
+compatibility or inference-auth guarantee. `--fresh` bypasses the success cache;
+usage endpoint cooldowns remain authoritative. Empty results are an empty array.
+
+`--fallback` must precede `--`; every named account must match the primary's provider
+and endpoint. It opts into the local translating proxy, including same-provider
+runs, so the proxy's model catalog and protocol support apply. Supported backends
+are Claude, Codex, Grok, Z.AI, and Kimi; Z.AI/Kimi require a frontend such as `claude`.
+Only upstream HTTP 429 before streaming advances the pool. Each limited account
+is retired for that proxy session (including future requests), and exhaustion
+returns HTTP 429. Start a new session after quota recovers. Already in-flight
+requests may finish; errors inside streams and non-429 failures do not switch
+accounts. The CLI and completed tool calls are never restarted or replayed.
+No account is automatically added to the explicit fallback pool.
+
+A skill can handle errors from a child CLI, but cannot run when its own model
+request is blocked. Start with `--fallback` to handle that case at the proxy layer.
+
 ## Commands
 
 | Command | Description |
 |---|---|
 | `list [provider\|account]` (alias `ls`) `-u`,`-d`, `--sort name\|added\|stored` | List all accounts or filter by provider/account. The default is provider-registry order then account name; `stored` preserves the `accounts.json` array order. `-u` shows live usage; `-d` dumps stored credentials. |
 | `usage [provider\|account]` (alias `u`) `--json`, `--fresh`, `--sort name\|added\|stored` | Usage for all accounts or one provider/account (shorthand for `list -u`), using a shared 10-minute success cache and deterministic order. `--fresh` bypasses the success cache but still honors rate-limit backoff. `--json` is the integration contract used by aas-bar and BarShelf. |
+| `candidates` `--provider <provider>`, `--exclude <name>`, `--json`, `--fresh` | Rank quota candidates with explicit eligibility reasons, excluding attempted accounts. |
 | `status [provider]` | Show the active account per provider. |
 | `active <provider>` | Print just the active account name on stdout, exiting 1 when none is set — the machine-readable half of `status`, used by the shims. |
 | `shim install\|uninstall [provider…]`, `shim status` | Install wrappers in `<config>/shims` so the bare `claude`/`codex` follows `switch`. Required for Claude long-lived tokens, which cannot be written to the native store. Prepend the printed directory to `PATH`; `status` reports whether it actually precedes the real CLIs. |

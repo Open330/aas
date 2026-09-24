@@ -316,6 +316,41 @@ pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyh
     };
 
     let exec_args = parse_exec_args(after, is_cross, Some(&agent_provider))?;
+    let exec_args = if !is_cross && !exec_args.fallback.is_empty() {
+        parse_exec_args(after, true, Some(&agent_provider))?
+    } else {
+        exec_args
+    };
+
+    let mut fallback_credentials = Vec::new();
+    let mut seen = std::collections::HashSet::from([acct.name.clone()]);
+    for name in &exec_args.fallback {
+        let candidate = store
+            .get_by_name(name)?
+            .ok_or_else(|| anyhow::anyhow!("Fallback account not found: {name}"))?;
+        if candidate.provider != acct.provider || candidate.endpoint() != acct.endpoint() {
+            anyhow::bail!(
+                "Fallback accounts must use the same provider and endpoint as the primary"
+            );
+        }
+        if !seen.insert(candidate.name.clone()) {
+            anyhow::bail!("Duplicate fallback account: {name}");
+        }
+        if let Some(p) = get_adapter(&candidate.provider) {
+            let _ = p.refresh_if_expired(&candidate.name).await;
+        }
+        let raw = secure_store::get_secret(&candidate.provider, &candidate.name)
+            .ok_or_else(|| anyhow::anyhow!("No stored credential for fallback account: {name}"))?;
+        fallback_credentials.push(Credential {
+            raw: Some(raw),
+            api_key: None,
+        });
+    }
+    let use_proxy = is_cross || !fallback_credentials.is_empty();
+    if use_proxy && aas_proxy::adapters::pick_backend(&profile_provider, acct.endpoint()).is_none()
+    {
+        anyhow::bail!("Proxy execution is not supported for provider '{profile_provider}'");
+    }
 
     // Auto-refresh an expired credential before launch.
     if let Some(p) = get_adapter(&profile_provider) {
@@ -334,7 +369,7 @@ pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyh
     let secret = secure_store::get_secret(&profile_provider, &account_name);
 
     // Claude long-lived token → env auth (same-provider claude only).
-    if !is_cross && normalize_provider_key(&agent_provider) == "claude" {
+    if !use_proxy && normalize_provider_key(&agent_provider) == "claude" {
         if let Some(tok) = secret.as_deref().and_then(claude_long_lived_token) {
             env.insert("CLAUDE_CODE_OAUTH_TOKEN".into(), tok);
         }
@@ -346,7 +381,7 @@ pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyh
     let mut proxy_handle = None;
     let mut cross_home: Option<PathBuf> = None;
 
-    if !is_cross {
+    if !use_proxy {
         if system_profile {
             if let (Some(stored), Some(live)) = (&secret, live_credential(&profile_provider).await)
             {
@@ -393,6 +428,7 @@ pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyh
             anyhow::bail!("No stored credential for {profile_provider}/{account_name}");
         };
         let handle = start_proxy(ProxyStartOptions {
+            fallback_credentials,
             source_provider: agent_provider.clone(),
             target_provider: profile_provider.clone(),
             target_credential: Credential {
@@ -504,6 +540,7 @@ pub async fn cmd_proxy(store: &AccountStore, name: &str, frontend: &str) -> anyh
     };
 
     let handle = start_proxy(ProxyStartOptions {
+        fallback_credentials: Vec::new(),
         source_provider: frontend_norm.clone(),
         target_provider: backend_provider.clone(),
         target_credential: Credential {

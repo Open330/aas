@@ -1,6 +1,7 @@
 //! `aas` CLI entry point. Command surface mirrors asx (see `docs/PARITY_SPEC.md` §A).
 //! Includes storage, account management, same-provider exec, and the cross-provider proxy.
 
+mod candidates;
 mod exec;
 mod export;
 mod login;
@@ -127,6 +128,18 @@ enum Command {
         #[arg(long, value_enum, default_value_t)]
         sort: SortMode,
     },
+    /// Rank account candidates using quota observations (not a model compatibility guarantee).
+    Candidates {
+        #[arg(long)]
+        provider: Option<String>,
+        /// Exclude a stored account name; repeat for each attempted account.
+        #[arg(long)]
+        exclude: Vec<String>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        fresh: bool,
+    },
     /// Show asx-tracked active account(s).
     Status { provider: Option<String> },
     /// Print shell env for a profile (`eval "$(aas export <name>)"`), or `--all` for a
@@ -202,7 +215,7 @@ enum Command {
         #[arg(long = "no-login")]
         no_login: bool,
     },
-    /// Run the native CLI under a profile. `<target>` ≠ provider → cross-provider via proxy.
+    /// Run a profile. `--fallback <account>` (repeatable, before `--`) enables proxy HTTP 429 failover.
     #[command(visible_alias = "e")]
     Exec {
         name: String,
@@ -316,6 +329,12 @@ async fn main() {
             )
             .await
         }
+        Command::Candidates {
+            provider,
+            exclude,
+            json,
+            fresh,
+        } => candidates::run(&store, provider.as_deref(), &exclude, json, fresh).await,
         Command::Switch { provider, name } => cmd_switch(&store, &provider, name.as_deref()).await,
         Command::Rename { from, to } => cmd_rename(&store, &from, &to),
         Command::Remove { args } => cmd_remove(&store, &args),
@@ -356,8 +375,27 @@ fn rewrite_default_exec_args(
         .and_then(|value| value.to_str())
         .filter(|value| !value.starts_with('-'));
     const COMMANDS: &[&str] = &[
-        "list", "ls", "usage", "u", "status", "export", "import", "load", "login", "switch", "s",
-        "rename", "remove", "rm", "sharing", "refresh", "exec", "e", "proxy", "help",
+        "candidates",
+        "list",
+        "ls",
+        "usage",
+        "u",
+        "status",
+        "export",
+        "import",
+        "load",
+        "login",
+        "switch",
+        "s",
+        "rename",
+        "remove",
+        "rm",
+        "sharing",
+        "refresh",
+        "exec",
+        "e",
+        "proxy",
+        "help",
     ];
     if let Some(candidate) = first {
         if !COMMANDS.contains(&candidate) && store.resolve_run_target(candidate)?.is_some() {
@@ -1162,6 +1200,45 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn agent_interfaces_parse_without_swallowing_native_flags() {
+        let command = Cli::try_parse_from([
+            "aas",
+            "candidates",
+            "--provider",
+            "codex",
+            "--exclude",
+            "a",
+            "--exclude",
+            "b",
+            "--json",
+            "--fresh",
+        ])
+        .unwrap()
+        .command;
+        assert!(
+            matches!(command, Command::Candidates { exclude, json: true, fresh: true, .. } if exclude == vec!["a", "b"])
+        );
+        let command = Cli::try_parse_from([
+            "aas",
+            "exec",
+            "primary",
+            "--fallback",
+            "backup",
+            "--",
+            "--fallback",
+            "native",
+        ])
+        .unwrap()
+        .command;
+        let Command::Exec { rest, .. } = command else {
+            panic!("expected exec")
+        };
+        let parsed = aas_core::execargs::parse_exec_args(&rest, false, None).unwrap();
+        assert_eq!(parsed.fallback, vec!["backup"]);
+        assert_eq!(parsed.forward_args, vec!["--fallback", "native"]);
     }
 
     #[test]

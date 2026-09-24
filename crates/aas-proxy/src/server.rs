@@ -7,7 +7,10 @@
 
 use crate::adapters::{pick_agent, pick_backend};
 use crate::models::{backend_choices_for, refresh_backend_choices};
-use crate::retry::{fetch_passthrough_with_retry, fetch_upstream_with_retry, UpstreamOutcome};
+use crate::retry::{
+    fetch_passthrough_with_retry_budget, fetch_upstream_with_retry_budget, UpstreamOutcome,
+    MAX_RETRIES,
+};
 use crate::sse::{SseFramer, ToolAccumulator};
 use crate::types::{
     AgentAdapter, BackendAdapter, CommonEvent, CommonResponse, CommonToolCall, StreamCtx,
@@ -23,7 +26,10 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
 const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
@@ -42,6 +48,8 @@ pub struct ProxyStartOptions {
     /// backend (real upstream the proxy calls).
     pub target_provider: String,
     pub target_credential: Credential,
+    /// Ordered credentials for the same provider and endpoint. HTTP 429 advances the pool.
+    pub fallback_credentials: Vec<Credential>,
     /// API host for the backend account, for providers that run several (Kimi). `None` = default.
     pub target_endpoint: Option<String>,
     pub tmp_dir: Option<PathBuf>,
@@ -75,7 +83,9 @@ struct ProxyState {
     backend_endpoint: Option<String>,
     agent_provider: String,
     backend_provider: String,
-    cred: String,
+    credentials: Vec<String>,
+    credential_index: AtomicUsize,
+    failover: bool,
     client: reqwest::Client,
     auth_token: String,
     request_slots: Arc<Semaphore>,
@@ -113,13 +123,21 @@ pub async fn start_proxy(options: ProxyStartOptions) -> anyhow::Result<ProxyHand
         .await;
     }
 
+    let failover = !options.fallback_credentials.is_empty();
+    let mut credentials = vec![cred];
+    credentials.extend(options.fallback_credentials.iter().map(pick_cred));
+    if credentials.iter().any(String::is_empty) && failover {
+        anyhow::bail!("Fallback requires nonempty credentials");
+    }
     let state = Arc::new(ProxyState {
         agent: pick_agent(&agent_provider),
         backend: pick_backend(&backend_provider, options.target_endpoint.as_deref()),
         backend_endpoint: options.target_endpoint.clone(),
         agent_provider,
         backend_provider,
-        cred,
+        credentials,
+        credential_index: AtomicUsize::new(0),
+        failover,
         client,
         auth_token: auth_token.clone(),
         request_slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT_REQUESTS)),
@@ -336,28 +354,46 @@ async fn handle(State(st): State<Arc<ProxyState>>, req: Request) -> Response {
         }
     };
 
-    // An upstream that already speaks the agent's wire is relayed, not translated: the COMMON
-    // round trip would silently drop cache_control, thinking blocks and image parts.
-    if let Some(up) = backend.passthrough(&st.agent_provider, &body_json, &st.cred) {
-        return match fetch_passthrough_with_retry(&st.client, &up).await {
-            Ok(res) => relay_upstream(res, request_slot),
-            Err(e) => json_response(
-                StatusCode::BAD_GATEWAY,
-                json!({ "error": { "message": e.to_string() } }),
-            ),
-        };
-    }
-
     let common = agent.parse_request(&path, &body_json);
-    let up = backend.build_request(&common, &st.cred);
-
-    let outcome = match fetch_upstream_with_retry(&st.client, &up, backend.as_ref()).await {
-        Ok(o) => o,
-        Err(e) => {
+    // Each account is attempted once in failover mode. A 429 retires it for this
+    // proxy session, so subsequent requests cannot violate its Retry-After gate.
+    // No CLI restart or replay after response streaming has begun.
+    let retries = if st.failover { 0 } else { MAX_RETRIES };
+    let outcome = loop {
+        let index = st.credential_index.load(Ordering::SeqCst);
+        let Some(cred) = st.credentials.get(index) else {
             return json_response(
-                StatusCode::BAD_GATEWAY,
-                json!({ "error": { "message": e.to_string() } }),
+                StatusCode::TOO_MANY_REQUESTS,
+                json!({ "error": { "message": "aas fallback accounts exhausted; start a new session after quota recovers" } }),
             );
+        };
+        if let Some(up) = backend.passthrough(&st.agent_provider, &body_json, cred) {
+            match fetch_passthrough_with_retry_budget(&st.client, &up, retries).await {
+                Ok(res) if st.failover && res.status().as_u16() == 429 => {
+                    st.credential_index.fetch_max(index + 1, Ordering::SeqCst);
+                    continue;
+                }
+                Ok(res) => return relay_upstream(res, request_slot),
+                Err(e) => {
+                    return json_response(
+                        StatusCode::BAD_GATEWAY,
+                        json!({ "error": { "message": e.to_string() } }),
+                    )
+                }
+            }
+        }
+        let up = backend.build_request(&common, cred);
+        match fetch_upstream_with_retry_budget(&st.client, &up, backend.as_ref(), retries).await {
+            Ok(UpstreamOutcome::Error { status: 429, .. }) if st.failover => {
+                st.credential_index.fetch_max(index + 1, Ordering::SeqCst);
+            }
+            Ok(outcome) => break outcome,
+            Err(e) => {
+                return json_response(
+                    StatusCode::BAD_GATEWAY,
+                    json!({ "error": { "message": e.to_string() } }),
+                )
+            }
         }
     };
 

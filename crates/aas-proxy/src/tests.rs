@@ -1031,6 +1031,7 @@ fn midstream_error_flushes_and_terminates() {
 async fn server_models_and_fake_auth_routes() {
     use crate::server::{start_proxy, Credential, ProxyStartOptions};
     let handle = start_proxy(ProxyStartOptions {
+        fallback_credentials: Vec::new(),
         source_provider: "grok".into(),
         target_provider: "codex".into(),
         target_endpoint: None,
@@ -1107,6 +1108,7 @@ async fn server_models_and_fake_auth_routes() {
 async fn server_rejects_invalid_and_oversized_inference_bodies() {
     use crate::server::{start_proxy, Credential, ProxyStartOptions};
     let handle = start_proxy(ProxyStartOptions {
+        fallback_credentials: Vec::new(),
         source_provider: "grok".into(),
         target_provider: "codex".into(),
         target_endpoint: None,
@@ -1202,6 +1204,7 @@ async fn anthropic_backend_relays_the_request_instead_of_translating_it() {
     let (base, upstream) = fake_anthropic_upstream(seen.clone(), models_hit.clone()).await;
 
     let handle = start_proxy(ProxyStartOptions {
+        fallback_credentials: Vec::new(),
         source_provider: "claude".into(),
         target_provider: "kimi".into(),
         target_endpoint: Some(base.clone()),
@@ -1295,6 +1298,7 @@ async fn anthropic_backend_relays_an_upstream_error_verbatim() {
     });
 
     let handle = start_proxy(ProxyStartOptions {
+        fallback_credentials: Vec::new(),
         source_provider: "claude".into(),
         target_provider: "kimi".into(),
         target_endpoint: Some(base),
@@ -1392,4 +1396,97 @@ fn kimi_fallback_catalog_follows_the_account_host() {
         resolve_choice_for("kimi", Some("https://api.kimi.com/coding"), "anything").model,
         "kimi-for-coding"
     );
+}
+
+#[tokio::test]
+async fn fallback_is_bounded_sticky_and_only_for_http_429() {
+    use crate::server::{start_proxy, Credential, ProxyStartOptions};
+    use axum::{
+        http::{HeaderMap, StatusCode},
+        routing::post,
+        Router,
+    };
+    use std::sync::{Arc, Mutex};
+
+    // Exercise both the byte relay and translated request paths against a local host.
+    for frontend in ["claude", "grok"] {
+        for (primary_status, backup_status) in [
+            (429, 200),
+            (429, 429),
+            (401, 200),
+            (403, 200),
+            (500, 200),
+            (200, 200),
+        ] {
+            let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+            let recorder = seen.clone();
+            let app = Router::new().route("/v1/messages", post(move |headers: HeaderMap| {
+                let recorder = recorder.clone();
+                async move {
+                    let auth = headers["authorization"].to_str().unwrap().to_string();
+                    let status = if auth == "Bearer primary" { primary_status } else { backup_status };
+                    recorder.lock().unwrap().push(auth);
+                    // An error carried in a successful stream must not trigger failover.
+                    (StatusCode::from_u16(status).unwrap(),
+                     [("content-type", "text/event-stream"), ("retry-after", "3600")],
+                     "event: error\ndata: {\"type\":\"error\",\"error\":{\"message\":\"limited in stream\"}}\n\n")
+                }
+            }));
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let upstream = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let handle = start_proxy(ProxyStartOptions {
+                source_provider: frontend.into(),
+                target_provider: "kimi".into(),
+                target_endpoint: Some(base),
+                target_credential: Credential {
+                    raw: Some("primary".into()),
+                    api_key: None,
+                },
+                fallback_credentials: vec![Credential {
+                    raw: Some("backup".into()),
+                    api_key: None,
+                }],
+                tmp_dir: None,
+                port: None,
+            })
+            .await
+            .unwrap();
+            let client = reqwest::Client::new();
+            for _ in 0..2 {
+                let path = if frontend == "claude" {
+                    "v1/messages"
+                } else {
+                    "v1/chat/completions"
+                };
+                let res = client.post(format!("{}/{path}", handle.url))
+                    .bearer_auth(&handle.auth_token)
+                    .json(&json!({"model":"kimi-k2", "stream":true, "messages":[{"role":"user","content":"hello"}]}))
+                    .send().await.unwrap();
+                let expected = if primary_status == 429 {
+                    backup_status
+                } else {
+                    primary_status
+                };
+                assert_eq!(res.status().as_u16(), expected, "{frontend}");
+                let _ = res.text().await.unwrap();
+            }
+            let expected = match (primary_status, backup_status) {
+                (429, 200) => vec!["Bearer primary", "Bearer backup", "Bearer backup"],
+                (429, 429) => vec!["Bearer primary", "Bearer backup"],
+                _ => vec!["Bearer primary", "Bearer primary"],
+            };
+            assert_eq!(
+                *seen.lock().unwrap(),
+                expected,
+                "{frontend}: {primary_status}/{backup_status}"
+            );
+            handle.stop().await;
+            upstream.abort();
+        }
+    }
 }

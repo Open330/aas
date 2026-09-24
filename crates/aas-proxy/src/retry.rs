@@ -83,7 +83,7 @@ pub enum UpstreamOutcome {
     Error { status: u16, detail: String },
 }
 
-const MAX_RETRIES: u32 = 4;
+pub(crate) const MAX_RETRIES: u32 = 4;
 const PER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Passthrough relay fetch. Retries the same transport and status classes as
@@ -94,7 +94,14 @@ pub async fn fetch_passthrough_with_retry(
     client: &reqwest::Client,
     up: &UpstreamRequest,
 ) -> anyhow::Result<reqwest::Response> {
-    let retries = MAX_RETRIES;
+    fetch_passthrough_with_retry_budget(client, up, MAX_RETRIES).await
+}
+
+pub(crate) async fn fetch_passthrough_with_retry_budget(
+    client: &reqwest::Client,
+    up: &UpstreamRequest,
+    retries: u32,
+) -> anyhow::Result<reqwest::Response> {
     let mut last_error = String::new();
 
     for attempt in 0..=retries {
@@ -136,7 +143,15 @@ pub async fn fetch_upstream_with_retry(
     up: &UpstreamRequest,
     backend: &dyn BackendAdapter,
 ) -> anyhow::Result<UpstreamOutcome> {
-    let retries = MAX_RETRIES;
+    fetch_upstream_with_retry_budget(client, up, backend, MAX_RETRIES).await
+}
+
+pub(crate) async fn fetch_upstream_with_retry_budget(
+    client: &reqwest::Client,
+    up: &UpstreamRequest,
+    backend: &dyn BackendAdapter,
+    retries: u32,
+) -> anyhow::Result<UpstreamOutcome> {
     let mut last_text = String::new();
     let mut last_status: Option<u16> = None;
 

@@ -9,6 +9,7 @@ use crate::share::{resolve_share_selection, ShareOpts, ShareSelection};
 #[derive(Debug, Clone)]
 pub struct ExecArgs {
     pub forward_args: Vec<String>,
+    pub fallback: Vec<String>,
     pub bypass: bool,
     pub debug: bool,
     pub keep_context: bool,
@@ -42,6 +43,7 @@ pub fn parse_exec_args(
     agent_provider: Option<&str>,
 ) -> anyhow::Result<ExecArgs> {
     let mut forward: Vec<String> = Vec::new();
+    let mut fallback = Vec::new();
     let mut o = ShareOpts::default();
     let mut bypass = false;
     let mut debug = false;
@@ -53,6 +55,23 @@ pub fn parse_exec_args(
         if arg == "--" {
             forward.extend(args[i + 1..].iter().cloned());
             break;
+        }
+        if arg == "--fallback" || arg.starts_with("--fallback=") {
+            let value = if let Some(value) = arg.strip_prefix("--fallback=") {
+                value.to_string()
+            } else {
+                i += 1;
+                args.get(i)
+                    .filter(|v| !v.starts_with('-'))
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("--fallback requires an account name"))?
+            };
+            if value.is_empty() {
+                anyhow::bail!("--fallback requires an account name");
+            }
+            fallback.push(value);
+            i += 1;
+            continue;
         }
         if arg == "-b" || arg == "--bypass" {
             bypass = true;
@@ -115,6 +134,7 @@ pub fn parse_exec_args(
     let share = resolve_share_selection(&o, provider)?;
     Ok(ExecArgs {
         forward_args: forward,
+        fallback,
         bypass,
         debug,
         keep_context,
@@ -128,6 +148,32 @@ mod tests {
 
     fn v(xs: &[&str]) -> Vec<String> {
         xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn fallback_is_explicit_repeatable_and_respects_separator() {
+        let args = parse_exec_args(
+            &v(&[
+                "--fallback",
+                "work",
+                "--fallback=personal",
+                "--",
+                "--fallback",
+                "native",
+            ]),
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(args.fallback, v(&["work", "personal"]));
+        assert_eq!(args.forward_args, v(&["--fallback", "native"]));
+        for tokens in [
+            v(&["--fallback"]),
+            v(&["--fallback", "--"]),
+            v(&["--fallback="]),
+        ] {
+            assert!(parse_exec_args(&tokens, false, None).is_err());
+        }
     }
 
     #[test]
