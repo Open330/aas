@@ -3,7 +3,7 @@
 > Status: **IMPLEMENTED** — Updated for aas v0.1.13. `PARITY_SPEC.md` remains the contract for
 > inherited `asx` behavior; aas-only extensions are identified explicitly.
 
-`aas` is a from-scratch Rust rewrite of [`asx`](https://github.com/enif-lee/asx), a
+`aas` is a from-scratch Rust rewrite of [`asx`](https://github.com/jiunbae/asx), a
 multi-account switcher for LLM coding agents (Claude Code, Codex, Grok/xAI, Z.AI, Cursor, Pi).
 It keeps each account's credential in its own `0600` file / OS keychain entry and switches
 the active login instantly, runs one-off profile-scoped agent sessions, and proxies one
