@@ -32,6 +32,7 @@ swift build -c release -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-
 
 Keep changes scoped, add tests for behavior changes, update README/design documentation when the
 CLI contract changes, and do not commit generated build output or credentials. Maintainers handle
-version tags and releases after all required checks pass.
+version tags and releases after all required checks pass. For each release they also refresh the
+public-post drafts in [docs/launch/](docs/launch/) and the demo scenes in [docs/demo/](docs/demo/).
 
 By participating, you agree to follow [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).

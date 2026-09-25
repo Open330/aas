@@ -1,5 +1,5 @@
 # changes: what is new since the last release (release notes, update posts).
-# Rewrite these scenes for each release from CHANGELOG.md's [Unreleased] section.
+# Rewrite these scenes for each release from CHANGELOG.md, alongside docs/launch/changes.md.
 
 Hide
 Type `scene "New: a provider name runs its active account"`
