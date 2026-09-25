@@ -2,22 +2,31 @@
 
 # aas — Agent Account Switcher
 
-A single-binary, dependency-free **multi-account switcher for LLM coding agents**
-(Claude Code, Codex, Grok/xAI, Z.AI, Kimi/Moonshot, Cursor, Pi). Rust rewrite of
-[`asx`](https://github.com/enif-lee/asx).
+**Use several Claude Code, Codex and other coding-agent accounts side by side.** Switch in one
+command, or run a single session on another account without touching your default login, and
+see every account's remaining usage at a glance.
 
-- Store each account's credential in its own `0600` file / OS keychain entry and switch instantly.
-- Run one-off, profile-scoped agent sessions without touching your default login.
-- Cross-provider execution: run one agent's UI against another provider's backend (ASX Proxy).
-- Usage at a glance (`aas usage`) — accounts resolve in parallel through a shared success cache;
-  use `--fresh` for an explicit live request.
-- **Reads existing `asx` state** — drop-in adoption, usually zero re-login.
+```bash
+brew install open330/tap/aas
+```
 
 <div align="center">
   <img src="docs/assets/cli-usage-sessions.gif" alt="aas CLI demo showing usage and isolated account sessions" width="920" />
   <br />
   <sub>Rendered from the reproducible <a href="docs/assets/cli-demo.tape">VHS tape</a>.</sub>
 </div>
+
+- **Isolated sessions:** `aas exec work` runs the agent under another account for one session and
+  leaves your default login as it was.
+- **Instant switching:** each account's credential lives in its own `0600` file / OS keychain
+  entry, and `aas switch` makes it the active login.
+- **Usage at a glance:** `aas usage` fetches every account's quota in parallel through a shared
+  success cache; use `--fresh` for an explicit live request.
+- **Cross-provider execution:** run one agent's UI against another provider's backend (ASX Proxy).
+- **One static binary, no dependencies.** Supports Claude Code, Codex, Grok/xAI, Z.AI,
+  Kimi/Moonshot, Cursor and Pi.
+- **Coming from [`asx`](https://github.com/jiunbae/asx)?** aas is its Rust rewrite and reads the
+  same state, so your existing logins usually appear without re-login.
 
 ## Quickstart for Agents
 
@@ -28,8 +37,10 @@ Paste this into your coding agent (Claude Code, Codex, …) to install and set u
 ```
 Install the aas CLI (Agent Account Switcher) from https://github.com/Open330/aas
 
-1. macOS/Linux — run:  curl -fsSL https://raw.githubusercontent.com/open330/aas/main/install.sh | sh
-   (Windows PowerShell:  irm https://raw.githubusercontent.com/open330/aas/main/install.ps1 | iex)
+1. Install. If Homebrew is available:  brew install open330/tap/aas
+   Otherwise, macOS/Linux (needs the GitHub CLI `gh` to verify the release):
+     curl -fsSL https://raw.githubusercontent.com/open330/aas/main/install.sh | sh
+   Windows PowerShell:  irm https://raw.githubusercontent.com/open330/aas/main/install.ps1 | iex
 2. Verify it works:     aas --version
 3. Show my accounts and live usage:  aas list  &&  aas usage
 
@@ -244,11 +255,19 @@ per-token-billed backend.
 
 Colors respect `NO_COLOR` and only apply on a TTY.
 
-## BarShelf widget
+## Menubar
 
-Prefer the menubar? This repo ships an `aas usage` widget for
-[BarShelf](https://github.com/Open330/barshelf), a scriptable menubar
-widget platform:
+**aas-bar** is a native macOS menubar app that shows every account's remaining quota as a ring
+gauge. For now, build it from a clone of this repo (macOS 14+, Swift toolchain):
+
+```bash
+cd apps/aas-bar && ./build-app.sh --install && open /Applications/AasBar.app
+```
+
+See [`apps/aas-bar/`](apps/aas-bar/) for details.
+
+Already using [BarShelf](https://github.com/Open330/barshelf), a scriptable menubar widget
+platform? This repo also ships an `aas usage` widget for it:
 
 <div align="center">
   <img src="widgets/barshelf-aas-usage/assets/screenshot.png" alt="aas Usage widget in the BarShelf popover" width="420" />
