@@ -11,9 +11,9 @@ brew install open330/tap/aas
 ```
 
 <div align="center">
-  <img src="docs/assets/cli-usage-sessions.gif" alt="aas CLI demo showing usage and isolated account sessions" width="920" />
+  <img src="docs/assets/cli-demo.gif" alt="aas CLI demo: account list, usage table, an isolated session and a switch" width="920" />
   <br />
-  <sub>Rendered from the reproducible <a href="docs/assets/cli-demo.tape">VHS tape</a>.</sub>
+  <sub>Rendered from reproducible <a href="docs/demo/">VHS scenes</a> against a throwaway fixture.</sub>
 </div>
 
 - **Isolated sessions:** `aas exec work` runs the agent under another account for one session and
@@ -299,8 +299,8 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets --all-features
 
-# Regenerate the README CLI demo (requires VHS)
-vhs docs/assets/cli-demo.tape
+# Regenerate the README CLI demo (requires VHS). --mode intro|changes, --channel readme|social|square
+docs/demo/render.sh
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the complete development workflow,
