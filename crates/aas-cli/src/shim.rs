@@ -21,6 +21,9 @@ pub enum ShimAction {
     Install {
         #[arg(value_name = "PROVIDER")]
         providers: Vec<String>,
+        /// Pin a specific executable instead of the first on PATH (requires one provider).
+        #[arg(long, value_name = "PATH")]
+        bin: Option<PathBuf>,
     },
     /// Remove installed shims (default: all).
     Uninstall {
@@ -100,12 +103,71 @@ fn under_temp_dir(dir: &Path) -> bool {
 /// sends every launch back through the wrapper and goes stale the moment that directory is
 /// cleaned up.
 fn real_binary(bin: &str) -> Option<PathBuf> {
+    real_binaries(bin).into_iter().next()
+}
+
+fn real_binaries(bin: &str) -> Vec<PathBuf> {
     let shims = shim_dir();
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut found: Vec<PathBuf> = Vec::new();
+    for candidate in std::env::split_paths(&path)
         .filter(|dir| !same_dir(dir, &shims) && !under_temp_dir(dir))
         .map(|dir| dir.join(bin))
-        .find(|candidate| is_executable(candidate))
+        .filter(|candidate| is_executable(candidate))
+    {
+        if !found.iter().any(|existing| same_dir(existing, &candidate)) {
+            found.push(candidate);
+        }
+    }
+    found
+}
+
+fn explicit_binary(path: &Path, bin: &str, shims: &Path) -> anyhow::Result<PathBuf> {
+    // Preserve launcher symlinks: package managers move their targets on upgrade.
+    let path = std::path::absolute(path)?;
+    anyhow::ensure!(
+        path.file_name() == Some(std::ffi::OsStr::new(bin)),
+        "--bin must name a `{bin}` executable"
+    );
+    anyhow::ensure!(is_executable(&path), "{} is not executable", path.display());
+    anyhow::ensure!(
+        !same_dir(path.parent().unwrap(), shims) && !same_dir(&path, &shims.join(bin)),
+        "--bin cannot point to an AAS shim"
+    );
+    Ok(path)
+}
+
+/// Read only our literal shell assignment; never evaluate an installed script.
+/// This also supports shims generated before explicit binary selection was added.
+fn recorded_binary(body: &str) -> Option<PathBuf> {
+    let prefix = format!("{SHIM_BIN_ENV}=");
+    let value = body.lines().find_map(|line| line.strip_prefix(&prefix))?;
+    let path = PathBuf::from(
+        value
+            .strip_prefix('\'')?
+            .strip_suffix('\'')?
+            .replace("'\\''", "'"),
+    );
+    (sh_quote(&path) == value).then_some(path)
+}
+
+fn warn_alternatives(bin: &str, selected: &Path) {
+    let alternatives: Vec<_> = real_binaries(bin)
+        .into_iter()
+        .filter(|candidate| !same_dir(candidate, selected))
+        .collect();
+    if alternatives.is_empty() {
+        return;
+    }
+    ui::warn(format!(
+        "{bin}: other installations found; updating one does not update the pinned CLI:"
+    ));
+    for path in alternatives {
+        println!("    {}", path.display());
+    }
+    ui::hint(format!(
+        "choose with `aas shim install {bin} --bin <path-to-{bin}>`."
+    ));
 }
 
 fn shim_body(provider: &str, real: &Path, aas: &Path) -> String {
@@ -188,17 +250,25 @@ fn set_executable(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-pub fn install(providers: &[String]) -> anyhow::Result<()> {
+pub fn install(providers: &[String], bin_override: Option<&Path>) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        bin_override.is_none() || providers.len() == 1,
+        "--bin requires exactly one provider"
+    );
+    let targets = resolve_targets(providers)?;
     let dir = shim_dir();
+    let selected = bin_override
+        .map(|path| explicit_binary(path, agent_bin(&targets[0]).unwrap(), &dir))
+        .transpose()?;
     std::fs::create_dir_all(&dir)?;
     let aas = std::env::current_exe()?;
     let mut installed = 0usize;
 
-    for provider in resolve_targets(providers)? {
+    for provider in targets {
         let Some(bin) = agent_bin(&provider) else {
             continue;
         };
-        let Some(real) = real_binary(bin) else {
+        let Some(real) = selected.clone().or_else(|| real_binary(bin)) else {
             ui::hint(format!("{provider}: `{bin}` is not on PATH — skipped"));
             continue;
         };
@@ -206,6 +276,7 @@ pub fn install(providers: &[String]) -> anyhow::Result<()> {
         std::fs::write(&path, shim_body(&provider, &real, &aas))?;
         set_executable(&path)?;
         ui::success(format!("{bin} → {}", real.display()));
+        warn_alternatives(bin, &real);
         installed += 1;
     }
 
@@ -301,10 +372,20 @@ pub fn status() -> anyhow::Result<()> {
     }
 
     for bin in installed {
-        let real = real_binary(bin)
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "(real CLI not found)".into());
-        println!("  {bin:<8} → {real}");
+        let body = std::fs::read_to_string(dir.join(bin))?;
+        if let Some(real) = recorded_binary(&body) {
+            println!("  {bin:<8} → {} (pinned)", real.display());
+            if !is_executable(&real) {
+                ui::warn(format!(
+                    "{bin}: pinned CLI is missing or not executable; reinstall the shim."
+                ));
+            }
+            warn_alternatives(bin, &real);
+        } else {
+            ui::warn(format!(
+                "{bin}: cannot read pinned CLI; run `aas shim install {bin}`."
+            ));
+        }
     }
     Ok(())
 }
@@ -312,6 +393,93 @@ pub fn status() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_reads_the_pinned_path_without_evaluating_shell() {
+        for real in ["/old/bin/codex", "/space and 'quote/$(touch nope)/codex"] {
+            let body = shim_body("codex", Path::new(real), Path::new("/bin/aas"));
+            assert_eq!(recorded_binary(&body), Some(PathBuf::from(real)));
+        }
+        assert_eq!(recorded_binary("AAS_SHIM_BIN=$(command -v codex)"), None);
+        assert_eq!(
+            recorded_binary("AAS_SHIM_BIN='/bin/codex'; touch nope"),
+            None
+        );
+    }
+
+    #[test]
+    fn explicit_selection_requires_one_provider() {
+        assert!(install(&[], Some(Path::new("/bin/codex"))).is_err());
+        assert!(install(
+            &["codex".into(), "claude".into()],
+            Some(Path::new("/bin/codex"))
+        )
+        .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_selection_preserves_launcher_and_rejects_shims() {
+        let dir = std::env::temp_dir().join(format!("aas-shim-{}", uuid::Uuid::new_v4()));
+        let shims = dir.join("shims");
+        std::fs::create_dir_all(&shims).unwrap();
+        let version = dir.join("codex-v1");
+        std::fs::write(&version, "#!/bin/sh\nexit 0\n").unwrap();
+        let launcher = dir.join("codex");
+        std::os::unix::fs::symlink(&version, &launcher).unwrap();
+        assert!(explicit_binary(&launcher, "codex", &shims).is_err());
+        set_executable(&version).unwrap();
+        assert_eq!(
+            explicit_binary(&launcher, "codex", &shims).unwrap(),
+            launcher
+        );
+        assert!(explicit_binary(&launcher, "claude", &shims).is_err());
+        assert!(explicit_binary(&dir.join("missing/codex"), "codex", &shims).is_err());
+        let shim = shims.join("codex");
+        std::fs::write(&shim, "#!/bin/sh\nexit 0\n").unwrap();
+        set_executable(&shim).unwrap();
+        assert!(explicit_binary(&shim, "codex", &shims).is_err());
+        std::fs::remove_file(&launcher).unwrap();
+        std::os::unix::fs::symlink(&shim, &launcher).unwrap();
+        assert!(explicit_binary(&launcher, "codex", &shims).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selected_binary_is_used_for_every_shim_route() {
+        let dir = std::env::temp_dir().join(format!("aas shim ' {}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("codex");
+        std::fs::write(&real, "#!/bin/sh\nprintf '%s\\n' selected \"$@\"\n").unwrap();
+        set_executable(&real).unwrap();
+        let aas = dir.join("aas");
+        std::fs::write(&aas, "#!/bin/sh\nif [ \"$1\" = active ]; then\n  test -n \"${TEST_ACTIVE:-}\" || exit 1\n  echo test-account\nelse\n  shift 3\n  exec \"$AAS_SHIM_BIN\" \"$@\"\nfi\n").unwrap();
+        set_executable(&aas).unwrap();
+        let shim = dir.join("shim");
+        std::fs::write(&shim, shim_body("codex", &real, &aas)).unwrap();
+        for route in [
+            None,
+            Some("AAS_SHIM"),
+            Some("CODEX_HOME"),
+            Some("TEST_ACTIVE"),
+        ] {
+            let mut cmd = std::process::Command::new("/bin/sh");
+            cmd.env_clear()
+                .arg(&shim)
+                .args(["--version", "argument with spaces", "'literal'"]);
+            if let Some(key) = route {
+                cmd.env(key, "1");
+            }
+            let output = cmd.output().unwrap();
+            assert!(output.status.success(), "route {route:?}: {output:?}");
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                "selected\n--version\nargument with spaces\n'literal'\n"
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn body_hands_the_resolved_binary_to_exec() {

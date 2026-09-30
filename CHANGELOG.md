@@ -7,6 +7,9 @@ All notable user-facing changes are recorded here. The format follows
 
 ### Added
 
+- `aas shim install <provider> --bin <path>` selects a specific CLI installation when multiple
+  copies exist. Install and status warn about alternatives on PATH, so updating an unused npm
+  copy while a standalone copy is pinned is visible.
 - `aas exec <provider>` (and the bare `aas <provider>`, and `aas proxy <provider> <frontend>`) runs
   that provider's active account, so `aas exec codex` no longer answers `Account not found: codex`
   for a name the rest of the CLI already understands. A stored account whose name happens to match
@@ -15,6 +18,8 @@ All notable user-facing changes are recorded here. The format follows
 
 ### Fixed
 
+- `aas shim status` reports the executable recorded in the installed wrapper, rather than a new
+  PATH lookup that could disagree with the executable actually launched. Missing targets are flagged.
 - A shim's re-entry guard no longer reaches the agent it launched. The shim exports `AAS_SHIM` so
   `aas exec` cannot resolve its way back into the shim through PATH, but the variable then stayed
   set for the agent and everything the agent started — a shell, or a tmux server that holds it for

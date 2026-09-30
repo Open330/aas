@@ -348,7 +348,9 @@ async fn main() {
         Command::Proxy { name, frontend } => exec::cmd_proxy(&store, &name, &frontend).await,
         Command::Active { provider } => cmd_active(&store, &provider),
         Command::Shim { action } => match action {
-            shim::ShimAction::Install { providers } => shim::install(&providers),
+            shim::ShimAction::Install { providers, bin } => {
+                shim::install(&providers, bin.as_deref())
+            }
             shim::ShimAction::Uninstall { providers } => shim::uninstall(&providers),
             shim::ShimAction::Status => shim::status(),
         },

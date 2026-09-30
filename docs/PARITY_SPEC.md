@@ -281,6 +281,10 @@ to safe effort tiers. Live model catalogs are fetched once per proxy process.
   which then prepends its own flags a second time), and arguments are forwarded after `--` so
   flags both sides define reach the agent. No active account, or an unavailable `aas`, falls
   through to the real CLI.
+  `install <provider> --bin <path>` pins an explicitly selected executable (one provider only),
+  preserving launcher symlinks while rejecting the shim itself. `status` reads the recorded path
+  from the wrapper without evaluating shell code and flags missing targets. Install and status
+  list alternative installations on PATH to make upgrades of an unused copy visible.
 - `active <provider>` prints the active account name on stdout and exits 1 when unset — the
   script-facing form of `status`.
 - Parallel `list -u` / `usage` (fan-out fetch, ordered single render).

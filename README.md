@@ -146,6 +146,11 @@ ssh -t jiun-mini 'aas import ~/aas-vault.age'
   `codex` re-enters through `aas exec <active>` and follows `switch` for *every* credential shape.
   Prepend the directory it prints to `PATH`. Because the active account is resolved per
   invocation, it also cannot drift away from a written-once native file.
+  The executable path is pinned at install time. If multiple copies are installed (for example,
+  standalone and npm Codex), updating another copy does not update the pinned one. `aas shim status`
+  shows the pinned path and other installations on PATH. Select a copy explicitly with
+  `aas shim install codex --bin "$(npm prefix -g)/bin/codex"`, or pass another executable path.
+  `--bin` requires exactly one provider; launcher symlinks are preserved across upgrades.
 - **`exec <name>`** runs the agent under a profile-scoped home without touching your default.
   `<name>` is a stored account name, or a provider name — `aas exec codex` runs whatever
   `aas status` lists as active for Codex.

@@ -28,6 +28,57 @@ impl Drop for Fixture {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn shim_selection_and_status_follow_the_pinned_launcher() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let fixture = Fixture::new();
+    let release = fixture.0.join("release");
+    std::fs::write(&release, "#!/bin/sh\necho chosen-version\n").unwrap();
+    std::fs::set_permissions(&release, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let launcher = fixture.0.join("codex");
+    symlink(&release, &launcher).unwrap();
+    let output = fixture
+        .command()
+        .args(["shim", "install", "codex", "--bin"])
+        .arg(&launcher)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let shim = fixture.0.join("shims/codex");
+    let output = Command::new(&shim)
+        .env_clear()
+        .env("AAS_CONFIG_DIR", &fixture.0)
+        .env("AAS_NO_KEYCHAIN", "1")
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "chosen-version\n");
+    // Status must still show the recorded launcher even when PATH cannot resolve it.
+    let output = fixture
+        .command()
+        .env("PATH", "")
+        .args(["shim", "status"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .contains(&format!("{} (pinned)", launcher.display())));
+    std::fs::remove_file(release).unwrap();
+    let output = fixture.command().args(["shim", "status"]).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let report = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        report.contains("pinned CLI is missing or not executable"),
+        "{report}"
+    );
+}
+
 #[test]
 fn candidates_json_ranks_cached_accounts_and_honors_exclusions() {
     let fixture = Fixture::new();
