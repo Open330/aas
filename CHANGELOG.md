@@ -20,6 +20,28 @@ All notable user-facing changes are recorded here. The format follows
 
 - `aas shim status` reports the executable recorded in the installed wrapper, rather than a new
   PATH lookup that could disagree with the executable actually launched. Missing targets are flagged.
+- Registering a Claude long-lived token no longer calls the unsupported OAuth profile endpoint
+  to discover an email. Existing email metadata is preserved; new token-only accounts may have
+  no email to display.
+- Renaming an idle Codex account updates profile-local SQLite rollout paths so saved conversations
+  can still be resumed. Native session/maintenance locks prevent renaming a live profile. History
+  path changes are rolled back with the profile if the account/active-marker transaction fails.
+- Codex refresh inspects the resulting access-token expiration instead of treating a successful
+  native command or file rewrite as proof of renewal. Expired or unverifiable tokens return a
+  failure; a native CLI/access failure no longer automatically starts login. `exec` and `proxy`
+  stop when automatic credential refresh fails instead of silently launching with stale auth.
+
+- Codex launches with a home too long for its Unix daemon control socket automatically use
+  `--no-daemon` when the installed CLI supports it. This prevents `path must be shorter than
+  SUN_LEN` startup failures with isolated macOS profiles while retaining profile data and
+  resume/fork arguments. Explicit remote connections and older CLIs are left alone.
+
+- Claude long-lived usage probes retain quota headers from HTTP 429 responses instead of
+  discarding them. Cached quota remains visible while automatic refresh honors Retry-After;
+  deferred refresh is distinguished from a live failure. `aas usage --fresh` can explicitly
+  recheck a long-lived probe once per minute, including gates saved by older versions.
+  Long-lived probes also skip the unsupported OAuth profile request.
+
 - A shim's re-entry guard no longer reaches the agent it launched. The shim exports `AAS_SHIM` so
   `aas exec` cannot resolve its way back into the shim through PATH, but the variable then stayed
   set for the agent and everything the agent started — a shell, or a tmux server that holds it for

@@ -576,7 +576,7 @@ impl AccountStore {
             self.validate_storage_key_in(&original_store, &provider, new)?;
 
             let original_active = self.load_active_unlocked()?;
-            crate::secure_store::rename_secret_unchecked(&provider, old, new)?;
+            let renamed = crate::secure_store::rename_secret_unchecked(&provider, old, new)?;
 
             let mut updated_store = original_store.clone();
             updated_store.accounts[idx].name = new.to_string();
@@ -584,7 +584,7 @@ impl AccountStore {
                 updated_store.accounts[idx].label = Some(new.to_string());
             }
             if let Err(error) = self.save_unlocked(&updated_store) {
-                let rollback = crate::secure_store::rename_secret_unchecked(&provider, new, old);
+                let rollback = renamed.rollback();
                 return Err(transaction_error(error, rollback.err()));
             }
 
@@ -600,8 +600,7 @@ impl AccountStore {
                 updated_active.insert("updated".into(), serde_json::Value::String(now_iso()));
                 if let Err(error) = self.save_active_unlocked(&updated_active) {
                     let store_rollback = self.save_unlocked(&original_store).err();
-                    let secret_rollback =
-                        crate::secure_store::rename_secret_unchecked(&provider, new, old).err();
+                    let secret_rollback = renamed.rollback().err();
                     return Err(StoreError::Transaction(format!(
                         "{error}; store rollback={store_rollback:?}; secret rollback={secret_rollback:?}"
                     )));

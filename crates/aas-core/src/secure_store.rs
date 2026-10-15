@@ -262,14 +262,62 @@ fn rollback_keychain(provider: &str, from: &str, to: &str, raw: &str) {
 
 pub fn rename_secret(provider: &str, old_name: &str, new_name: &str) -> io::Result<()> {
     validate_storage_key(provider, new_name)?;
-    rename_secret_unchecked(provider, old_name, new_name)
+    rename_secret_unchecked(provider, old_name, new_name).map(|_| ())
+}
+
+pub(crate) struct SecretRename {
+    provider: String,
+    old_name: String,
+    new_name: String,
+    history: crate::codex_history::HistoryRewrite,
+    _locks: Vec<std::fs::File>,
+}
+
+impl SecretRename {
+    pub(crate) fn rollback(self) -> io::Result<()> {
+        let home = profile_home(&self.provider, &self.new_name);
+        let history = self.history.rollback(&home).err();
+        let moved = move_secret_unchecked(&self.provider, &self.new_name, &self.old_name).err();
+        if history.is_some() || moved.is_some() {
+            return Err(io::Error::other(format!(
+                "rename rollback failed: history={history:?}; profile={moved:?}"
+            )));
+        }
+        Ok(())
+    }
 }
 
 pub(crate) fn rename_secret_unchecked(
     provider: &str,
     old_name: &str,
     new_name: &str,
-) -> io::Result<()> {
+) -> io::Result<SecretRename> {
+    let from = std::path::absolute(profile_home(provider, old_name))?;
+    let to = std::path::absolute(profile_home(provider, new_name))?;
+    let codex = crate::naming::normalize_provider_key(provider) == "codex";
+    let locks = if codex {
+        crate::codex_history::lock_idle_profile(&from)?
+    } else {
+        Vec::new()
+    };
+    move_secret_unchecked(provider, old_name, new_name)?;
+    let mut renamed = SecretRename {
+        provider: provider.into(),
+        old_name: old_name.into(),
+        new_name: new_name.into(),
+        history: Default::default(),
+        _locks: locks,
+    };
+    if codex && to.is_dir() {
+        if let Err(error) = renamed.history.apply(&to, &from, &to) {
+            let rollback = renamed.rollback().err();
+            return Err(io::Error::other(format!("{error}; rollback={rollback:?}")));
+        }
+    }
+    Ok(renamed)
+}
+
+fn move_secret_unchecked(provider: &str, old_name: &str, new_name: &str) -> io::Result<()> {
     if old_name.is_empty() || new_name.is_empty() || old_name == new_name {
         return Err(io::Error::other(
             "Invalid rename: old and new names must differ and be non-empty",

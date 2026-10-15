@@ -15,6 +15,23 @@ use aas_proxy::{inject_proxy_endpoint, start_proxy, Credential, ProxyStartOption
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+mod codex_daemon;
+
+fn check_refresh(
+    outcome: Option<aas_providers::RefreshOutcome>,
+    account: &str,
+) -> anyhow::Result<()> {
+    if let Some(outcome) = outcome {
+        if !outcome.ok {
+            anyhow::bail!(
+                "Cannot run {account}: {}. Run `aas refresh {account} --no-login` to diagnose.",
+                outcome.message
+            );
+        }
+    }
+    Ok(())
+}
+
 struct AgentSpec {
     bin: &'static str,
     home_env: &'static str,
@@ -337,7 +354,7 @@ pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyh
             anyhow::bail!("Duplicate fallback account: {name}");
         }
         if let Some(p) = get_adapter(&candidate.provider) {
-            let _ = p.refresh_if_expired(&candidate.name).await;
+            check_refresh(p.refresh_if_expired(&candidate.name).await, &candidate.name)?;
         }
         let raw = secure_store::get_secret(&candidate.provider, &candidate.name)
             .ok_or_else(|| anyhow::anyhow!("No stored credential for fallback account: {name}"))?;
@@ -354,7 +371,7 @@ pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyh
 
     // Auto-refresh an expired credential before launch.
     if let Some(p) = get_adapter(&profile_provider) {
-        let _ = p.refresh_if_expired(&account_name).await;
+        check_refresh(p.refresh_if_expired(&account_name).await, &account_name)?;
     }
 
     let mut env: HashMap<String, String> = std::env::vars().collect();
@@ -464,7 +481,15 @@ pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyh
     }
 
     // Spawn the native binary (interactive; stdio inherited).
-    let mut cmd = tokio::process::Command::new(agent_program(&spec));
+    let program = agent_program(&spec);
+    if spec.bin == "codex"
+        && codex_daemon::avoid_long_socket_path(&program, &env, &mut forward).await
+    {
+        eprintln!(
+            "aas: Codex's daemon socket path exceeds the Unix limit; running with --no-daemon."
+        );
+    }
+    let mut cmd = tokio::process::Command::new(program);
     cmd.env_clear().envs(&env).args(&forward);
     let code = match cmd.spawn() {
         Ok(mut child) => {
@@ -533,7 +558,7 @@ pub async fn cmd_proxy(store: &AccountStore, name: &str, frontend: &str) -> anyh
     }
 
     if let Some(p) = get_adapter(&backend_provider) {
-        let _ = p.refresh_if_expired(&acct.name).await;
+        check_refresh(p.refresh_if_expired(&acct.name).await, &acct.name)?;
     }
     let Some(backend_cred) = secure_store::get_secret(&backend_provider, &acct.name) else {
         anyhow::bail!("No stored credential for {backend_provider}/{}", acct.name);

@@ -121,7 +121,7 @@ enum Command {
         /// Emit machine-readable JSON (for aas-bar and other integrations).
         #[arg(long)]
         json: bool,
-        /// Bypass the ten-minute success cache (active rate-limit backoff is still honored).
+        /// Bypass the success cache; Claude long-lived probes can recheck backoff once per minute.
         #[arg(long)]
         fresh: bool,
         /// Account order within each provider.

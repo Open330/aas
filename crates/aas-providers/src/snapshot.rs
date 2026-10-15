@@ -2,7 +2,8 @@
 //!
 //! Successful results are cached across processes, and a per-account fetch lock coalesces a
 //! terminal, BarShelf, and editor asking for the same data at once. A live rate-limit gate is
-//! checked before credential refresh, guaranteeing that backoff means zero provider requests.
+//! checked before credential refresh. Explicit long-lived Claude probe rechecks are throttled
+//! to once per minute; automatic callers never bypass a live gate.
 
 use aas_core::model::{sort_accounts, AccountSort};
 use aas_core::store::AccountStore;
@@ -60,7 +61,7 @@ fn cache_key(provider: Provider, account: &str) -> String {
 
 fn backoff_message(until_ms: i64) -> String {
     let seconds = ((until_ms - now_ms()) / 1000).max(0);
-    format!("rate limited (HTTP 429) — backing off {seconds}s to recover.")
+    format!("Usage refresh deferred after HTTP 429; retry in {seconds}s (stored backoff, not a live check).")
 }
 
 fn from_cache(mut entry: CacheEntry, error: Option<String>) -> FetchedUsage {
@@ -86,6 +87,31 @@ fn failure_with_cache(key: &str, headline: &str, error: String) -> FetchedUsage 
             cached: false,
             fetched_at_ms: None,
         })
+}
+
+fn deferred_from_cache(mut entry: CacheEntry, message: String) -> FetchedUsage {
+    entry.usage.notes.push(message);
+    entry
+        .usage
+        .notes
+        .push("showing the last successful usage snapshot".into());
+    from_cache(entry, None)
+}
+
+fn deferred_usage(key: &str, provider: &str, until: i64) -> FetchedUsage {
+    let message = backoff_message(until);
+    match usage_cache::get(key).filter(|entry| !entry.usage.meters.is_empty()) {
+        Some(entry) => deferred_from_cache(entry, message),
+        None => failure_with_cache(key, provider, message),
+    }
+}
+
+fn can_recheck_probe(provider: Provider, account: &str, mode: UsageCacheMode, key: &str) -> bool {
+    mode == UsageCacheMode::Refresh
+        && provider == Provider::Claude
+        && aas_core::backoff::ready_for_recheck(key)
+        && aas_core::secure_store::get_secret("claude", account)
+            .is_some_and(|raw| crate::claude::is_long_lived(&raw))
 }
 
 fn permits_stale_fallback(error: &str) -> bool {
@@ -119,9 +145,12 @@ async fn fetch_account(provider: Provider, account: &str, mode: UsageCacheMode) 
         }
     }
 
-    // Backoff is authoritative and precedes both the token endpoint and usage endpoint.
+    // Automatic refresh honors the gate. An explicit long-lived probe may recheck once
+    // per minute, since an inference cooldown is not proof that quota headers are unavailable.
     if let Some(until) = aas_core::backoff::rate_limited_until(&key) {
-        return failure_with_cache(&key, provider.id(), backoff_message(until));
+        if !can_recheck_probe(provider, account, mode, &key) {
+            return deferred_usage(&key, provider.id(), until);
+        }
     }
 
     let _fetch_lock = match fetch_lock(key.clone()).await {
@@ -139,8 +168,16 @@ async fn fetch_account(provider: Provider, account: &str, mode: UsageCacheMode) 
         }
     }
 
+    let mut recheck_probe = false;
     if let Some(until) = aas_core::backoff::rate_limited_until(&key) {
-        return failure_with_cache(&key, provider.id(), backoff_message(until));
+        if can_recheck_probe(provider, account, mode, &key) {
+            // Serialize the recheck across CLI/UI processes. Record a minimum gate before
+            // sending, so network failures cannot cause an unbounded manual retry loop.
+            aas_core::backoff::record_rate_limit(&key, until.saturating_sub(now_ms()));
+            recheck_probe = true;
+        } else {
+            return deferred_usage(&key, provider.id(), until);
+        }
     }
 
     let refresh_failure = provider
@@ -159,7 +196,11 @@ async fn fetch_account(provider: Provider, account: &str, mode: UsageCacheMode) 
             )
         });
 
-    let mut usage = provider.usage(account).await;
+    let mut usage = if recheck_probe {
+        crate::claude::usage_recheck(account).await
+    } else {
+        provider.usage(account).await
+    };
     let fetched_at_ms = now_ms();
     if usage.error.is_none() {
         let _ = usage_cache::put(
@@ -310,6 +351,25 @@ mod tests {
         assert_eq!(fetched.usage.meters.len(), 1);
         assert_eq!(fetched.usage.error.as_deref(), Some("rate limited"));
         assert!(fetched.usage.notes[0].contains("last successful"));
+    }
+
+    #[test]
+    fn deferred_refresh_keeps_quota_without_claiming_a_live_failure() {
+        let fetched = deferred_from_cache(
+            CacheEntry {
+                fetched_at_ms: 42,
+                usage: Usage {
+                    meters: vec![aas_core::usage::Meter::new("5h", 100.0, None)],
+                    ..Default::default()
+                },
+            },
+            backoff_message(now_ms() + 60_000),
+        );
+        assert!(fetched.cached);
+        assert_eq!(fetched.fetched_at_ms, Some(42));
+        assert_eq!(fetched.usage.meters[0].used_pct, 100.0);
+        assert!(fetched.usage.error.is_none());
+        assert!(fetched.usage.notes[0].contains("not a live check"));
     }
 
     #[test]

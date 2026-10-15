@@ -79,6 +79,39 @@ fn shim_selection_and_status_follow_the_pinned_launcher() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn codex_long_profile_launch_uses_supported_fallback_without_moving_home() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let bin = fixture.0.join("codex");
+    std::fs::write(
+        &bin,
+        "#!/bin/sh\nif [ \"$1\" = --help ]; then\n  printf '  --no-daemon  Run without server\\n'\nelse\n  printf '%s\\n' \"$CODEX_HOME\" \"$@\"\nfi\n",
+    ).unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let native = fixture.0.join("native");
+    std::fs::create_dir(&native).unwrap();
+    let output = fixture
+        .command()
+        .env("AAS_SHIM_BIN", &bin)
+        .env("CODEX_HOME", &native)
+        .args(["e", "primary", "resume", "--last"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected_home = fixture.0.join("profiles/codex-primary");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{}\n--no-daemon\nresume\n--last\n", expected_home.display())
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("running with --no-daemon"));
+}
+
 #[test]
 fn candidates_json_ranks_cached_accounts_and_honors_exclusions() {
     let fixture = Fixture::new();

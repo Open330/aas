@@ -238,19 +238,20 @@ fn run_codex_command(home: &Path, args: &[&str], timeout_secs: u64) -> bool {
     }
 }
 
-/// Outcome of asking the native `codex` CLI to refresh a profile's credential.
-///
-/// "The CLI ran and chose not to rewrite `auth.json`" is not a failure: codex refreshes lazily,
-/// so a credential it left alone is one it is still happy with. Collapsing that into the same
-/// answer as "codex could not run" made `aas refresh` report `native refresh failed` for accounts
-/// that were perfectly healthy — `codex login status` on the very same profile home answers
-/// `Logged in using ChatGPT`.
+/// Outcome of asking native Codex to refresh and inspecting the resulting credential.
+/// A successful command or a rewritten file alone does not prove an expired token was renewed.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum NativeRefresh {
     /// codex rewrote the credential; the new one is stored.
     Rotated,
     /// codex ran and left the credential as it was.
     Unchanged,
+    /// The native command succeeded, but the resulting access token is still expired.
+    StillExpired,
+    /// No usable credential is stored; native login is required.
+    MissingCredential,
+    /// The stored OAuth token has no decodable expiry, so renewal cannot be confirmed.
+    Unverified,
     /// codex could not run, or its result could not be read back or persisted.
     Failed,
 }
@@ -265,22 +266,69 @@ impl NativeRefresh {
             },
             NativeRefresh::Unchanged => RefreshOutcome {
                 ok: true,
-                message: "codex left the credential unchanged — nothing to rotate".into(),
+                message: "credential unchanged; no rotation performed (server validity not checked)".into(),
+                needs_relogin: false,
+            },
+            NativeRefresh::StillExpired => RefreshOutcome {
+                ok: false,
+                message: "access token is still expired after native Codex refresh; re-login may be required".into(),
+                needs_relogin: false,
+            },
+            NativeRefresh::MissingCredential => RefreshOutcome {
+                ok: false,
+                message: "no usable Codex credential; login required".into(),
+                needs_relogin: true,
+            },
+            NativeRefresh::Unverified => RefreshOutcome {
+                ok: false,
+                message: "could not verify the stored Codex access token's expiration after refresh".into(),
                 needs_relogin: false,
             },
             NativeRefresh::Failed => RefreshOutcome {
                 ok: false,
-                message: "native refresh failed".into(),
-                needs_relogin: true,
+                message: "native Codex refresh failed; check CLI availability and profile access".into(),
+                needs_relogin: false,
             },
         }
     }
 }
 
+fn classify_native_refresh(raw: &str, changed: bool, now: i64) -> NativeRefresh {
+    let Ok(data) = serde_json::from_str::<Value>(raw) else {
+        return NativeRefresh::Unverified;
+    };
+    let api_key = data
+        .get("OPENAI_API_KEY")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty());
+    if !api_key {
+        if !data
+            .get("tokens")
+            .and_then(|t| t.get("access_token"))
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+        {
+            return NativeRefresh::MissingCredential;
+        }
+        match codex_access_exp_ms(raw) {
+            Some(exp) if exp < now + 60_000 => return NativeRefresh::StillExpired,
+            None => return NativeRefresh::Unverified,
+            _ => {}
+        }
+    }
+    if changed {
+        NativeRefresh::Rotated
+    } else {
+        NativeRefresh::Unchanged
+    }
+}
+
 /// asx `attemptCodexNativeRefresh` — the doctor trick (blocking; call via spawn_blocking).
 fn codex_native_refresh_blocking(account: &str) -> NativeRefresh {
-    let Some(stored) = get_secret(PROVIDER, account) else {
-        return NativeRefresh::Failed;
+    let stored = match aas_core::secure_store::get_secret_result(PROVIDER, account) {
+        Ok(Some(stored)) => stored,
+        Ok(None) => return NativeRefresh::MissingCredential,
+        Err(_) => return NativeRefresh::Failed,
     };
     let home = profile_home(PROVIDER, account);
     let auth_path = home.join("auth.json");
@@ -294,8 +342,9 @@ fn codex_native_refresh_blocking(account: &str) -> NativeRefresh {
     let Some(fresh) = std::fs::read_to_string(&auth_path).ok() else {
         return NativeRefresh::Failed;
     };
-    if fresh == stored {
-        return NativeRefresh::Unchanged;
+    let outcome = classify_native_refresh(&fresh, fresh != stored, now_ms());
+    if outcome != NativeRefresh::Rotated {
+        return outcome;
     }
     if read_codex_auth_native().as_deref() == Some(stored.as_str())
         && write_codex_auth_native(&fresh).is_err()
@@ -499,12 +548,52 @@ mod tests {
         let failed = NativeRefresh::Failed.outcome();
         assert!(!failed.ok);
         assert!(
-            failed.needs_relogin,
-            "a real failure should prompt re-login"
+            !failed.needs_relogin,
+            "a CLI failure does not prove login is invalid"
         );
+        assert!(NativeRefresh::MissingCredential.outcome().needs_relogin);
     }
 
     use super::*;
+
+    #[test]
+    fn refresh_checks_expiration_even_when_the_native_command_succeeds_or_rewrites_auth() {
+        let now = 1_000_000;
+        let auth = |expiry| {
+            use base64::Engine;
+            let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(serde_json::json!({"exp": expiry}).to_string());
+            serde_json::json!({"tokens":{"access_token":format!("e30.{payload}.sig"),"refresh_token":"synthetic"}}).to_string()
+        };
+        for changed in [false, true] {
+            assert_eq!(
+                classify_native_refresh(&auth(1), changed, now),
+                NativeRefresh::StillExpired
+            );
+            assert!(!classify_native_refresh(&auth(1), changed, now).outcome().ok);
+            assert_eq!(
+                classify_native_refresh(r#"{"tokens":{"access_token":"opaque"}}"#, changed, now),
+                NativeRefresh::Unverified
+            );
+        }
+        assert_eq!(
+            classify_native_refresh(&auth(10_000), false, now),
+            NativeRefresh::Unchanged
+        );
+        assert_eq!(
+            classify_native_refresh(&auth(10_000), true, now),
+            NativeRefresh::Rotated
+        );
+        assert_eq!(
+            classify_native_refresh(r#"{"OPENAI_API_KEY":"synthetic"}"#, false, now),
+            NativeRefresh::Unchanged
+        );
+        assert_eq!(
+            classify_native_refresh("{}", false, now),
+            NativeRefresh::MissingCredential
+        );
+    }
+
     use base64::Engine;
     use serde_json::json;
 

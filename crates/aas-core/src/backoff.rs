@@ -28,6 +28,8 @@ const BASE_MS: i64 = 60_000; // 60s
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct Entry {
     until_ms: i64,
+    #[serde(default)]
+    recorded_at_ms: Option<i64>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -107,6 +109,7 @@ fn next_backoff(hint_ms: i64, now: i64) -> Entry {
     let backoff = hint_ms.max(BASE_MS);
     Entry {
         until_ms: now.saturating_add(backoff),
+        recorded_at_ms: Some(now),
     }
 }
 
@@ -141,6 +144,24 @@ pub fn record_rate_limit(key: &str, server_hint_ms: i64) -> i64 {
     record_at(key, server_hint_ms, now_ms())
 }
 
+/// Explicit inference-probe rechecks may retry after one minute. Legacy entries have no
+/// observation time and can be rechecked once; the next 429 records one.
+fn recheck_ready(entry: Entry, now: i64) -> bool {
+    entry
+        .recorded_at_ms
+        .is_none_or(|at| now.saturating_sub(at) >= BASE_MS)
+}
+
+pub fn ready_for_recheck(key: &str) -> bool {
+    with_lock(false, || {
+        Ok(load_unlocked()
+            .entries
+            .get(key)
+            .is_none_or(|entry| recheck_ready(*entry, now_ms())))
+    })
+    .unwrap_or(false)
+}
+
 /// Clear a key's backoff after a successful fetch.
 pub fn clear(key: &str) {
     let _ = with_lock(true, || {
@@ -155,6 +176,16 @@ pub fn clear(key: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_rechecks_are_throttled_even_for_long_quota_windows() {
+        let entry = next_backoff(7 * 24 * 60 * 60 * 1000, 1000);
+        assert!(!recheck_ready(entry, 1000));
+        assert!(!recheck_ready(entry, 60_999));
+        assert!(recheck_ready(entry, 61_000));
+        let legacy: Entry = serde_json::from_str(r#"{"until_ms":999999}"#).unwrap();
+        assert!(recheck_ready(legacy, 1000));
+    }
 
     #[test]
     fn fresh_hit_uses_server_hint() {

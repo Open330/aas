@@ -232,6 +232,7 @@ pub(crate) fn meters_from_ratelimit_headers(header: impl Fn(&str) -> Option<Stri
         // Headers report a 0..1 fraction; `Meter::used_pct` (like the usage endpoint) is 0..100.
         let Some(fraction) = header(&format!("anthropic-ratelimit-unified-{window}-utilization"))
             .and_then(|raw| raw.trim().parse::<f64>().ok())
+            .filter(|fraction| fraction.is_finite())
         else {
             continue;
         };
@@ -245,6 +246,37 @@ pub(crate) fn meters_from_ratelimit_headers(header: impl Fn(&str) -> Option<Stri
         ));
     }
     meters
+}
+
+/// A denied completion can still be a successful quota observation. Keep the inference
+/// cooldown, but let snapshot cache the meters instead of replacing them with older data.
+fn rate_limited_usage(
+    headline: String,
+    plan: Option<String>,
+    meters: Vec<Meter>,
+    long_lived: bool,
+    seconds: i64,
+) -> Usage {
+    if long_lived && !meters.is_empty() {
+        Usage {
+            headline,
+            plan,
+            meters,
+            notes: vec![
+                "Inference probe was rate limited (HTTP 429); usage read from response headers. Automatic refresh respects Retry-After.".into()
+            ],
+            error: None,
+        }
+    } else {
+        Usage {
+            headline,
+            plan,
+            error: Some(format!(
+                "Usage request rate limited (HTTP 429); automatic retry in {seconds}s."
+            )),
+            ..Default::default()
+        }
+    }
 }
 
 pub(crate) fn build_claude_usage_meters(usage: &Value) -> Vec<Meter> {
@@ -394,6 +426,11 @@ async fn fetch_anthropic_json(path: &str, token: &str) -> (u16, Option<Value>, O
 }
 
 async fn extract_claude_email(cred_json: &str) -> Option<String> {
+    // setup-token credentials cannot call the OAuth profile endpoint. Existing account email
+    // metadata is retained by the store; a newly registered token may legitimately have none.
+    if is_long_lived(cred_json) {
+        return None;
+    }
     let token = get_claude_code_oauth_token(cred_json)?;
     let (status, data, _) = fetch_anthropic_json("/api/oauth/profile", &token).await;
     if !(200..300).contains(&status) {
@@ -421,6 +458,15 @@ async fn extract_claude_email(cred_json: &str) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn usage(account: &str) -> Usage {
+    usage_inner(account, false).await
+}
+
+/// Called only under snapshot's fetch lock after the explicit recheck throttle is recorded.
+pub(crate) async fn usage_recheck(account: &str) -> Usage {
+    usage_inner(account, true).await
+}
+
+async fn usage_inner(account: &str, recheck: bool) -> Usage {
     let Some(raw) = get_secret(PROVIDER, account) else {
         return Usage::error("claude", "No stored credential for this account.");
     };
@@ -445,7 +491,9 @@ pub(crate) async fn usage(account: &str) -> Usage {
     // from stored fields only (profile=None), so org/has_max detail is intentionally omitted
     // while backing off — the point is to make zero API calls.
     let backoff_key = format!("claude/{account}");
-    if let Some(until) = aas_core::backoff::rate_limited_until(&backoff_key) {
+    if let Some(until) =
+        aas_core::backoff::rate_limited_until(&backoff_key).filter(|_| !(recheck && long_lived))
+    {
         let secs = ((until - chrono::Utc::now().timestamp_millis()) / 1000).max(0);
         return Usage {
             headline: claude_base_info(long_lived, &sub_type, &tier, None),
@@ -455,14 +503,14 @@ pub(crate) async fn usage(account: &str) -> Usage {
                 Some(sub_type.clone())
             },
             error: Some(format!(
-                "rate limited (HTTP 429) — backing off {secs}s to recover."
+                "Usage refresh deferred after HTTP 429; retry in {secs}s (stored backoff, not a live check)."
             )),
             ..Default::default()
         };
     }
 
     let mut profile: Option<Value> = None;
-    if let Some(tok) = &token {
+    if let Some(tok) = token.as_ref().filter(|_| !long_lived) {
         let (status, prof, _) = fetch_anthropic_json("/api/oauth/profile", tok).await;
         if (200..300).contains(&status) {
             profile = prof;
@@ -510,17 +558,10 @@ pub(crate) async fn usage(account: &str) -> Usage {
             .and_then(|r| r.trim().parse().ok())
             .filter(|&s: &i64| s > 0)
             .unwrap_or(0)
-            * 1000;
+            .saturating_mul(1000);
         let until = aas_core::backoff::record_rate_limit(&backoff_key, hint_ms);
         let secs = ((until - chrono::Utc::now().timestamp_millis()) / 1000).max(0);
-        return Usage {
-            headline,
-            plan,
-            error: Some(format!(
-                "rate limited (HTTP 429) — backing off {secs}s to recover."
-            )),
-            ..Default::default()
-        };
+        return rate_limited_usage(headline, plan, meters, long_lived, secs);
     }
     if meters.is_empty() {
         let why = match status {
@@ -771,6 +812,49 @@ pub(crate) async fn load_long_lived_token(account: &str, token: &str) -> anyhow:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_lived_email_lookup_completes_without_a_network_runtime() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        let credential = make_long_lived_token_credential("synthetic-long-lived-token");
+        let mut lookup = std::pin::pin!(extract_claude_email(&credential));
+        // A network request would require a Tokio reactor. Token registration must be able to
+        // complete immediately without one, rather than waiting on an unsupported API call.
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            lookup.as_mut().poll(&mut context),
+            Poll::Ready(None)
+        ));
+    }
+
+    #[test]
+    fn denied_probe_preserves_current_quota_as_cacheable_usage() {
+        let meters = vec![
+            Meter::new("5h", 100.0, Some(1234)),
+            Meter::new("7d", 42.0, None),
+        ];
+        let usage = rate_limited_usage("long-lived token".into(), None, meters.clone(), true, 600);
+        assert_eq!(usage.meters, meters);
+        assert!(usage.error.is_none());
+        assert!(usage.notes[0].contains("Inference probe was rate limited"));
+        assert!(rate_limited_usage("claude".into(), None, vec![], true, 600)
+            .error
+            .is_some());
+        assert!(
+            rate_limited_usage("claude".into(), None, meters, false, 600)
+                .error
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn nonfinite_headers_are_not_successful_quota_observations() {
+        for invalid in ["NaN", "inf", "-inf"] {
+            assert!(meters_from_ratelimit_headers(|_| Some(invalid.into())).is_empty());
+        }
+    }
 
     #[test]
     fn ratelimit_headers_become_usage_meters() {

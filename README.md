@@ -215,9 +215,9 @@ request is blocked. Start with `--fallback` to handle that case at the proxy lay
 | `exec <name> [target] [args…]` (alias `e`) | Run the native CLI under a profile. `<name>` is a stored account, or a provider whose active account should run (`aas exec codex`). If `target` ≠ the profile's provider, requests route through the local **ASX Proxy** (cross-provider). `-b` full-access bypass; cross-run share flags `-s/-i/--share/--isolate/--keep-context`; `--` passes the rest to the agent. |
 | `export [name]` or `export <provider> <name>` `--all`, `--vault`, `-o <file>`, `--shell posix\|fish\|powershell` | Print shell env to use a profile in the current shell (`eval "$(aas export <name>)"`), or `--all` for a portable bundle of **every account + credential**. `--vault` encrypts it with an age/scrypt passphrase. |
 | `sharing <name>` *share flags* | Show or change which state (sessions/skills/agents/hooks/settings) an isolated profile shares from the provider's home. |
-| `rename <from> <to>` | Rename an account (moves its profile home + markers). |
+| `rename <from> <to>` | Rename an account, moving its profile home + markers. Codex rollout index paths follow the move; close its sessions and daemon first. |
 | `remove [provider] <name>` (alias `rm`) | Remove a stored account. |
-| `refresh <provider> <name>` or `refresh <account>` `--no-login` | Rotate a credential via its refresh token (falls back to login unless `--no-login`). |
+| `refresh <provider> <name>` or `refresh <account>` `--no-login` | Request credential renewal (falls back to login when required unless `--no-login`). Codex verifies the resulting token expiration and reports an unchanged credential separately. |
 | `proxy <name> <frontend>` | Start a standalone ASX Proxy for `<name>`'s backend and print env to point a `<frontend>` agent at it. |
 | `import [file]` | No arg: adopt/inspect existing `asx` state. With a file (or `-` for stdin): restore a bundle from `export --all` on another host. |
 
@@ -232,6 +232,16 @@ Vault passphrases are read from the terminal without echo. For non-interactive a
 existing matching accounts are updated, while a name already owned by another provider is skipped.
 The bundle contains AAS-managed account metadata and provider credentials, not browser cookies,
 agent conversation history, or machine-specific active-account markers.
+
+Account names and email addresses are separate metadata. Claude long-lived token credentials
+do not expose an email through the OAuth profile API, so newly registered token-only accounts
+may show only their name. Previously saved email metadata is retained and included in bundles.
+
+Codex refresh uses the native CLI under the account's profile home. A successful native command
+alone does not confirm renewal: a token that remains expired, or whose expiration cannot be
+verified, makes `refresh` fail. An unchanged, unexpired token is reported as unchanged; this does
+not verify server acceptance or revocation. CLI availability/access errors do not automatically
+start a new login. `exec` and `proxy` stop if their pre-launch refresh fails and show the reason.
 
 **Share flags** (for `login` / `sharing`, and per-run on cross-provider `exec`): `--shared`
 (default), `--isolated`, `--share <a,b,…>`, `--isolate <a,b,…>` over the categories
