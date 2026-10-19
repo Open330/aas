@@ -18,6 +18,9 @@ All notable user-facing changes are recorded here. The format follows
 
 ### Fixed
 
+- Windows Codex profile renames release the native lock probes before moving the directory,
+  avoiding an access-denied error after sessions have already exited. Unused SQLite statement
+  cache/WebAssembly dependencies are disabled, and rustls is updated to its patched release.
 - `aas usage` no longer launches the full `codex doctor` diagnostic before usage or again after
   HTTP 401/403. Expired Codex tokens return immediately with refresh/login instructions. A separate
   60-second failure cache suppresses repeated errors without replacing successful quota snapshots;

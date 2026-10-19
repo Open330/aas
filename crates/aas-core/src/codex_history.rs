@@ -10,8 +10,8 @@ fn error(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(format!("could not update Codex history paths: {error}"))
 }
 
-/// Hold Codex's own locks until the rename transaction has finished. Native Codex and older
-/// AAS launches participate in these locks too; no process scanner or external tool is needed.
+/// Probe Codex's native locks, retaining them during rename where the OS permits it. Native
+/// Codex and older AAS launches participate too; no process scanner or external tool is needed.
 pub(crate) fn lock_idle_profile(home: &Path) -> io::Result<Vec<File>> {
     let mut paths = vec![home.join(".sqlite-maintenance.lock")];
     match std::fs::read_dir(home.join("thread-writer-locks")) {
@@ -47,6 +47,11 @@ pub(crate) fn lock_idle_profile(home: &Path) -> io::Result<Vec<File>> {
         })?;
         locks.push(file);
     }
+    // Windows byte-range locks prevent renaming the containing directory even when handles
+    // allow delete sharing. Release our probe handles first; Windows still rejects the move
+    // if an agent reopens the files in the meantime. Unix can retain these locks across rename.
+    #[cfg(windows)]
+    locks.clear();
     Ok(locks)
 }
 
