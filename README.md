@@ -182,7 +182,7 @@ aas exec primary.codex --fallback backup.codex -- <agent arguments>
 Eligible entries sort first, then by remaining quota descending and ID ascending.
 Reasons are `quota_available`, `excluded`, `usage_rate_limited`, `usage_error`,
 `usage_unknown`, or `quota_exhausted`. Eligibility is quota evidence, not a model
-compatibility or inference-auth guarantee. `--fresh` bypasses the success cache;
+compatibility or inference-auth guarantee. `--fresh` bypasses success and failure caches;
 usage endpoint cooldowns remain authoritative. Empty results are an empty array.
 
 `--fallback` must precede `--`; every named account must match the primary's provider
@@ -204,7 +204,7 @@ request is blocked. Start with `--fallback` to handle that case at the proxy lay
 | Command | Description |
 |---|---|
 | `list [provider\|account]` (alias `ls`) `-u`,`-d`, `--sort name\|added\|stored` | List all accounts or filter by provider/account. The default is provider-registry order then account name; `stored` preserves the `accounts.json` array order. `-u` shows live usage; `-d` dumps stored credentials. |
-| `usage [provider\|account]` (alias `u`) `--json`, `--fresh`, `--sort name\|added\|stored` | Usage for all accounts or one provider/account (shorthand for `list -u`), using a shared 10-minute success cache and deterministic order. `--fresh` bypasses the success cache but still honors rate-limit backoff. `--json` is the integration contract used by aas-bar and BarShelf. |
+| `usage [provider\|account]` (alias `u`) `--json`, `--fresh`, `--sort name\|added\|stored` | Usage for all accounts or one provider/account (shorthand for `list -u`), using a shared 10-minute success cache, 60-second failure cache, and deterministic order. `--fresh` bypasses both caches but still honors rate-limit backoff. `--json` is the integration contract used by aas-bar and BarShelf. |
 | `candidates` `--provider <provider>`, `--exclude <name>`, `--json`, `--fresh` | Rank quota candidates with explicit eligibility reasons, excluding attempted accounts. |
 | `status [provider]` | Show the active account per provider. |
 | `active <provider>` | Print just the active account name on stdout, exiting 1 when none is set — the machine-readable half of `status`, used by the shims. |
@@ -242,6 +242,12 @@ alone does not confirm renewal: a token that remains expired, or whose expiratio
 verified, makes `refresh` fail. An unchanged, unexpired token is reported as unchanged; this does
 not verify server acceptance or revocation. CLI availability/access errors do not automatically
 start a new login. `exec` and `proxy` stop if their pre-launch refresh fails and show the reason.
+
+Codex usage is observational: it never launches `codex doctor` or rotates credentials. Expired
+tokens are reported locally with refresh/login instructions; unexpired tokens make one usage
+request, without a second native refresh on HTTP 401/403. Failures are reused for 60 seconds
+across CLI/UI processes, bypassed by `--fresh`, and invalidated immediately when the credential
+changes. Authentication failures do not display quota from an earlier successful observation.
 
 **Share flags** (for `login` / `sharing`, and per-run on cross-provider `exec`): `--shared`
 (default), `--isolated`, `--share <a,b,…>`, `--isolate <a,b,…>` over the categories

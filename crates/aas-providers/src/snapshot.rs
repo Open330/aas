@@ -2,7 +2,7 @@
 //!
 //! Successful results are cached across processes, and a per-account fetch lock coalesces a
 //! terminal, BarShelf, and editor asking for the same data at once. A live rate-limit gate is
-//! checked before credential refresh. Explicit long-lived Claude probe rechecks are throttled
+//! checked before credential refresh (Codex usage never renews credentials). Explicit long-lived Claude probe rechecks are throttled
 //! to once per minute; automatic callers never bypass a live gate.
 
 use aas_core::model::{sort_accounts, AccountSort};
@@ -121,6 +121,7 @@ fn permits_stale_fallback(error: &str) -> bool {
         "http 403",
         "no stored credential",
         "re-login required",
+        "access token expired",
     ]
     .iter()
     .any(|marker| lower.contains(marker))
@@ -133,9 +134,51 @@ async fn fetch_lock(key: String) -> Result<File, String> {
         .map_err(|error| format!("could not acquire usage lock: {error}"))
 }
 
+fn usage_failure(key: &str, usage: Usage, requested_at_ms: i64) -> FetchedUsage {
+    let error = usage.error.clone().unwrap_or_default();
+    usage_cache::get(key)
+        .filter(|entry| entry.fetched_at_ms < requested_at_ms && permits_stale_fallback(&error))
+        .map(|entry| from_cache(entry, Some(error)))
+        .unwrap_or(FetchedUsage {
+            usage,
+            cached: false,
+            fetched_at_ms: None,
+        })
+}
+
+fn cached_failure(
+    provider: Provider,
+    account: &str,
+    mode: UsageCacheMode,
+    requested_at_ms: i64,
+) -> Option<FetchedUsage> {
+    let key = cache_key(provider, account);
+    let entry = usage_cache::get_failure(&key)?;
+    if mode == UsageCacheMode::Refresh && entry.observed_at_ms < requested_at_ms {
+        return None;
+    }
+    let raw = aas_core::secure_store::get_secret(provider.id(), account);
+    let fingerprint = usage_cache::credential_fingerprint(raw.as_deref());
+    if !entry.is_fresh(now_ms(), &fingerprint) {
+        return None;
+    }
+    let remaining =
+        ((entry.observed_at_ms + usage_cache::FAILURE_MAX_AGE_MS - now_ms()) / 1000).max(0);
+    let mut fetched = usage_failure(&key, entry.usage, requested_at_ms);
+    fetched.cached = true;
+    fetched.usage.notes.push(format!(
+        "cached failure; retry in {remaining}s, or use --fresh"
+    ));
+    Some(fetched)
+}
+
 async fn fetch_account(provider: Provider, account: &str, mode: UsageCacheMode) -> FetchedUsage {
     let key = cache_key(provider, account);
     let requested_at_ms = now_ms();
+
+    if let Some(failed) = cached_failure(provider, account, mode, requested_at_ms) {
+        return failed;
+    }
 
     if mode == UsageCacheMode::PreferCache {
         if let Some(entry) = usage_cache::get(&key)
@@ -157,6 +200,10 @@ async fn fetch_account(provider: Provider, account: &str, mode: UsageCacheMode) 
         Ok(lock) => lock,
         Err(error) => return failure_with_cache(&key, provider.id(), error),
     };
+
+    if let Some(failed) = cached_failure(provider, account, mode, requested_at_ms) {
+        return failed;
+    }
 
     // Another process may have completed while this caller waited. Even `--fresh` callers reuse
     // a result newer than their own start time, coalescing simultaneous manual refreshes.
@@ -180,9 +227,14 @@ async fn fetch_account(provider: Provider, account: &str, mode: UsageCacheMode) 
         }
     }
 
-    let refresh_failure = provider
-        .refresh_if_expired(account)
-        .await
+    // Usage must not run Codex's installation-wide doctor or rotate its authentication.
+    // Its adapter reports expired credentials locally and performs at most one HTTP request.
+    let refresh_outcome = if provider == Provider::Codex {
+        None
+    } else {
+        provider.refresh_if_expired(account).await
+    };
+    let refresh_failure = refresh_outcome
         .filter(|outcome| !outcome.ok)
         .map(|outcome| {
             format!(
@@ -196,6 +248,8 @@ async fn fetch_account(provider: Provider, account: &str, mode: UsageCacheMode) 
             )
         });
 
+    let raw = aas_core::secure_store::get_secret(provider.id(), account);
+    let fingerprint = usage_cache::credential_fingerprint(raw.as_deref());
     let mut usage = if recheck_probe {
         crate::claude::usage_recheck(account).await
     } else {
@@ -221,14 +275,18 @@ async fn fetch_account(provider: Provider, account: &str, mode: UsageCacheMode) 
     }
 
     if let Some(error) = usage.error.clone() {
-        return usage_cache::get(&key)
-            .filter(|entry| entry.fetched_at_ms < requested_at_ms && permits_stale_fallback(&error))
-            .map(|entry| from_cache(entry, Some(error)))
-            .unwrap_or(FetchedUsage {
-                usage,
-                cached: false,
-                fetched_at_ms: None,
-            });
+        if !permits_stale_fallback(&error) {
+            usage_cache::clear(&key);
+        }
+        let _ = usage_cache::put_failure(
+            &key,
+            usage_cache::FailureEntry {
+                observed_at_ms: fetched_at_ms,
+                credential_fingerprint: fingerprint,
+                usage: usage.clone(),
+            },
+        );
+        return usage_failure(&key, usage, requested_at_ms);
     }
 
     FetchedUsage {

@@ -378,7 +378,7 @@ async fn fetch_codex_usage(token: &str, account_id: Option<&str>, data: &Value) 
             if !(200..300).contains(&status) {
                 let auth_fail = status == 401 || status == 403;
                 return (
-                    Usage::error("codex", format!("live usage fetch failed: {status}")),
+                    Usage::error("codex", format!("live usage fetch failed: HTTP {status}")),
                     auth_fail,
                 );
             }
@@ -447,27 +447,17 @@ pub(crate) async fn usage(account: &str) -> Usage {
         };
     };
 
-    let account_id = codex_account_id(&data);
-    let (mut result, auth_fail) = fetch_codex_usage(&token, account_id.as_deref(), &data).await;
-
-    // Only a rotated credential is worth retrying with: if codex left the token as it was, the
-    // retry would repeat the same 401 it just produced.
-    if auth_fail && attempt_codex_native_refresh(account).await == NativeRefresh::Rotated {
-        if let Some(r2) = get_secret(PROVIDER, account) {
-            if let Ok(d2) = serde_json::from_str::<Value>(&r2) {
-                if let Some(t2) = d2
-                    .get("tokens")
-                    .and_then(|t| t.get("access_token"))
-                    .and_then(|v| v.as_str())
-                {
-                    let aid2 = codex_account_id(&d2);
-                    let (retry, _) = fetch_codex_usage(t2, aid2.as_deref(), &d2).await;
-                    result = retry;
-                }
-            }
-        }
+    // Usage is observational: explicit refresh and native interactive sessions own renewal.
+    // Never run doctor here or repeat native refresh after an HTTP authentication failure.
+    if is_expired_at(&raw, now_ms()) {
+        return Usage::error("codex", format!(
+            "access token expired; run `aas refresh {account} --no-login` or `aas login codex {account} --device-auth`"
+        ));
     }
-    result
+    let account_id = codex_account_id(&data);
+    fetch_codex_usage(&token, account_id.as_deref(), &data)
+        .await
+        .0
 }
 
 pub(crate) async fn current_credential() -> Option<String> {

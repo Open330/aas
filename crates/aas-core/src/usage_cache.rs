@@ -1,18 +1,25 @@
-//! Shared successful-usage cache for CLI and UI callers.
+//! Shared usage cache for CLI and UI callers.
 //!
-//! The cache is deliberately provider-agnostic. Network callers keep errors out of it, allowing a
-//! stale last-known-good value to remain available during rate limits and transient failures.
+//! Success observations and short-lived failures are stored separately, allowing last-known-good
+//! quota to survive transient failures without repeatedly probing broken credentials.
 
 use crate::usage::Usage;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io;
 
 /// Default cache lifetime used by `aas usage` and integrations.
 pub const DEFAULT_MAX_AGE_MS: i64 = 10 * 60 * 1000;
+pub const FAILURE_MAX_AGE_MS: i64 = 60 * 1000;
 const RETAIN_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+pub fn credential_fingerprint(raw: Option<&str>) -> String {
+    let hash = Sha256::digest(raw.unwrap_or_default().as_bytes());
+    hash.iter().map(|byte| format!("{byte:02x}")).collect()
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,12 +35,31 @@ impl Entry {
     }
 }
 
+/// Retry suppression kept separately from the last successful quota observation. A credential
+/// digest ensures a native token rotation immediately bypasses an earlier failure.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FailureEntry {
+    pub observed_at_ms: i64,
+    pub credential_fingerprint: String,
+    pub usage: Usage,
+}
+
+impl FailureEntry {
+    pub fn is_fresh(&self, now_ms: i64, fingerprint: &str) -> bool {
+        let age = now_ms.saturating_sub(self.observed_at_ms);
+        self.credential_fingerprint == fingerprint && (0..FAILURE_MAX_AGE_MS).contains(&age)
+    }
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct CacheFile {
     #[serde(default = "version")]
     version: u32,
     #[serde(default)]
     entries: HashMap<String, Entry>,
+    #[serde(default)]
+    failures: HashMap<String, FailureEntry>,
 }
 
 fn version() -> u32 {
@@ -101,6 +127,26 @@ pub fn put(key: &str, entry: Entry) -> io::Result<()> {
             entry.fetched_at_ms.saturating_sub(existing.fetched_at_ms) <= RETAIN_MS
         });
         cache.entries.insert(key.to_string(), entry);
+        cache.failures.remove(key);
+        let body = serde_json::to_string(&cache).map_err(io::Error::other)?;
+        crate::secure_store::write_restricted_file(&path(), &body)
+    })
+}
+
+pub fn get_failure(key: &str) -> Option<FailureEntry> {
+    with_lock(false, || Ok(load_unlocked().failures.get(key).cloned()))
+        .ok()
+        .flatten()
+}
+
+pub fn put_failure(key: &str, entry: FailureEntry) -> io::Result<()> {
+    with_lock(true, || {
+        let mut cache = load_unlocked();
+        cache.failures.retain(|_, old| {
+            (0..FAILURE_MAX_AGE_MS)
+                .contains(&entry.observed_at_ms.saturating_sub(old.observed_at_ms))
+        });
+        cache.failures.insert(key.into(), entry);
         let body = serde_json::to_string(&cache).map_err(io::Error::other)?;
         crate::secure_store::write_restricted_file(&path(), &body)
     })
@@ -109,7 +155,9 @@ pub fn put(key: &str, entry: Entry) -> io::Result<()> {
 pub fn clear(key: &str) {
     let _ = with_lock(true, || {
         let mut cache = load_unlocked();
-        if cache.entries.remove(key).is_some() {
+        let removed_success = cache.entries.remove(key).is_some();
+        let removed_failure = cache.failures.remove(key).is_some();
+        if removed_success || removed_failure {
             let body = serde_json::to_string(&cache).map_err(io::Error::other)?;
             crate::secure_store::write_restricted_file(&path(), &body)?;
         }
@@ -131,6 +179,22 @@ pub fn invalidate(key: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failures_expire_and_are_bound_to_the_exact_credential() {
+        let first = credential_fingerprint(Some("first"));
+        let next = credential_fingerprint(Some("next"));
+        let entry = FailureEntry {
+            observed_at_ms: 1000,
+            credential_fingerprint: first.clone(),
+            usage: Usage::error("codex", "HTTP 401"),
+        };
+        assert!(entry.is_fresh(1000, &first));
+        assert!(entry.is_fresh(60_999, &first));
+        assert!(!entry.is_fresh(61_000, &first));
+        assert!(!entry.is_fresh(999, &first));
+        assert!(!entry.is_fresh(1000, &next));
+    }
 
     #[test]
     fn freshness_rejects_future_and_old_entries() {

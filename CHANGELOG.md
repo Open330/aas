@@ -18,6 +18,11 @@ All notable user-facing changes are recorded here. The format follows
 
 ### Fixed
 
+- `aas usage` no longer launches the full `codex doctor` diagnostic before usage or again after
+  HTTP 401/403. Expired Codex tokens return immediately with refresh/login instructions. A separate
+  60-second failure cache suppresses repeated errors without replacing successful quota snapshots;
+  `--fresh` bypasses it and native credential changes invalidate it immediately. Authentication
+  failures discard earlier quota observations instead of presenting them as usable current data.
 - `aas shim status` reports the executable recorded in the installed wrapper, rather than a new
   PATH lookup that could disagree with the executable actually launched. Missing targets are flagged.
 - Registering a Claude long-lived token no longer calls the unsupported OAuth profile endpoint
