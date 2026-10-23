@@ -5,6 +5,10 @@ ignore = [
     # The advisory is maintenance-status-only (no vulnerability), and age has no
     # upstream release that removes it yet. Revisit when age publishes an update.
     { id = "RUSTSEC-2026-0173", reason = "transitive build-only dependency; no safe upstream upgrade is available" },
+    # basic-toml is used by age's compile-time translation macros via i18n-config.
+    # Current i18n-config 0.4.8 still depends on it, including via age 0.12.1.
+    # This advisory reports maintenance status, not a vulnerability.
+    { id = "RUSTSEC-2026-0374", reason = "build-only i18n-config dependency; no upstream replacement is available" },
 ]
 
 [licenses]
