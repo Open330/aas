@@ -243,6 +243,19 @@ verified, makes `refresh` fail. An unchanged, unexpired token is reported as unc
 not verify server acceptance or revocation. CLI availability/access errors do not automatically
 start a new login. `exec` and `proxy` stop if their pre-launch refresh fails and show the reason.
 
+After a successful Codex refresh, AAS restarts an existing profile daemon using the native
+`codex app-server daemon restart` command with that profile's `CODEX_HOME`. This also happens
+when the token is unchanged, so an explicit `aas refresh <account> --no-login` can repair a
+daemon left with stale credentials by an earlier external token update. Restarting can interrupt
+work attached to that daemon. AAS does not signal raw PIDs or start a daemon when its metadata
+is absent. If the refreshed credential is also mirrored into the native/system home, its
+existing daemon is restarted too; other accounts are left alone. Restart failure makes refresh
+fail without rolling back the new credential or requesting a new login.
+
+This is a refresh-time repair, not a background watcher: token writes by processes outside AAS
+can still leave an already-running daemon stale until refresh is requested again. Native
+`--no-daemon` sessions do not keep a separate daemon's credential cache.
+
 Codex usage is observational: it never launches `codex doctor` or rotates credentials. Expired
 tokens are reported locally with refresh/login instructions; unexpired tokens make one usage
 request, without a second native refresh on HTTP 401/403. Failures are reused for 60 seconds

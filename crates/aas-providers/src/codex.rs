@@ -209,10 +209,13 @@ fn write_codex_auth_native(raw: &str) -> std::io::Result<()> {
 
 /// Run `codex <args>` with `CODEX_HOME` set, killing it after `timeout_secs`. Returns whether
 /// it exited successfully within the window.
-fn run_codex_command(home: &Path, args: &[&str], timeout_secs: u64) -> bool {
-    let mut child = match Command::new("codex")
+fn run_codex_command(program: &Path, home: &Path, args: &[&str], timeout_secs: u64) -> bool {
+    let mut child = match Command::new(program)
         .args(args)
         .env("CODEX_HOME", home)
+        // Maintenance must reach the native CLI, not route back through `aas exec`
+        // using an unrelated active account when PATH contains an AAS shim.
+        .env("AAS_SHIM", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -254,6 +257,8 @@ pub(crate) enum NativeRefresh {
     Unverified,
     /// codex could not run, or its result could not be read back or persisted.
     Failed,
+    /// The credential is usable, but a running daemon could not be resynchronized.
+    DaemonRestartFailed,
 }
 
 impl NativeRefresh {
@@ -287,6 +292,11 @@ impl NativeRefresh {
             NativeRefresh::Failed => RefreshOutcome {
                 ok: false,
                 message: "native Codex refresh failed; check CLI availability and profile access".into(),
+                needs_relogin: false,
+            },
+            NativeRefresh::DaemonRestartFailed => RefreshOutcome {
+                ok: false,
+                message: "credential is valid, but its Codex daemon could not be restarted; retry refresh or restart that profile's daemon before resuming".into(),
                 needs_relogin: false,
             },
         }
@@ -323,6 +333,87 @@ fn classify_native_refresh(raw: &str, changed: bool, now: i64) -> NativeRefresh 
     }
 }
 
+/// Let Codex manage its own process identity and sockets. Never signal an unverified
+/// PID or start a daemon for a profile without daemon metadata.
+fn restart_profile_daemon(program: &Path, home: &Path) -> std::io::Result<bool> {
+    let pid = match std::fs::read_to_string(home.join("app-server-daemon/daemon.pid")) {
+        Ok(pid) => pid,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    // Current Codex stores a JSON process-identity record here; older builds
+    // used a plain PID. The native restart command validates process identity.
+    let pid_number = serde_json::from_str::<Value>(&pid)
+        .ok()
+        .and_then(|record| record.get("pid").and_then(Value::as_u64))
+        .or_else(|| pid.trim().parse::<u64>().ok());
+    if !pid_number.is_some_and(|pid| pid > 1 && pid <= i32::MAX as u64) {
+        return Err(std::io::Error::other("invalid Codex daemon PID file"));
+    }
+    #[cfg(unix)]
+    {
+        // Signal 0 only probes existence; it never terminates the process. Leave
+        // full identity/ownership validation to the native management command.
+        let result = unsafe { libc::kill(pid_number.unwrap() as libc::pid_t, 0) };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(false);
+            }
+            return Err(error);
+        }
+    }
+    if !run_codex_command(program, home, &["app-server", "daemon", "restart"], 15) {
+        return Err(std::io::Error::other("Codex daemon restart failed"));
+    }
+    Ok(true)
+}
+
+fn refresh_profile(
+    program: &Path,
+    home: &Path,
+    native_home: &Path,
+    stored: &str,
+    now: i64,
+) -> NativeRefresh {
+    let command_succeeded = run_codex_command(program, home, &["doctor", "--summary"], 20)
+        || run_codex_command(program, home, &["login", "status"], 8);
+    if !command_succeeded {
+        return NativeRefresh::Failed;
+    }
+
+    let Some(fresh) = std::fs::read_to_string(home.join("auth.json")).ok() else {
+        return NativeRefresh::Failed;
+    };
+    let outcome = classify_native_refresh(&fresh, fresh != stored, now);
+    if !matches!(outcome, NativeRefresh::Rotated | NativeRefresh::Unchanged) {
+        return outcome;
+    }
+    let native_auth = native_home.join("auth.json");
+    let native_before = std::fs::read_to_string(&native_auth).ok();
+    let mirror_native = outcome == NativeRefresh::Rotated
+        && native_home != home
+        && native_before.as_deref() == Some(stored);
+    if mirror_native {
+        // Persist the rotated credential before attempting either restart. A restart
+        // failure must never roll back a refresh token that the server already consumed.
+        if write_restricted_file(&native_auth, &fresh).is_err() {
+            return NativeRefresh::Failed;
+        }
+    }
+    // Explicit refresh also repairs a daemon left stale by an earlier external
+    // credential rewrite, even when this invocation didn't rotate the file.
+    let profile_failed = restart_profile_daemon(program, home).is_err();
+    let sync_native =
+        native_home != home && (mirror_native || native_before.as_deref() == Some(fresh.as_str()));
+    let native_failed = sync_native && restart_profile_daemon(program, native_home).is_err();
+    if profile_failed || native_failed {
+        NativeRefresh::DaemonRestartFailed
+    } else {
+        outcome
+    }
+}
+
 /// asx `attemptCodexNativeRefresh` — the doctor trick (blocking; call via spawn_blocking).
 fn codex_native_refresh_blocking(account: &str) -> NativeRefresh {
     let stored = match aas_core::secure_store::get_secret_result(PROVIDER, account) {
@@ -330,28 +421,13 @@ fn codex_native_refresh_blocking(account: &str) -> NativeRefresh {
         Ok(None) => return NativeRefresh::MissingCredential,
         Err(_) => return NativeRefresh::Failed,
     };
-    let home = profile_home(PROVIDER, account);
-    let auth_path = home.join("auth.json");
-
-    let command_succeeded = run_codex_command(&home, &["doctor", "--summary"], 20)
-        || run_codex_command(&home, &["login", "status"], 8);
-    if !command_succeeded {
-        return NativeRefresh::Failed;
-    }
-
-    let Some(fresh) = std::fs::read_to_string(&auth_path).ok() else {
-        return NativeRefresh::Failed;
-    };
-    let outcome = classify_native_refresh(&fresh, fresh != stored, now_ms());
-    if outcome != NativeRefresh::Rotated {
-        return outcome;
-    }
-    if read_codex_auth_native().as_deref() == Some(stored.as_str())
-        && write_codex_auth_native(&fresh).is_err()
-    {
-        return NativeRefresh::Failed;
-    }
-    NativeRefresh::Rotated
+    refresh_profile(
+        Path::new("codex"),
+        &profile_home(PROVIDER, account),
+        &aas_core::platform::codex_home(),
+        &stored,
+        now_ms(),
+    )
 }
 
 async fn attempt_codex_native_refresh(account: &str) -> NativeRefresh {
@@ -586,6 +662,179 @@ mod tests {
 
     use base64::Engine;
     use serde_json::json;
+
+    #[cfg(unix)]
+    mod daemon_refresh {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::PathBuf;
+
+        struct Fixture {
+            dir: PathBuf,
+            program: PathBuf,
+            home: PathBuf,
+            native: PathBuf,
+        }
+
+        impl Fixture {
+            fn new() -> Self {
+                let dir =
+                    std::env::temp_dir().join(format!("aas-refresh-{}", uuid::Uuid::new_v4()));
+                let home = dir.join("profile with spaces");
+                let native = dir.join("native");
+                for home in [&home, &native] {
+                    std::fs::create_dir_all(home.join("app-server-daemon")).unwrap();
+                    std::fs::write(
+                        home.join("app-server-daemon/daemon.pid"),
+                        json!({"pid":std::process::id(),"processIdentity":{"synthetic":true}})
+                            .to_string(),
+                    )
+                    .unwrap();
+                }
+                let program = dir.join("codex");
+                std::fs::write(
+                    &program,
+                    r#"#!/bin/sh
+[ "$AAS_SHIM" = 1 ] || exit 90
+case "$*" in
+  'doctor --summary')
+    if [ -f "$CODEX_HOME/next-auth" ]; then
+      cp "$CODEX_HOME/next-auth" "$CODEX_HOME/auth.json"
+    fi
+    ;;
+  'app-server daemon restart')
+    printf 'restart\n' >> "$CODEX_HOME/restarts"
+    [ ! -f "$CODEX_HOME/fail-restart" ] || exit 1
+    cp "$CODEX_HOME/auth.json" "$CODEX_HOME/daemon-seen-auth"
+    ;;
+  *) exit 91 ;;
+esac
+"#,
+                )
+                .unwrap();
+                std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+                Self {
+                    dir,
+                    program,
+                    home,
+                    native,
+                }
+            }
+
+            fn refresh(&self, stored: &str) -> NativeRefresh {
+                refresh_profile(&self.program, &self.home, &self.native, stored, 1_000_000)
+            }
+        }
+
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
+
+        fn auth(key: &str) -> String {
+            json!({"OPENAI_API_KEY":key}).to_string()
+        }
+
+        #[test]
+        fn rotation_restarts_only_the_affected_profile_with_its_new_credential() {
+            let f = Fixture::new();
+            let old = auth("old");
+            let fresh = auth("fresh");
+            let other = auth("other-account");
+            std::fs::write(f.home.join("auth.json"), &old).unwrap();
+            std::fs::write(f.home.join("next-auth"), &fresh).unwrap();
+            std::fs::write(f.native.join("auth.json"), &other).unwrap();
+            assert_eq!(f.refresh(&old), NativeRefresh::Rotated);
+            assert_eq!(
+                std::fs::read_to_string(f.home.join("daemon-seen-auth")).unwrap(),
+                fresh
+            );
+            assert_eq!(
+                std::fs::read_to_string(f.native.join("auth.json")).unwrap(),
+                other
+            );
+            assert!(!f.native.join("restarts").exists());
+        }
+
+        #[test]
+        fn unchanged_refresh_repairs_an_existing_daemon_but_does_not_create_one() {
+            let f = Fixture::new();
+            let stored = auth("already-refreshed-externally");
+            std::fs::write(f.home.join("auth.json"), &stored).unwrap();
+            assert_eq!(f.refresh(&stored), NativeRefresh::Unchanged);
+            assert_eq!(
+                std::fs::read_to_string(f.home.join("daemon-seen-auth")).unwrap(),
+                stored
+            );
+            std::fs::remove_file(f.home.join("app-server-daemon/daemon.pid")).unwrap();
+            std::fs::remove_file(f.home.join("restarts")).unwrap();
+            assert_eq!(f.refresh(&stored), NativeRefresh::Unchanged);
+            assert!(!f.home.join("restarts").exists());
+            // Codex leaves PID records behind after --no-daemon/socket failures.
+            std::fs::write(f.home.join("app-server-daemon/daemon.pid"), "2147483647").unwrap();
+            assert_eq!(f.refresh(&stored), NativeRefresh::Unchanged);
+            assert!(!f.home.join("restarts").exists());
+        }
+
+        #[test]
+        fn mirror_is_saved_before_restarts_and_restart_failure_does_not_undo_rotation() {
+            let f = Fixture::new();
+            let old = auth("old");
+            let fresh = auth("rotated");
+            for home in [&f.home, &f.native] {
+                std::fs::write(home.join("auth.json"), &old).unwrap();
+            }
+            std::fs::write(f.home.join("next-auth"), &fresh).unwrap();
+            std::fs::write(f.home.join("fail-restart"), "").unwrap();
+            let result = f.refresh(&old);
+            assert_eq!(result, NativeRefresh::DaemonRestartFailed);
+            let result = result.outcome();
+            assert!(!result.ok);
+            assert!(!result.needs_relogin);
+            for home in [&f.home, &f.native] {
+                assert_eq!(
+                    std::fs::read_to_string(home.join("auth.json")).unwrap(),
+                    fresh
+                );
+                assert_eq!(
+                    std::fs::read_to_string(home.join("restarts")).unwrap(),
+                    "restart\n"
+                );
+            }
+            assert_eq!(
+                std::fs::read_to_string(f.native.join("daemon-seen-auth")).unwrap(),
+                fresh
+            );
+            // Retrying must repair both homes even though the token is now unchanged.
+            std::fs::remove_file(f.home.join("fail-restart")).unwrap();
+            assert_eq!(f.refresh(&fresh), NativeRefresh::Unchanged);
+            for home in [&f.home, &f.native] {
+                assert_eq!(
+                    std::fs::read_to_string(home.join("restarts")).unwrap(),
+                    "restart\nrestart\n"
+                );
+            }
+        }
+
+        #[test]
+        fn invalid_pid_and_expired_credential_never_trigger_a_restart() {
+            let f = Fixture::new();
+            let valid = auth("valid");
+            std::fs::write(f.home.join("auth.json"), &valid).unwrap();
+            std::fs::write(f.home.join("app-server-daemon/daemon.pid"), "-1").unwrap();
+            assert_eq!(f.refresh(&valid), NativeRefresh::DaemonRestartFailed);
+            assert!(!f.home.join("restarts").exists());
+            let token = format!(
+                "e30.{}.sig",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"exp":1}"#)
+            );
+            let expired = json!({"tokens":{"access_token":token}}).to_string();
+            std::fs::write(f.home.join("auth.json"), &expired).unwrap();
+            assert_eq!(f.refresh(&expired), NativeRefresh::StillExpired);
+            assert!(!f.home.join("restarts").exists());
+        }
+    }
 
     fn make_jwt(payload: &Value) -> String {
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"{\"alg\":\"none\"}");
