@@ -5,6 +5,8 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-10-25
+
 ### Added
 
 - `aas shim install <provider> --bin <path>` selects a specific CLI installation when multiple
@@ -17,6 +19,12 @@ All notable user-facing changes are recorded here. The format follows
   with no active account says so rather than guessing at one.
 
 ### Fixed
+
+- Codex refresh restarts an existing daemon for the affected profile, including unchanged-token
+  refreshes that repair authentication made stale by an external token update. Matching native
+  credentials are synchronized before restart; failures preserve rotated tokens and report an
+  error without forcing login. Maintenance commands bypass account-routing shims.
+- TLS certificate verification uses patched rustls-webpki 0.103.16 and webpki-roots 1.0.10.
 
 - Windows Codex profile renames release the native lock probes before moving the directory,
   avoiding an access-denied error after sessions have already exited. Unused SQLite statement
