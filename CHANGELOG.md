@@ -25,6 +25,7 @@ All notable user-facing changes are recorded here. The format follows
   credentials are synchronized before restart; failures preserve rotated tokens and report an
   error without forcing login. Maintenance commands bypass account-routing shims.
 - TLS certificate verification uses patched rustls-webpki 0.103.16 and webpki-roots 1.0.10.
+- Tokio is updated to 1.53.3 to address its AsyncFd I/O safety advisory.
 
 - Windows Codex profile renames release the native lock probes before moving the directory,
   avoiding an access-denied error after sessions have already exited. Unused SQLite statement
