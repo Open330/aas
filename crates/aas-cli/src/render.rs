@@ -174,13 +174,23 @@ fn time_amount(reset_ms: i64) -> String {
     }
 }
 
-/// Combine subscription + short tier, e.g. `max · 20x`, `team · 5x`, `pro`.
+/// Combine subscription + short tier, using current Claude product names.
 pub fn plan_label(u: &Usage) -> String {
     let base = u
         .plan
         .clone()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| u.headline.clone());
+    // Also normalize pre-migration cached snapshots. A plan name never changes
+    // the server's meters: unverified Ultra accounts can still have a 5h limit.
+    if base.eq_ignore_ascii_case("ultra")
+        || (base.eq_ignore_ascii_case("max")
+            && u.headline
+                .split_whitespace()
+                .any(|word| word == "tier=default_claude_max_20x"))
+    {
+        return "Ultra".into();
+    }
     // Pull `tier=default_claude_max_20x` out of the headline and shorten to `20x`.
     if let Some(tier) = u
         .headline
@@ -254,4 +264,52 @@ pub fn render_usage_table(rows: &[UsageRow]) {
 
     tighten(&mut table);
     println!("{table}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aas_core::usage::Meter;
+
+    #[test]
+    fn ultra_labels_normalize_cached_max20_without_hiding_reported_limits() {
+        for (plan, headline) in [
+            ("ultra", "subscription=ultra tier=default_claude_max_20x"),
+            ("max", "subscription=max tier=default_claude_max_20x"),
+        ] {
+            let usage = Usage {
+                plan: Some(plan.into()),
+                headline: headline.into(),
+                meters: vec![Meter::new("5h", 10.0, None), Meter::new("7d", 30.0, None)],
+                ..Default::default()
+            };
+            assert_eq!(plan_label(&usage), "Ultra");
+            let (text, _) = usage_reset_cells(&usage);
+            assert!(text.contains("5h"));
+            assert!(text.contains("7d"));
+        }
+        let weekly = Usage {
+            plan: Some("ultra".into()),
+            meters: vec![Meter::new("7d", 30.0, None)],
+            ..Default::default()
+        };
+        let (text, _) = usage_reset_cells(&weekly);
+        assert!(!text.contains("5h"));
+        assert!(text.contains("7d"));
+        assert_eq!(
+            plan_label(&Usage {
+                plan: Some("max".into()),
+                headline: "subscription=max tier=default_claude_max_5x".into(),
+                ..Default::default()
+            }),
+            "max · 5x"
+        );
+        assert_eq!(
+            plan_label(&Usage {
+                headline: "long-lived token".into(),
+                ..Default::default()
+            }),
+            "long-lived token"
+        );
+    }
 }

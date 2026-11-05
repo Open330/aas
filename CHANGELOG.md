@@ -5,6 +5,15 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.1.15] - 2026-11-05
+
+### Fixed
+
+- Claude Ultra is recognized directly and from legacy Max 20x subscription metadata, including
+  cached table/menu-bar labels. Plan migration does not imply verification: server-reported 5h
+  meters remain visible, while missing/null windows are omitted. Weekly-only responses and
+  camelCase reset timestamps are supported. Long-lived token plans remain unknown.
+
 ## [0.1.14] - 2026-10-25
 
 ### Added

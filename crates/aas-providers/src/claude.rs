@@ -126,6 +126,19 @@ fn is_truthy(v: Option<&Value>) -> bool {
     }
 }
 
+/// Current product name, including the documented migration of Max 20x to Ultra.
+/// This identifies a plan only; it says nothing about account verification or
+/// whether the server still applies a temporary five-hour limit.
+fn claude_plan_name(subscription: &str, tier: &str) -> String {
+    let subscription = subscription.trim().to_ascii_lowercase();
+    let tier = tier.trim().to_ascii_lowercase();
+    if subscription == "ultra" || (subscription == "max" && tier == "default_claude_max_20x") {
+        "ultra".into()
+    } else {
+        subscription
+    }
+}
+
 /// asx claude `baseInfo` line (without the `(name)` suffix, which the CLI already knows).
 pub(crate) fn claude_base_info(
     is_long_lived: bool,
@@ -285,12 +298,19 @@ pub(crate) fn build_claude_usage_meters(usage: &Value) -> Vec<Meter> {
         ("five_hour", "fiveHour", "5h"),
         ("seven_day", "sevenDay", "7d"),
     ] {
-        let Some(w) = usage.get(snake).or_else(|| usage.get(camel)) else {
+        let Some(w) = usage
+            .get(snake)
+            .filter(|value| value.is_object())
+            .or_else(|| usage.get(camel).filter(|value| value.is_object()))
+        else {
             continue;
         };
         if let Some(util) = w.get("utilization").and_then(|v| v.as_f64()) {
             let used = util.clamp(0.0, 100.0);
-            let reset = w.get("resets_at").and_then(parse_flexible_reset_ms);
+            let reset = w
+                .get("resets_at")
+                .or_else(|| w.get("resetsAt"))
+                .and_then(parse_flexible_reset_ms);
             meters.push(Meter::new(label, used, reset));
         }
     }
@@ -483,6 +503,7 @@ async fn usage_inner(account: &str, recheck: bool) -> Usage {
         .and_then(|v| v.as_str())
         .unwrap_or("unknown")
         .to_string();
+    let sub_type = claude_plan_name(&sub_type, &tier);
 
     let token = get_claude_code_oauth_token(&raw);
 
@@ -958,6 +979,42 @@ mod tests {
         ));
         // no expiresAt → not expired
         assert!(!is_expired_at(r#"{"claudeAiOauth":{}}"#, now));
+    }
+
+    #[test]
+    fn current_plan_names_do_not_infer_verification_or_unknown_tiers() {
+        assert_eq!(claude_plan_name("ultra", "unknown"), "ultra");
+        assert_eq!(claude_plan_name(" Max ", "default_claude_max_20x"), "ultra");
+        assert_eq!(claude_plan_name("max", "default_claude_max_5x"), "max");
+        assert_eq!(claude_plan_name("max", "unknown"), "max");
+        assert_eq!(claude_plan_name("team", "default_claude_max_20x"), "team");
+        assert_eq!(
+            claude_plan_name("unknown", "default_claude_max_20x"),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn weekly_only_responses_do_not_create_a_five_hour_limit() {
+        for payload in [
+            json!({"seven_day":{"utilization":32,"resets_at":"2026-11-08T00:00:00Z"}}),
+            json!({"five_hour":null,"seven_day":{"utilization":32,"resets_at":"2026-11-08T00:00:00Z"}}),
+            json!({"fiveHour":null,"sevenDay":{"utilization":32,"resetsAt":"2026-11-08T00:00:00Z"}}),
+        ] {
+            let meters = build_claude_usage_meters(&payload);
+            assert_eq!(meters.len(), 1);
+            assert_eq!(meters[0].label, "7d");
+            assert_eq!(meters[0].used_pct, 32.0);
+            assert!(meters[0].reset_ms.is_some());
+        }
+        let meters = meters_from_ratelimit_headers(|name| match name {
+            "anthropic-ratelimit-unified-7d-utilization" => Some("0.32".into()),
+            "anthropic-ratelimit-unified-7d-reset" => Some("1794096000".into()),
+            _ => None,
+        });
+        assert_eq!(meters.len(), 1);
+        assert_eq!(meters[0].label, "7d");
+        assert!(build_claude_usage_meters(&json!({})).is_empty());
     }
 
     #[test]

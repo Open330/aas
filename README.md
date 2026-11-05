@@ -256,6 +256,11 @@ This is a refresh-time repair, not a background watcher: token writes by process
 can still leave an already-running daemon stale until refresh is requested again. Native
 `--no-daemon` sessions do not keep a separate daemon's credential cache.
 
+Claude usage displays the windows actually returned by the server. Verified Ultra accounts
+may have only a weekly meter; a reported five-hour meter is still shown for temporary or other
+plan limits. Legacy Max 20x metadata is displayed as Ultra, without inferring verification from
+the plan name. Long-lived tokens do not establish a subscription plan and remain unlabeled.
+
 Codex usage is observational: it never launches `codex doctor` or rotates credentials. Expired
 tokens are reported locally with refresh/login instructions; unexpired tokens make one usage
 request, without a second native refresh on HTTP 401/403. Failures are reused for 60 seconds
