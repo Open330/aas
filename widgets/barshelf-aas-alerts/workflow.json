@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "kind": "workflow",
+  "_comment": "Notifies when any aas account runs low, and again when limits reset. Runs `aas usage --json` in the background every few minutes; the alerts fire on a change (low, then back), never on every refresh.",
+  "sources": {
+    "usage": { "use": "exec", "with": { "command": ["aas", "usage", "--json"] } }
+  },
+  "transforms": {
+    "worst": { "use": "assign", "from": "number(sources.usage.worstRemainingPct)" }
+  },
+  "alerts": {
+    "low": {
+      "when": "${and(ne(transforms.worst, null), lte(transforms.worst, settings.lowPct))}",
+      "title": "An agent account is down to ${string(round(sources.usage.worstRemainingPct))}% left",
+      "body": "Open BarShelf to see which account, or switch with aas.",
+      "cooldownSec": 3600
+    },
+    "reset": {
+      "when": "${and(ne(transforms.worst, null), gte(transforms.worst, settings.resetPct))}",
+      "title": "Agent limits are back",
+      "body": "Every account has ${string(round(sources.usage.worstRemainingPct))}% or more left.",
+      "cooldownSec": 3600
+    }
+  },
+  "view": {
+    "type": "vstack",
+    "spacing": 6,
+    "children": [
+      {
+        "type": "hstack",
+        "spacing": 6,
+        "children": [
+          { "type": "image", "source": { "kind": "sfSymbol", "name": "bell.badge" }, "size": 14,
+            "tint": "${if(lte(coalesce(transforms.worst, 100), settings.lowPct), 'warning', 'secondary')}" },
+          { "type": "text", "text": "Lowest left", "role": "caption", "foreground": "secondary", "lineLimit": 1 }
+        ]
+      },
+      { "type": "text", "text": "${if(eq(transforms.worst, null), '—', concat(string(round(transforms.worst)), '%'))}", "size": 34, "role": "title", "monospacedDigit": true },
+      { "type": "text", "text": "Alerts at ${string(settings.lowPct)}% left", "role": "caption", "foreground": "secondary", "lineLimit": 1 }
+    ]
+  },
+  "status": {
+    "label": "${if(eq(transforms.worst, null), '', concat(string(round(transforms.worst)), '%'))}",
+    "tooltip": "Lowest left across aas accounts"
+  }
+}
