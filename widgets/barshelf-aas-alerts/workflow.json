@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 1,
+  "kind": "workflow",
+  "_comment": "Notifies when any aas account runs low, and again when every account reports plenty left (a reset). Runs `aas usage --json` in the background; alerts fire on a change, never on every refresh. A reading is left out (null) rather than called false when an account failed to report, so a failure can neither re-arm nor fake a reset.",
+  "sources": {
+    "usage": {
+      "use": "exec",
+      "with": {
+        "command": [
+          "aas",
+          "usage",
+          "--json"
+        ]
+      }
+    }
+  },
+  "transforms": {
+    "worst": {
+      "use": "assign",
+      "from": "number(sources.usage.worstRemainingPct)"
+    },
+    "errored": {
+      "use": "filter",
+      "from": "sources.usage.accounts",
+      "with": {
+        "field": "error",
+        "notEquals": null
+      }
+    },
+    "unmetered": {
+      "use": "filter",
+      "from": "sources.usage.accounts",
+      "with": {
+        "field": "meters",
+        "equals": []
+      }
+    },
+    "complete": {
+      "use": "assign",
+      "from": "and(gt(count(sources.usage.accounts), 0), and(eq(count(transforms.errored), 0), eq(count(transforms.unmetered), 0)))"
+    }
+  },
+  "alerts": {
+    "low": {
+      "when": "${if(eq(transforms.worst, null), null, if(lte(transforms.worst, settings.lowPct), true, if(transforms.complete, false, null)))}",
+      "title": "An agent account is down to ${string(round(sources.usage.worstRemainingPct))}% left",
+      "body": "Open BarShelf to see which account, or switch with aas.",
+      "cooldownSec": 3600
+    },
+    "reset": {
+      "when": "${if(or(eq(transforms.worst, null), not(transforms.complete)), null, gte(transforms.worst, settings.resetPct))}",
+      "title": "Agent limits look reset",
+      "body": "Every account aas reports has ${string(round(sources.usage.worstRemainingPct))}% or more left.",
+      "cooldownSec": 3600
+    }
+  },
+  "view": {
+    "type": "vstack",
+    "spacing": 6,
+    "children": [
+      {
+        "type": "hstack",
+        "spacing": 6,
+        "children": [
+          {
+            "type": "image",
+            "source": {
+              "kind": "sfSymbol",
+              "name": "bell.badge"
+            },
+            "size": 14,
+            "tint": "${if(lte(coalesce(transforms.worst, 100), settings.lowPct), 'warning', 'secondary')}"
+          },
+          {
+            "type": "text",
+            "text": "Lowest left",
+            "role": "caption",
+            "foreground": "secondary",
+            "lineLimit": 1
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "text": "${if(eq(transforms.worst, null), '—', concat(string(round(transforms.worst)), '%'))}",
+        "size": 34,
+        "role": "title",
+        "monospacedDigit": true
+      },
+      {
+        "type": "text",
+        "text": "Alerts at ${string(settings.lowPct)}% left",
+        "role": "caption",
+        "foreground": "secondary",
+        "lineLimit": 1
+      }
+    ]
+  },
+  "status": {
+    "label": "${if(eq(transforms.worst, null), '', concat(string(round(transforms.worst)), '%'))}",
+    "tooltip": "Lowest left across aas accounts"
+  }
+}
