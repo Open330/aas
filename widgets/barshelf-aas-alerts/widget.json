@@ -6,21 +6,61 @@
   "version": "0.1.0",
   "minHostVersion": "0.7.21",
   "icon": "bell.badge",
-  "bucket": { "group": "Agents", "order": 22, "size": "S" },
-  "entry": { "kind": "workflow", "main": "workflow.json" },
-  "refresh": { "onOpen": true, "interval": 300, "staleAfterSec": 600, "runInBackground": true },
+  "bucket": {
+    "group": "Agents",
+    "order": 22,
+    "size": "S"
+  },
+  "entry": {
+    "kind": "workflow",
+    "main": "workflow.json"
+  },
+  "refresh": {
+    "onOpen": true,
+    "interval": 300,
+    "staleAfterSec": 600,
+    "runInBackground": true
+  },
   "permissions": {
     "exec": [
-      { "command": "aas", "allowedArgs": [["usage", "--json"]], "maxOutputBytes": 1048576, "sensitiveOutput": true }
+      {
+        "command": "aas",
+        "allowedArgs": [
+          [
+            "usage",
+            "--json"
+          ]
+        ],
+        "maxOutputBytes": 1048576,
+        "sensitiveOutput": true
+      }
     ],
-    "env": ["AAS_BIN"],
+    "env": [
+      "AAS_BIN"
+    ],
     "notifications": true
   },
   "settings": [
-    { "key": "lowPct", "title": "Notify when an account has this much left (%)", "type": "integer", "default": 20, "min": 1, "max": 90 },
-    { "key": "resetPct", "title": "Notify when every account is back above (%)", "type": "integer", "default": 90, "min": 10, "max": 100 }
+    {
+      "key": "lowPct",
+      "title": "Notify when an account has this much left (%)",
+      "type": "integer",
+      "default": 20,
+      "min": 1,
+      "max": 90
+    },
+    {
+      "key": "resetPct",
+      "title": "Notify when every account is back above (%)",
+      "type": "integer",
+      "default": 90,
+      "min": 10,
+      "max": 100
+    }
   ],
-  "appearance": { "accent": "orange" },
+  "appearance": {
+    "accent": "orange"
+  },
   "localizations": {
     "ko": {
       "aas Alerts": "aas 알림",
@@ -30,8 +70,8 @@
       "Alerts at ${string(settings.lowPct)}% left": "${string(settings.lowPct)}% 남으면 알림",
       "An agent account is down to ${string(round(sources.usage.worstRemainingPct))}% left": "에이전트 계정 남은 양이 ${string(round(sources.usage.worstRemainingPct))}%입니다",
       "Open BarShelf to see which account, or switch with aas.": "어느 계정인지 BarShelf에서 확인하거나 aas로 전환하세요.",
-      "Agent limits are back": "에이전트 한도가 돌아왔습니다",
-      "Every account has ${string(round(sources.usage.worstRemainingPct))}% or more left.": "모든 계정이 ${string(round(sources.usage.worstRemainingPct))}% 이상 남았습니다."
+      "Agent limits look reset": "에이전트 한도가 초기화된 것 같습니다",
+      "Every account aas reports has ${string(round(sources.usage.worstRemainingPct))}% or more left.": "aas가 보고한 모든 계정이 ${string(round(sources.usage.worstRemainingPct))}% 이상 남았습니다."
     }
   }
 }
