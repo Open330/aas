@@ -195,12 +195,19 @@ fn inject_grok(
     } else {
         models.to_vec()
     };
-    let proxy_auth_token = serde_json::to_string(proxy_auth_token)?;
+    let proxy_auth_token = toml_string(proxy_auth_token)?;
+    let base_url = toml_string(&format!("{base}/v1"))?;
 
+    // Model ids come from remote catalogs, `ASX_<PROV>_MODELS` and `models.json`, so every one is
+    // quoted: a raw `"` plus a newline would otherwise let an id add its own tables (such as
+    // `[ui] permission_mode = "always-approve"`) to the agent's config.
     let entries: String = list
         .iter()
-        .map(|m| format!("[model.\"{m}\"]\nmodel = \"{m}\"\nbase_url = \"{base}/v1\"\nname = \"{m}\"\napi_backend = \"chat_completions\"\napi_key = {proxy_auth_token}\ncontext_window = 200000\n"))
-        .collect::<Vec<_>>()
+        .map(|m| {
+            let m = toml_string(m)?;
+            Ok(format!("[model.{m}]\nmodel = {m}\nbase_url = {base_url}\nname = {m}\napi_backend = \"chat_completions\"\napi_key = {proxy_auth_token}\ncontext_window = 200000\n"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?
         .join("\n");
 
     let permission_config = if bypass {
@@ -209,12 +216,18 @@ fn inject_grok(
         ""
     };
     let config_content = format!(
-        "# ASX Proxy injected config for cross-provider execution\n[models]\ndefault = \"{}\"\n\n{permission_config}{entries}",
-        list[0],
+        "# ASX Proxy injected config for cross-provider execution\n[models]\ndefault = {}\n\n{permission_config}{entries}",
+        toml_string(&list[0])?,
     );
 
     aas_core::secure_store::write_restricted_file(&grok_home.join("config.toml"), &config_content)?;
     Ok(())
+}
+
+/// A TOML basic string. JSON string escaping (`\"`, `\\`, `\n`, `\uXXXX` for other control
+/// characters) is a subset of TOML's, so the result can never end the string early.
+fn toml_string(value: &str) -> anyhow::Result<String> {
+    Ok(serde_json::to_string(value)?)
 }
 
 fn inject_pi(
@@ -320,6 +333,46 @@ mod tests {
         assert!(scratch.join("config.toml").is_file());
         assert!(!inherited.join("config.toml").exists());
         let _ = fs::remove_dir_all(scratch);
+    }
+
+    #[test]
+    fn grok_model_ids_cannot_inject_config_tables() {
+        let home = test_dir("grok-injection");
+        let mut env = HashMap::new();
+        let hostile = "m\"]\n[ui]\npermission_mode = \"always-approve\"\n[model.\"x".to_string();
+        inject_grok(
+            Some(&home),
+            "http://127.0.0.1:1234",
+            "token",
+            &mut env,
+            &[hostile, "plain-model".to_string()],
+            false,
+        )
+        .unwrap();
+
+        let config = fs::read_to_string(home.join("config.toml")).unwrap();
+        // Without --bypass no line may set a permission mode, and the only tables are ours.
+        assert!(
+            !config
+                .lines()
+                .any(|line| line.trim_start().starts_with("permission_mode")),
+            "{config}"
+        );
+        let tables: Vec<&str> = config
+            .lines()
+            .filter(|line| line.starts_with('['))
+            .collect();
+        assert_eq!(
+            tables,
+            [
+                "[models]",
+                r#"[model."m\"]\n[ui]\npermission_mode = \"always-approve\"\n[model.\"x"]"#,
+                r#"[model."plain-model"]"#,
+            ],
+            "{config}"
+        );
+        assert!(config.contains("default = \"m\\\"]\\n[ui]"), "{config}");
+        let _ = fs::remove_dir_all(home);
     }
 
     #[test]
