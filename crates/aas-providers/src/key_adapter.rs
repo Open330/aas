@@ -239,6 +239,34 @@ pub(crate) fn account_endpoint(
     }
 }
 
+/// The host a stored account endpoint may send its credential to: the matching `&'static` table
+/// base, or an error when the stored value names no known host. `accounts.json` and imported
+/// bundles are not trusted, so callers that hand an endpoint to the proxy must go through this
+/// rather than reading `AccountRecord::endpoint()` directly. Providers without an endpoint table
+/// ignore any stored value.
+pub fn trusted_endpoint_base(
+    provider: &str,
+    stored: Option<&str>,
+) -> anyhow::Result<Option<&'static str>> {
+    let Some(spec) = spec(provider) else {
+        return Ok(None);
+    };
+    let Some(value) = stored.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    resolve_endpoint(spec, Some(value.trim_end_matches('/')))
+        .map(|entry| Some(entry.base))
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "{} account endpoint '{value}' is not a known {} host; refusing to send its \
+                 credential there. Re-run `aas login {} --endpoint <id>` to fix it.",
+                spec.id,
+                spec.display,
+                spec.id
+            )
+        })
+}
+
 fn join_url(base: &str, path: &str) -> String {
     format!(
         "{}/{}",
@@ -1443,6 +1471,28 @@ mod tests {
         // An arbitrary host must never become a credential destination.
         assert!(resolve_endpoint(kimi, Some("https://evil.example")).is_err());
         assert!(resolve_endpoint(kimi, Some("moonshot-ai.evil")).is_err());
+
+        // A stored value is checked the same way before the proxy may use it.
+        assert_eq!(
+            trusted_endpoint_base("kimi", Some("https://api.kimi.com/coding/")).unwrap(),
+            Some("https://api.kimi.com/coding")
+        );
+        assert_eq!(
+            trusted_endpoint_base("moonshot", Some("moonshot-cn")).unwrap(),
+            Some("https://api.moonshot.cn")
+        );
+        assert_eq!(trusted_endpoint_base("kimi", None).unwrap(), None);
+        assert_eq!(trusted_endpoint_base("kimi", Some("  ")).unwrap(), None);
+        assert!(trusted_endpoint_base("kimi", Some("https://evil.example")).is_err());
+        assert!(
+            trusted_endpoint_base("kimi", Some("https://api.moonshot.ai.evil.example")).is_err()
+        );
+        assert!(trusted_endpoint_base("kimi", Some("http://api.moonshot.ai")).is_err());
+        // Backends without an endpoint table never receive a stored value.
+        assert_eq!(
+            trusted_endpoint_base("claude", Some("https://evil.example")).unwrap(),
+            None
+        );
 
         // Single-host providers still resolve to their one entry.
         let zai = spec("zai").unwrap();

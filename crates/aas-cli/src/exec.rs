@@ -253,13 +253,20 @@ async fn live_credential(provider: &str) -> Option<String> {
 }
 
 /// The API host recorded for a backend account. Kimi's platforms issue keys that are not
-/// interchangeable, so the proxy must call the same host the key was validated against.
-fn account_endpoint(store: &AccountStore, provider: &str, name: &str) -> Option<String> {
-    store
+/// interchangeable, so the proxy must call the same host the key was validated against. The
+/// stored value is untrusted (a hand-edited `accounts.json` or an imported bundle can set it), so
+/// it is mapped onto the provider's known hosts and an unknown host stops the launch.
+fn account_endpoint(
+    store: &AccountStore,
+    provider: &str,
+    name: &str,
+) -> anyhow::Result<Option<String>> {
+    let stored = store
         .get(provider, name)
         .ok()
         .flatten()
-        .and_then(|record| record.endpoint().map(str::to_string))
+        .and_then(|record| record.endpoint().map(str::to_string));
+    Ok(aas_providers::trusted_endpoint_base(provider, stored.as_deref())?.map(str::to_string))
 }
 
 /// The credential in the provider's native store, if the adapter can read one.
@@ -368,6 +375,12 @@ pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyh
     {
         anyhow::bail!("Proxy execution is not supported for provider '{profile_provider}'");
     }
+    // Checked before anything is launched, so a tampered endpoint never sees the credential.
+    let target_endpoint = if use_proxy {
+        account_endpoint(store, &profile_provider, &account_name)?
+    } else {
+        None
+    };
 
     // Auto-refresh an expired credential before launch.
     if let Some(p) = get_adapter(&profile_provider) {
@@ -452,7 +465,7 @@ pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyh
                 raw: Some(backend_cred),
                 api_key: None,
             },
-            target_endpoint: account_endpoint(store, &profile_provider, &account_name),
+            target_endpoint,
             tmp_dir: Some(home.clone()),
             port: None,
         })
@@ -572,7 +585,7 @@ pub async fn cmd_proxy(store: &AccountStore, name: &str, frontend: &str) -> anyh
             raw: Some(backend_cred),
             api_key: None,
         },
-        target_endpoint: account_endpoint(store, &backend_provider, &acct.name),
+        target_endpoint: account_endpoint(store, &backend_provider, &acct.name)?,
         tmp_dir: None,
         port: None,
     })
@@ -619,6 +632,31 @@ mod tests {
         use std::os::unix::process::ExitStatusExt;
         let status = std::process::ExitStatus::from_raw(libc::SIGTERM);
         assert_eq!(exit_status_code(status), 128 + libc::SIGTERM);
+    }
+
+    #[test]
+    fn a_tampered_kimi_endpoint_is_refused_before_the_proxy_gets_it() {
+        use aas_core::model::AccountRecord;
+        let dir = std::env::temp_dir().join(format!("aas-endpoint-trust-{}", uuid::Uuid::new_v4()));
+        let store = AccountStore::at(&dir);
+        for (name, endpoint) in [
+            ("evil", Some("https://attacker.example")),
+            ("code", Some("https://api.kimi.com/coding")),
+            ("plain", None),
+        ] {
+            let mut record = AccountRecord::new("kimi", name);
+            record.set_endpoint(endpoint);
+            store.add(record).unwrap();
+        }
+
+        let err = account_endpoint(&store, "kimi", "evil").unwrap_err();
+        assert!(err.to_string().contains("not a known"), "{err}");
+        assert_eq!(
+            account_endpoint(&store, "kimi", "code").unwrap().as_deref(),
+            Some("https://api.kimi.com/coding")
+        );
+        assert_eq!(account_endpoint(&store, "kimi", "plain").unwrap(), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

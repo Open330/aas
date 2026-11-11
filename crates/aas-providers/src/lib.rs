@@ -16,7 +16,7 @@ mod key_adapter;
 mod pi;
 mod snapshot;
 
-pub use key_adapter::KeyEndpoint;
+pub use key_adapter::{trusted_endpoint_base, KeyEndpoint};
 pub use snapshot::{
     resolve_scope, snapshot, snapshot_sorted, snapshot_sorted_with_cache, AccountUsage,
     UsageCacheMode,
