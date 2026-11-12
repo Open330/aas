@@ -13,7 +13,9 @@ binary and its help to check feature availability.
 
 Run `aas candidates --provider <provider> --json` before choosing an account.
 The versioned JSON contains `accounts`, sorted with eligible accounts first and
-then by observed remaining quota. Use `name` as the CLI account argument, not `id`.
+then by `paceScore` (quota left relative to time left before reset).
+`aas exec <provider>` runs the first-ranked account automatically; name an account
+to run a specific one. Use `name` as the CLI account argument, not `id`.
 `eligible` means observed quota is available; it does not guarantee model access,
 valid inference credentials, or compatibility. `cached` and `fetchedAtMs` describe
 freshness. Missing meters and usage errors are unknown, not available capacity.

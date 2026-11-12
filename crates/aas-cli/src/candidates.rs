@@ -21,6 +21,78 @@ fn assessment(usage: &Usage, excluded: bool, cooldown: Option<i64>) -> (bool, &'
     (true, "quota_available")
 }
 
+/// One ranked account. Ranking is evidence only: it is not a model-compatibility guarantee.
+pub struct Candidate {
+    pub provider: String,
+    pub name: String,
+    pub active: bool,
+    pub eligible: bool,
+    pub reason: &'static str,
+    pub cached: bool,
+    pub fetched_at_ms: Option<i64>,
+    pub cooldown_until_ms: Option<i64>,
+    pub score: Option<aas_core::pick::Score>,
+    pub meters: Vec<aas_core::usage::Meter>,
+}
+
+impl Candidate {
+    pub fn id(&self) -> String {
+        format!("{}/{}", self.provider, self.name)
+    }
+}
+
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or_default()
+}
+
+/// Rank accounts best-first: eligible accounts by quota pace (`aas_core::pick`), then the rest.
+pub async fn rank(
+    store: &AccountStore,
+    provider: Option<&str>,
+    exclude: &[String],
+    mode: UsageCacheMode,
+) -> anyhow::Result<Vec<Candidate>> {
+    let items =
+        aas_providers::snapshot_sorted_with_cache(store, provider, AccountSort::Name, mode).await?;
+    let now = now_ms();
+    let mut ranked: Vec<Candidate> = items
+        .into_iter()
+        .map(|item| {
+            let id = format!("{}/{}", item.provider, item.name);
+            let cooldown = aas_core::backoff::rate_limited_until(&id);
+            let (eligible, reason) =
+                assessment(&item.usage, exclude.contains(&item.name), cooldown);
+            Candidate {
+                score: aas_core::pick::score(&item.usage.meters, now),
+                provider: item.provider,
+                name: item.name,
+                active: item.active,
+                eligible,
+                reason,
+                cached: item.cached,
+                fetched_at_ms: item.fetched_at_ms,
+                cooldown_until_ms: cooldown,
+                meters: item.usage.meters,
+            }
+        })
+        .collect();
+    ranked.sort_by(|a, b| {
+        b.eligible
+            .cmp(&a.eligible)
+            .then_with(|| match (&a.score, &b.score) {
+                (Some(x), Some(y)) => aas_core::pick::compare(x, a.active, y, b.active),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            })
+            .then_with(|| a.id().cmp(&b.id()))
+    });
+    Ok(ranked)
+}
+
 pub async fn run(
     store: &AccountStore,
     provider: Option<&str>,
@@ -40,39 +112,21 @@ pub async fn run(
     } else {
         UsageCacheMode::PreferCache
     };
-    let items = aas_providers::snapshot_sorted_with_cache(
-        store,
-        provider.as_deref(),
-        AccountSort::Name,
-        mode,
-    )
-    .await?;
-    let mut accounts = Vec::new();
-    for item in &items {
-        let id = format!("{}/{}", item.provider, item.name);
-        let cooldown = aas_core::backoff::rate_limited_until(&id);
-        let (eligible, reason) = assessment(&item.usage, exclude.contains(&item.name), cooldown);
-        let remaining = super::remaining_pct(&item.usage.meters);
-        accounts.push(serde_json::json!({
-            "id": id, "name": item.name, "provider": item.provider,
-            "active": item.active, "eligible": eligible, "reason": reason,
-            "cached": item.cached, "fetchedAtMs": item.fetched_at_ms,
-            "remainingPct": remaining, "usageCooldownUntilMs": cooldown,
-            "meters": item.usage.meters,
-        }));
-    }
-    accounts.sort_by(|a, b| {
-        b["eligible"]
-            .as_bool()
-            .cmp(&a["eligible"].as_bool())
-            .then_with(|| {
-                b["remainingPct"]
-                    .as_f64()
-                    .partial_cmp(&a["remainingPct"].as_f64())
-                    .unwrap_or(std::cmp::Ordering::Equal)
+    let accounts: Vec<_> = rank(store, provider.as_deref(), exclude, mode)
+        .await?
+        .into_iter()
+        .map(|c| {
+            serde_json::json!({
+                "id": c.id(), "name": c.name, "provider": c.provider,
+                "active": c.active, "eligible": c.eligible, "reason": c.reason,
+                "cached": c.cached, "fetchedAtMs": c.fetched_at_ms,
+                "remainingPct": c.score.map(|s| s.remaining_pct),
+                "paceScore": c.score.map(|s| s.pace),
+                "usageCooldownUntilMs": c.cooldown_until_ms,
+                "meters": c.meters,
             })
-            .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
-    });
+        })
+        .collect();
     if json {
         println!(
             "{}",

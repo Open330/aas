@@ -142,6 +142,48 @@ pub fn parse_exec_args(
     })
 }
 
+/// How `aas exec <provider>` chooses an account when given a provider rather than an account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PickMode {
+    /// The account with the best quota pace (see `pick`).
+    #[default]
+    Auto,
+    /// The provider's active account.
+    Active,
+}
+
+/// Consume `--pick <auto|active>` / `--pick=<…>` before `--`; every other token is returned
+/// untouched for `parse_exec_args`.
+pub fn take_pick_mode(args: &[String]) -> anyhow::Result<(PickMode, Vec<String>)> {
+    let mut mode = PickMode::default();
+    let mut rest = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--" {
+            rest.extend(args[i..].iter().cloned());
+            break;
+        }
+        let value = if arg == "--pick" {
+            i += 1;
+            args.get(i).map(String::as_str)
+        } else if let Some(value) = arg.strip_prefix("--pick=") {
+            Some(value)
+        } else {
+            rest.push(args[i].clone());
+            i += 1;
+            continue;
+        };
+        mode = match value {
+            Some("auto") => PickMode::Auto,
+            Some("active") => PickMode::Active,
+            _ => anyhow::bail!("--pick requires `auto` or `active`"),
+        };
+        i += 1;
+    }
+    Ok((mode, rest))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +215,22 @@ mod tests {
             v(&["--fallback="]),
         ] {
             assert!(parse_exec_args(&tokens, false, None).is_err());
+        }
+    }
+
+    #[test]
+    fn pick_mode_is_consumed_before_the_separator() {
+        let (mode, rest) = take_pick_mode(&v(&["--pick", "active", "-m", "x"])).unwrap();
+        assert_eq!((mode, rest), (PickMode::Active, v(&["-m", "x"])));
+        let (mode, rest) = take_pick_mode(&v(&["--pick=auto", "--", "--pick", "active"])).unwrap();
+        assert_eq!(
+            (mode, rest),
+            (PickMode::Auto, v(&["--", "--pick", "active"]))
+        );
+        let (mode, rest) = take_pick_mode(&v(&["hello"])).unwrap();
+        assert_eq!((mode, rest), (PickMode::Auto, v(&["hello"])));
+        for tokens in [v(&["--pick"]), v(&["--pick", "best"]), v(&["--pick="])] {
+            assert!(take_pick_mode(&tokens).is_err());
         }
     }
 

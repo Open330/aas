@@ -155,6 +155,86 @@ fn candidates_json_ranks_cached_accounts_and_honors_exclusions() {
     assert_eq!(body["accounts"][1]["reason"], "excluded");
 }
 
+#[cfg(unix)]
+#[test]
+fn provider_exec_auto_picks_the_best_paced_account_unless_told_active() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let bin = fixture.0.join("codex");
+    std::fs::write(&bin, "#!/bin/sh\nprintf '%s\\n' \"$CODEX_HOME\" \"$@\"\n").unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let day = 86_400_000_i64;
+    // primary: 70% of the week left but 6 days to go (pace ~0.82).
+    // backup: 40% left, expiring in 1 day (pace 2.8) — spend it first.
+    let entry = |used: f64, reset: i64| json!({"fetchedAtMs":now,"usage":{"headline":"test","plan":null,"meters":[{"label":"7d","used_pct":used,"reset_ms":reset}],"notes":[],"error":null}});
+    std::fs::write(
+        fixture.0.join("usage-cache.json"),
+        json!({"version":1,"entries":{
+            "codex/primary":entry(30.0, now + 6 * day),
+            "codex/backup":entry(60.0, now + day),
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(fixture.0.join(".active.json"), r#"{"codex":"primary"}"#).unwrap();
+    let run = |args: &[&str]| {
+        let output = fixture
+            .command()
+            .env("AAS_SHIM_BIN", &bin)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let home = |name: &str| fixture.0.join(format!("profiles/codex-{name}"));
+
+    let (stdout, stderr) = run(&["codex", "resume", "--last"]);
+    assert_eq!(
+        stdout,
+        format!("{}\nresume\n--last\n", home("backup").display())
+    );
+    assert!(stderr.contains("→ codex/backup"), "{stderr}");
+    assert!(stderr.contains("pace 2.80×"), "{stderr}");
+
+    let (stdout, _) = run(&["e", "codex", "--pick", "active", "resume"]);
+    assert_eq!(stdout, format!("{}\nresume\n", home("primary").display()));
+
+    // Naming an account never auto-picks, and `--pick` then belongs to the agent.
+    let (stdout, _) = run(&["e", "primary", "resume", "--pick", "active"]);
+    assert_eq!(
+        stdout,
+        format!("{}\nresume\n--pick\nactive\n", home("primary").display())
+    );
+
+    // A `--fallback` account is never auto-picked as the primary (which would be a duplicate).
+    let output = fixture
+        .command()
+        .env("AAS_SHIM_BIN", &bin)
+        .args(["e", "codex", "--fallback", "backup", "resume"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("Duplicate fallback"), "{stderr}");
+    assert!(stderr.contains("fallback account: backup"), "{stderr}");
+
+    let (stdout, _) = run(&["candidates", "--provider", "codex", "--json"]);
+    let body: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(body["accounts"][0]["name"], "backup");
+    assert!((body["accounts"][0]["paceScore"].as_f64().unwrap() - 2.8).abs() < 1e-3);
+}
+
 #[test]
 fn invalid_fallback_pools_fail_before_launch_or_refresh() {
     let fixture = Fixture::new();

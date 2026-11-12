@@ -5,6 +5,16 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `aas exec <provider>` (and the bare `aas <provider>`) now auto-picks the account with the most
+  quota left relative to the time left in its window, instead of the active account. The tightest
+  window binds each account, nearly exhausted accounts sink, and the pick and its reason are printed
+  to stderr. When usage is unavailable within 4 seconds or no account qualifies, the active account
+  runs as before; `--pick active` always runs it. Accounts given as `--fallback` are not picked. A provider with accounts but no active one now
+  runs instead of failing. Naming an account is unchanged.
+- `aas candidates` ranks eligible accounts by the same pace score and reports it as `paceScore`.
+
 ## [0.1.15] - 2026-11-05
 
 ### Fixed

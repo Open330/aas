@@ -106,7 +106,8 @@ aas switch codex personal
 
 # Run the native agent under a profile, without changing your default login
 aas exec work -- --version
-aas exec codex                             # a provider name runs its active account
+aas exec codex                             # a provider name auto-picks its best-paced account
+aas exec codex --pick active               # …or runs its active account
 
 # Cross-provider: run Claude's UI on the codex backend (via the local proxy)
 aas exec personal.codex claude
@@ -178,12 +179,31 @@ aas exec primary.codex --fallback backup.codex -- <agent arguments>
 
 `candidates` returns `{ "schemaVersion": 1, "accounts": [...] }`. Entries contain
 `id`, `name` (the exec argument), `provider`, `active`, `eligible`, `reason`,
-`cached`, `fetchedAtMs`, `remainingPct`, `usageCooldownUntilMs`, and `meters`.
-Eligible entries sort first, then by remaining quota descending and ID ascending.
+`cached`, `fetchedAtMs`, `remainingPct`, `paceScore`, `usageCooldownUntilMs`, and `meters`.
+Eligible entries sort first, then by pace (below) descending, remaining quota descending, the
+active account, and ID ascending.
 Reasons are `quota_available`, `excluded`, `usage_rate_limited`, `usage_error`,
 `usage_unknown`, or `quota_exhausted`. Eligibility is quota evidence, not a model
 compatibility or inference-auth guarantee. `--fresh` bypasses success and failure caches;
 usage endpoint cooldowns remain authoritative. Empty results are an empty array.
+
+### Auto-pick (`aas exec <provider>`)
+
+Naming a provider instead of an account (`aas exec codex`, `aas claude`) runs the account that
+`candidates` ranks first. Each usage window gets a *pace*: the share of quota left divided by the
+share of the window left. `1.0` means even spending exhausts it exactly at reset; above `1.0`
+quota would expire unused, so that account is spent first; below `1.0` it would hit its limit
+early. An account scores its tightest window, and any window under 5% left that is not resetting
+within 10 minutes sinks it below the rest. So 40% of a week that resets tomorrow (pace 2.8) beats
+70% with six days to go (0.82). Windowless meters such as credits score their remaining share.
+
+The choice and its reason go to stderr (`aas: → codex/work  7d 40% left · resets 1d 0h · pace
+2.80×  (3 candidates, cached 2m)`), and `aas candidates --provider <provider>` previews it. Usage
+comes from the same 10-minute cache as `usage`; if it is not available within 4 seconds, or no
+account has usable quota, the provider's active account runs instead. A system profile is only
+picked while it is the live system credential, and accounts named with `--fallback` are never
+picked as the primary. The active account is never changed.
+`--pick active` (consumed only for provider targets) restores the active-account behavior.
 
 `--fallback` must precede `--`; every named account must match the primary's provider
 and endpoint. It opts into the local translating proxy, including same-provider
@@ -212,7 +232,7 @@ request is blocked. Start with `--fallback` to handle that case at the proxy lay
 | `login [provider] [name]` `--long-lived`, `--device-auth`/`--headless`, `--endpoint <id>`, *share flags* | Login and store a new **isolated** profile. `--long-lived` uses Claude's `setup-token`; `--device-auth` uses a browserless device-code flow; `--endpoint` picks the API host for providers that run several (kimi). |
 | `load [provider] [name]` | Snapshot the **currently logged-in** credential as a **system** profile (auto-scans providers if none given). |
 | `switch <provider> <name>` or `switch <account>` (alias `s`) | Make a stored account the active credential. The one-argument form resolves a globally unique stored account name. |
-| `exec <name> [target] [args…]` (alias `e`) | Run the native CLI under a profile. `<name>` is a stored account, or a provider whose active account should run (`aas exec codex`). If `target` ≠ the profile's provider, requests route through the local **ASX Proxy** (cross-provider). `-b` full-access bypass; cross-run share flags `-s/-i/--share/--isolate/--keep-context`; `--` passes the rest to the agent. |
+| `exec <name> [target] [args…]` (alias `e`) | Run the native CLI under a profile. `<name>` is a stored account, or a provider to auto-pick from (`aas exec codex`; `--pick active` runs its active account instead). If `target` ≠ the profile's provider, requests route through the local **ASX Proxy** (cross-provider). `-b` full-access bypass; cross-run share flags `-s/-i/--share/--isolate/--keep-context`; `--` passes the rest to the agent. |
 | `export [name]` or `export <provider> <name>` `--all`, `--vault`, `-o <file>`, `--shell posix\|fish\|powershell` | Print shell env to use a profile in the current shell (`eval "$(aas export <name>)"`), or `--all` for a portable bundle of **every account + credential**. `--vault` encrypts it with an age/scrypt passphrase. |
 | `sharing <name>` *share flags* | Show or change which state (sessions/skills/agents/hooks/settings) an isolated profile shares from the provider's home. |
 | `rename <from> <to>` | Rename an account, moving its profile home + markers. Codex rollout index paths follow the move; close its sessions and daemon first. |
