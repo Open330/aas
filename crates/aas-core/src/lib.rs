@@ -14,6 +14,7 @@ pub mod keychain;
 pub mod keyed_lock;
 pub mod model;
 pub mod naming;
+pub mod pick;
 pub mod platform;
 pub mod secure_store;
 pub mod share;

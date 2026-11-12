@@ -215,7 +215,8 @@ enum Command {
         #[arg(long = "no-login")]
         no_login: bool,
     },
-    /// Run a profile. `--fallback <account>` (repeatable, before `--`) enables proxy HTTP 429 failover.
+    /// Run a profile, or a provider's best-paced account (`--pick active` for its active one).
+    /// `--fallback <account>` (repeatable, before `--`) enables proxy HTTP 429 failover.
     #[command(visible_alias = "e")]
     Exec {
         name: String,
@@ -400,7 +401,16 @@ fn rewrite_default_exec_args(
         "help",
     ];
     if let Some(candidate) = first {
-        if !COMMANDS.contains(&candidate) && store.resolve_run_target(candidate)?.is_some() {
+        // A provider with accounts but no active one still runs: `exec` auto-picks among them.
+        let pickable_provider = || -> anyhow::Result<bool> {
+            Ok(normalize_provider(candidate)
+                .map(|provider| store.list(Some(&provider)))
+                .transpose()?
+                .is_some_and(|accounts| !accounts.is_empty()))
+        };
+        if !COMMANDS.contains(&candidate)
+            && (store.resolve_run_target(candidate)?.is_some() || pickable_provider()?)
+        {
             args.insert(1, "exec".into());
         }
     }
@@ -1128,14 +1138,16 @@ mod tests {
     }
 
     #[test]
-    fn a_provider_with_no_active_account_is_left_alone() {
+    fn a_provider_with_accounts_but_no_active_one_is_rewritten_for_auto_pick() {
         let (store, dir) = test_store();
-        store.add(AccountRecord::new("codex", "work")).unwrap();
         let args = vec!["aas".into(), "codex".into()];
+        let rewritten = rewrite_default_exec_args(&store, args.clone()).unwrap();
+        assert_eq!(rewritten.len(), 2, "no accounts: left alone");
 
+        store.add(AccountRecord::new("codex", "work")).unwrap();
         let rewritten = rewrite_default_exec_args(&store, args).unwrap();
-        assert_eq!(rewritten.len(), 2);
-        assert_eq!(rewritten[1], "codex");
+        assert_eq!(rewritten[1], "exec");
+        assert_eq!(rewritten[2], "codex");
         let _ = std::fs::remove_dir_all(dir);
     }
 

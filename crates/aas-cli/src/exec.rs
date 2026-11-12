@@ -2,7 +2,7 @@
 //! Same-provider runs inject the profile home + shared-state symlinks; cross-provider runs
 //! spin up the local ASX Proxy and point the agent binary at it.
 
-use aas_core::execargs::parse_exec_args;
+use aas_core::execargs::{parse_exec_args, take_pick_mode, PickMode};
 use aas_core::model::ProfileType;
 use aas_core::naming::{
     is_known_provider, normalize_provider, normalize_provider_key, profile_home,
@@ -313,8 +313,130 @@ fn resolve_target(store: &AccountStore, name: &str) -> anyhow::Result<aas_core::
     anyhow::bail!("Account not found: {name}");
 }
 
+/// How long `aas exec <provider>` waits for usage before falling back to the active account.
+const PICK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// `exec`'s target: an account name runs that account; a provider name auto-picks the account
+/// with the best quota pace unless `--pick active` asks for the provider's active account. The
+/// `--pick` flag is consumed only for provider targets, so account runs forward it untouched.
+async fn resolve_exec_target(
+    store: &AccountStore,
+    name: &str,
+    rest: &[String],
+) -> anyhow::Result<(aas_core::AccountRecord, Vec<String>)> {
+    if let Some(account) = store.get_by_name(name)? {
+        return Ok((account, rest.to_vec()));
+    }
+    let Some(provider) = normalize_provider(name) else {
+        return Ok((resolve_target(store, name)?, rest.to_vec()));
+    };
+    let (mode, rest) = take_pick_mode(rest)?;
+    if mode == PickMode::Auto {
+        // Accounts named as `--fallback` are already spoken for; picking one as the primary
+        // would make the fallback pool reject it as a duplicate.
+        let fallback = parse_exec_args(&rest, false, None)
+            .map(|args| args.fallback)
+            .unwrap_or_default();
+        if let Some(account) = auto_pick(store, &provider, &fallback).await? {
+            return Ok((account, rest));
+        }
+    }
+    Ok((resolve_target(store, name)?, rest))
+}
+
+/// The best-paced usable account for `provider`, or `None` to fall back to the active account.
+async fn auto_pick(
+    store: &AccountStore,
+    provider: &str,
+    exclude: &[String],
+) -> anyhow::Result<Option<aas_core::AccountRecord>> {
+    let mut accounts = store.list(Some(provider))?;
+    accounts.retain(|account| !exclude.contains(&account.name));
+    if accounts.len() <= 1 || get_adapter(provider).is_none() {
+        return Ok(accounts.into_iter().next());
+    }
+    let ranked = match tokio::time::timeout(
+        PICK_TIMEOUT,
+        crate::candidates::rank(
+            store,
+            Some(provider),
+            exclude,
+            aas_providers::UsageCacheMode::PreferCache,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(ranked)) => ranked,
+        Ok(Err(error)) => {
+            eprintln!("aas: could not rank {provider} accounts ({error}); using the active one.");
+            return Ok(None);
+        }
+        Err(_) => {
+            eprintln!("aas: {provider} usage timed out; using the active account.");
+            return Ok(None);
+        }
+    };
+    let eligible = ranked.iter().filter(|c| c.eligible).count();
+    for candidate in ranked.iter().filter(|c| c.eligible) {
+        let Some(account) = store.get(&candidate.provider, &candidate.name)? else {
+            continue;
+        };
+        // A system profile only runs while it is the live system credential.
+        if account.profile_type == Some(ProfileType::System)
+            && !is_current_system_profile(&account.provider, &account.name).await
+        {
+            continue;
+        }
+        eprintln!("aas: → {}", pick_summary(candidate, eligible));
+        return Ok(Some(account));
+    }
+    eprintln!("aas: no {provider} account has usable quota; using the active account.");
+    Ok(None)
+}
+
+/// `45m`, `3h 20m`, `2d 4h`.
+fn short_duration(ms: i64) -> String {
+    let mins = (ms.max(0) as f64 / 60_000.0).round() as i64;
+    let (d, h, m) = (mins / 1440, mins % 1440 / 60, mins % 60);
+    match (d, h) {
+        (0, 0) => format!("{m}m"),
+        (0, _) => format!("{h}h {m}m"),
+        _ => format!("{d}d {h}h"),
+    }
+}
+
+fn pick_summary(candidate: &crate::candidates::Candidate, eligible: usize) -> String {
+    let now = crate::candidates::now_ms();
+    let mut line = candidate.id();
+    if let Some(meter) = aas_core::pick::binding_meter(&candidate.meters, now) {
+        line.push_str(&format!(
+            "  {} {:.0}% left",
+            meter.label,
+            meter.remaining_pct()
+        ));
+        if let Some(reset) = meter.reset_ms.filter(|r| *r > now) {
+            line.push_str(&format!(" · resets {}", short_duration(reset - now)));
+        }
+    }
+    if let Some(score) = candidate.score {
+        line.push_str(&format!(" · pace {:.2}×", score.pace));
+    }
+    let plural = if eligible == 1 { "" } else { "s" };
+    line.push_str(&format!("  ({eligible} candidate{plural}"));
+    if let Some(age) = candidate
+        .fetched_at_ms
+        .filter(|_| candidate.cached)
+        .map(|at| (now - at).max(0) / 60_000)
+    {
+        line.push_str(&format!(", cached {age}m"));
+    }
+    line.push(')');
+    line
+}
+
 pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyhow::Result<()> {
-    let acct = resolve_target(store, name)?;
+    let (acct, rest) = resolve_exec_target(store, name, rest).await?;
+    let rest = rest.as_slice();
     let profile_provider = acct.provider.clone();
     let account_name = acct.name.clone();
 
@@ -625,6 +747,14 @@ pub async fn cmd_proxy(store: &AccountStore, name: &str, frontend: &str) -> anyh
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_durations_scale_their_units() {
+        assert_eq!(short_duration(-5), "0m");
+        assert_eq!(short_duration(45 * 60_000), "45m");
+        assert_eq!(short_duration(200 * 60_000), "3h 20m");
+        assert_eq!(short_duration((2 * 1440 + 4 * 60 + 10) * 60_000), "2d 4h");
+    }
 
     #[cfg(unix)]
     #[test]
