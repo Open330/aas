@@ -5,15 +5,31 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.1.16] - 2026-11-12
+
+### Security
+
+- Proxy runs (`aas exec <kimi> claude`, `aas proxy <kimi> …`) refuse a stored Kimi endpoint
+  that is not one of the known Kimi hosts before the API key is sent anywhere. A hand-edited
+  store or an imported bundle could previously point the key at any host; `aas login` already
+  enforced the host table.
+- Grok frontend `config.toml` values (model ids from remote catalogs, the default model, base URL
+  and token) are written as quoted TOML strings, so a hostile model id cannot add tables such as
+  `[ui] permission_mode = "always-approve"` or a second `[model.*]` with another `base_url`.
+- Bundled SQLite 3.54 (`rusqlite` 0.41) clears RUSTSEC-2026-0459.
+
 ### Added
 
 - `aas update [provider…]` updates every agent CLI `aas exec` launches in one step, using the
   shim-pinned CLI when one is installed. npm/pnpm/bun globals and Homebrew installs go through
-  their package manager; Claude native, Codex standalone and Grok installs run their own `update`. Agent
-  home variables are cleared first, so an update started inside `aas exec` cannot install into
-  one account's profile. Superseded standalone releases (about 300 MB each) are removed unless
+  their package manager; Claude native, Codex standalone and Grok installs run their own `update`.
+  Agent home variables are cleared first, so an update started inside `aas exec` cannot install
+  into one account's profile. Superseded standalone releases (about 300 MB each) are removed unless
   `--no-prune` is given; a release a running process still executes from is kept. `--dry-run`
   shows the commands and what would be removed.
+- BarShelf: an opt-in aas Alerts widget notifies once when the worst remaining quota drops to a
+  threshold and once when every account has reset; a failed or partial reading never counts as
+  a reset or re-arms the low alert.
 
 ### Changed
 
@@ -25,6 +41,13 @@ All notable user-facing changes are recorded here. The format follows
   A provider with accounts but no active one now runs instead of failing. Naming an account is
   unchanged.
 - `aas candidates` ranks eligible accounts by the same pace score and reports it as `paceScore`.
+- `aas shim status` and `aas shim install` list other installations on stderr next to their
+  warning, so the two cannot be reordered.
+
+### Fixed
+
+- `aas update` and `aas shim status` read the CLI path from the earliest shims, which name it
+  only in `exec '<path>' "$@"` lines.
 
 ## [0.1.15] - 2026-11-05
 
