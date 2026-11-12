@@ -106,6 +106,16 @@ fn real_binary(bin: &str) -> Option<PathBuf> {
     real_binaries(bin).into_iter().next()
 }
 
+/// The CLI `aas exec` runs for `bin`: the installed shim's pinned path, else the first real
+/// CLI on `PATH`.
+pub(crate) fn launched_binary(bin: &str) -> Option<PathBuf> {
+    std::fs::read_to_string(shim_dir().join(bin))
+        .ok()
+        .and_then(|body| recorded_binary(&body))
+        .filter(|path| is_executable(path))
+        .or_else(|| real_binary(bin))
+}
+
 fn real_binaries(bin: &str) -> Vec<PathBuf> {
     let shims = shim_dir();
     let path = std::env::var_os("PATH").unwrap_or_default();
@@ -151,7 +161,7 @@ fn recorded_binary(body: &str) -> Option<PathBuf> {
     (sh_quote(&path) == value).then_some(path)
 }
 
-fn warn_alternatives(bin: &str, selected: &Path) {
+pub(crate) fn warn_alternatives(bin: &str, selected: &Path) {
     let alternatives: Vec<_> = real_binaries(bin)
         .into_iter()
         .filter(|candidate| !same_dir(candidate, selected))

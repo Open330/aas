@@ -87,6 +87,11 @@ pub(crate) fn agent_bin(provider: &str) -> Option<&'static str> {
     agent_spec(provider).map(|spec| spec.bin)
 }
 
+/// The environment variable naming the native CLI's home directory for `provider`.
+pub(crate) fn agent_home_env(provider: &str) -> Option<&'static str> {
+    agent_spec(provider).map(|spec| spec.home_env)
+}
+
 /// Set by a shim to the absolute CLI it resolved at install time.
 pub(crate) const SHIM_BIN_ENV: &str = "AAS_SHIM_BIN";
 

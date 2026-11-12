@@ -8,6 +8,7 @@ mod login;
 mod render;
 mod shim;
 mod ui;
+mod update;
 
 use aas_core::model::{sort_accounts, AccountSort, ProfileType};
 use aas_core::naming::{normalize_provider, normalize_provider_key};
@@ -230,6 +231,18 @@ enum Command {
         #[arg(value_name = "PROVIDER")]
         provider: String,
     },
+    /// Update the agent CLIs `exec` launches and prune the releases they superseded.
+    Update {
+        /// Providers to update (default: every installed agent CLI).
+        #[arg(value_name = "PROVIDER")]
+        providers: Vec<String>,
+        /// Print what would run and be pruned, without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Keep superseded standalone releases (Codex `releases/`, Claude `versions/`).
+        #[arg(long)]
+        no_prune: bool,
+    },
     /// Put the bare provider CLI (`claude`, `codex`, …) on the active account.
     Shim {
         #[command(subcommand)]
@@ -348,6 +361,11 @@ async fn main() {
         Command::Exec { name, rest } => exec::cmd_exec(&store, &name, &rest).await,
         Command::Proxy { name, frontend } => exec::cmd_proxy(&store, &name, &frontend).await,
         Command::Active { provider } => cmd_active(&store, &provider),
+        Command::Update {
+            providers,
+            dry_run,
+            no_prune,
+        } => update::run(&providers, dry_run, no_prune).await,
         Command::Shim { action } => match action {
             shim::ShimAction::Install { providers, bin } => {
                 shim::install(&providers, bin.as_deref())
@@ -398,6 +416,7 @@ fn rewrite_default_exec_args(
         "exec",
         "e",
         "proxy",
+        "update",
         "help",
     ];
     if let Some(candidate) = first {
