@@ -5,14 +5,25 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `aas update [provider…]` updates every agent CLI `aas exec` launches in one step, using the
+  shim-pinned CLI when one is installed. npm/pnpm/bun globals and Homebrew installs go through
+  their package manager; Claude native, Codex standalone and Grok installs run their own `update`. Agent
+  home variables are cleared first, so an update started inside `aas exec` cannot install into
+  one account's profile. Superseded standalone releases (about 300 MB each) are removed unless
+  `--no-prune` is given; a release a running process still executes from is kept. `--dry-run`
+  shows the commands and what would be removed.
+
 ### Changed
 
 - `aas exec <provider>` (and the bare `aas <provider>`) now auto-picks the account with the most
   quota left relative to the time left in its window, instead of the active account. The tightest
   window binds each account, nearly exhausted accounts sink, and the pick and its reason are printed
   to stderr. When usage is unavailable within 4 seconds or no account qualifies, the active account
-  runs as before; `--pick active` always runs it. Accounts given as `--fallback` are not picked. A provider with accounts but no active one now
-  runs instead of failing. Naming an account is unchanged.
+  runs as before; `--pick active` always runs it. Accounts given as `--fallback` are not picked.
+  A provider with accounts but no active one now runs instead of failing. Naming an account is
+  unchanged.
 - `aas candidates` ranks eligible accounts by the same pace score and reports it as `paceScore`.
 
 ## [0.1.15] - 2026-11-05

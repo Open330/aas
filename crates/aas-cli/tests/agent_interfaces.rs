@@ -256,3 +256,61 @@ fn invalid_fallback_pools_fail_before_launch_or_refresh() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn update_runs_the_pinned_cli_outside_profiles_and_prunes_superseded_releases() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let fixture = Fixture::new();
+    let root = fixture.0.join("standalone");
+    let releases = root.join("releases");
+    let launcher = fixture.0.join("bin/codex");
+    std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+    let (root_s, launcher_s) = (root.display(), launcher.display());
+    let script = format!(
+        "#!/bin/sh\ncase \"$1\" in\n--version) echo \"codex-cli $(basename \"$(dirname \"$(dirname \"$(readlink {launcher_s})\")\")\")\";;\nupdate) echo \"CODEX_HOME=${{CODEX_HOME:-unset}}\" > {root_s}/update.log; mkdir -p {root_s}/releases/2.0.0/bin; cp \"$(readlink {launcher_s})\" {root_s}/releases/2.0.0/bin/codex; ln -sfn {root_s}/releases/2.0.0/bin/codex {launcher_s};;\nesac\n"
+    );
+    for release in ["0.9.0", "1.0.0"] {
+        let bin = releases.join(release).join("bin/codex");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, &script).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    symlink(releases.join("1.0.0/bin/codex"), &launcher).unwrap();
+    let pin = fixture
+        .command()
+        .args(["shim", "install", "codex", "--bin"])
+        .arg(&launcher)
+        .output()
+        .unwrap();
+    assert!(pin.status.success(), "{pin:?}");
+
+    let dry = fixture
+        .command()
+        .args(["update", "codex", "--dry-run"])
+        .output()
+        .unwrap();
+    let dry_out =
+        String::from_utf8_lossy(&dry.stdout).into_owned() + &String::from_utf8_lossy(&dry.stderr);
+    assert!(dry.status.success(), "{dry_out}");
+    assert!(dry_out.contains("codex 1.0.0 (standalone)"), "{dry_out}");
+    assert!(dry_out.contains("would prune 0.9.0"), "{dry_out}");
+    assert!(releases.join("0.9.0").exists() && !root.join("update.log").exists());
+
+    let output = fixture
+        .command()
+        .env("CODEX_HOME", fixture.0.join("profiles/codex-primary"))
+        .args(["update", "codex"])
+        .output()
+        .unwrap();
+    let report = String::from_utf8_lossy(&output.stdout).into_owned()
+        + &String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{report}");
+    assert!(report.contains("codex 1.0.0 → 2.0.0"), "{report}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("update.log")).unwrap(),
+        "CODEX_HOME=unset\n"
+    );
+    assert!(releases.join("2.0.0").exists());
+    assert!(!releases.join("1.0.0").exists() && !releases.join("0.9.0").exists());
+}

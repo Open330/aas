@@ -106,6 +106,16 @@ fn real_binary(bin: &str) -> Option<PathBuf> {
     real_binaries(bin).into_iter().next()
 }
 
+/// The CLI `aas exec` runs for `bin`: the installed shim's pinned path, else the first real
+/// CLI on `PATH`.
+pub(crate) fn launched_binary(bin: &str) -> Option<PathBuf> {
+    std::fs::read_to_string(shim_dir().join(bin))
+        .ok()
+        .and_then(|body| recorded_binary(&body))
+        .filter(|path| is_executable(path))
+        .or_else(|| real_binary(bin))
+}
+
 fn real_binaries(bin: &str) -> Vec<PathBuf> {
     let shims = shim_dir();
     let path = std::env::var_os("PATH").unwrap_or_default();
@@ -138,10 +148,20 @@ fn explicit_binary(path: &Path, bin: &str, shims: &Path) -> anyhow::Result<PathB
 }
 
 /// Read only our literal shell assignment; never evaluate an installed script.
-/// This also supports shims generated before explicit binary selection was added.
+/// This also supports shims generated before explicit binary selection was added, and the
+/// earliest shims, which name the CLI only in their `exec '<path>' "$@"` lines.
 fn recorded_binary(body: &str) -> Option<PathBuf> {
     let prefix = format!("{SHIM_BIN_ENV}=");
-    let value = body.lines().find_map(|line| line.strip_prefix(&prefix))?;
+    if let Some(value) = body.lines().find_map(|line| line.strip_prefix(&prefix)) {
+        return unquote(value);
+    }
+    body.lines()
+        .filter_map(|line| line.trim().strip_prefix("exec ")?.strip_suffix(" \"$@\""))
+        .find_map(unquote)
+}
+
+/// The path `value` names when it is exactly one `sh_quote`d word.
+fn unquote(value: &str) -> Option<PathBuf> {
     let path = PathBuf::from(
         value
             .strip_prefix('\'')?
@@ -151,7 +171,7 @@ fn recorded_binary(body: &str) -> Option<PathBuf> {
     (sh_quote(&path) == value).then_some(path)
 }
 
-fn warn_alternatives(bin: &str, selected: &Path) {
+pub(crate) fn warn_alternatives(bin: &str, selected: &Path) {
     let alternatives: Vec<_> = real_binaries(bin)
         .into_iter()
         .filter(|candidate| !same_dir(candidate, selected))
@@ -162,8 +182,9 @@ fn warn_alternatives(bin: &str, selected: &Path) {
     ui::warn(format!(
         "{bin}: other installations found; updating one does not update the pinned CLI:"
     ));
+    // stderr, like the warning above it, so the list cannot be reordered away from it.
     for path in alternatives {
-        println!("    {}", path.display());
+        eprintln!("    {}", path.display());
     }
     ui::hint(format!(
         "choose with `aas shim install {bin} --bin <path-to-{bin}>`."
@@ -403,6 +424,15 @@ mod tests {
         assert_eq!(recorded_binary("AAS_SHIM_BIN=$(command -v codex)"), None);
         assert_eq!(
             recorded_binary("AAS_SHIM_BIN='/bin/codex'; touch nope"),
+            None
+        );
+        let legacy = "if [ -n \"${AAS_SHIM:-}\" ]; then\n  exec '/home/u/.grok/bin/grok' \"$@\"\nfi\nexec '/bin/aas' exec \"$active\" -- \"$@\"\n";
+        assert_eq!(
+            recorded_binary(legacy),
+            Some(PathBuf::from("/home/u/.grok/bin/grok"))
+        );
+        assert_eq!(
+            recorded_binary("exec '/bin/aas' exec \"$active\" -- \"$@\"\n"),
             None
         );
     }
