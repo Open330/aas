@@ -110,7 +110,7 @@ fn detect(real: &Path, provider: &str) -> Option<Method> {
             });
         }
     }
-    matches!(provider, "claude" | "codex").then_some(Method::SelfUpdate)
+    matches!(provider, "claude" | "codex" | "grok").then_some(Method::SelfUpdate)
 }
 
 /// A standalone install keeps one entry per version under `releases/` (Codex) or `versions/`
@@ -448,7 +448,9 @@ mod tests {
         );
         let native = Path::new("/Users/a/.local/share/claude/versions/2.1.322");
         assert_eq!(detect(native, "claude"), Some(Method::SelfUpdate));
-        assert_eq!(detect(Path::new("/usr/bin/grok"), "grok"), None);
+        let grok = Path::new("/home/u/.grok/downloads/grok-linux-x86_64");
+        assert_eq!(detect(grok, "grok"), Some(Method::SelfUpdate));
+        assert_eq!(detect(Path::new("/usr/bin/pi"), "pi"), None);
     }
 
     #[test]

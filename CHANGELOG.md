@@ -9,7 +9,7 @@ All notable user-facing changes are recorded here. The format follows
 
 - `aas update [provider…]` updates every agent CLI `aas exec` launches in one step, using the
   shim-pinned CLI when one is installed. npm/pnpm/bun globals and Homebrew installs go through
-  their package manager; Claude native and Codex standalone installs run their own `update`. Agent
+  their package manager; Claude native, Codex standalone and Grok installs run their own `update`. Agent
   home variables are cleared first, so an update started inside `aas exec` cannot install into
   one account's profile. Superseded standalone releases (about 300 MB each) are removed unless
   `--no-prune` is given; a release a running process still executes from is kept. `--dry-run`
