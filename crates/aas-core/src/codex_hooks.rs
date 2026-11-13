@@ -368,8 +368,9 @@ impl SeedReport {
 ///
 /// `profile_config` is the config inside the profile home: normally a symlink to
 /// `system_config`, in which case the shared file is edited. A profile with its own (isolated)
-/// config is handled the same way within that file, so trust it recorded under an earlier path
-/// of the same profile — before a rename, or before the state directory moved — carries over.
+/// config is edited in that file only; its grants may come from that file — under an earlier
+/// path of the same profile, before a rename or the state directory move — or from the system
+/// config.
 /// Errors are swallowed by the caller — a profile that cannot be seeded simply falls back to
 /// Codex's interactive trust prompt.
 pub fn seed_profile_hook_trust(
@@ -386,7 +387,16 @@ pub fn seed_profile_hook_trust(
 
     let body = std::fs::read_to_string(&real)?;
     let state = collect_state(&body);
-    let trusted: std::collections::BTreeSet<&String> = state.values().collect();
+    let mut trusted: std::collections::BTreeSet<String> = state.values().cloned().collect();
+    // An isolated profile also inherits grants the user made in the shared system config: the
+    // hash still has to match the hook this profile declares.
+    if let Ok(system_real) = std::fs::canonicalize(system_config) {
+        if system_real != real {
+            if let Ok(system_body) = std::fs::read_to_string(&system_real) {
+                trusted.extend(collect_state(&system_body).into_values());
+            }
+        }
+    }
     let declared = declared_hashes(&body);
 
     let mut wanted: BTreeMap<String, String> = BTreeMap::new();
@@ -748,7 +758,13 @@ mod tests {
         );
         // The shared system config is not touched for an isolated profile.
         assert_eq!(std::fs::read_to_string(&f.system).unwrap(), system_before);
-        // An isolated config with no trust gains none.
+        // A grant made only in the system config reaches the isolated profile too.
+        let own = sample(&old_path.to_string_lossy(), HOOK, "sha256:stale");
+        std::fs::write(&profile_config, &own).unwrap();
+        let report = seed_profile_hook_trust(&f.system, &profile_config, &f.profiles).unwrap();
+        assert_eq!(report.seeded, 1);
+        assert_eq!(std::fs::read_to_string(&f.system).unwrap(), system_before);
+        // An isolated config declaring no hooks gains no trust.
         std::fs::write(&profile_config, "model = \"gpt-5\"\n").unwrap();
         let report = seed_profile_hook_trust(&f.system, &profile_config, &f.profiles).unwrap();
         assert_eq!(report, SeedReport::default());
