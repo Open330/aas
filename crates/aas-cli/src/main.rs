@@ -846,9 +846,18 @@ fn cmd_migrate(finish: bool, force: bool) -> anyhow::Result<()> {
 }
 
 fn print_legacy_users(users: &[aas_core::migrate::LegacyUser]) {
-    for user in users {
+    // Everything an agent's shell started inherits its profile variable, so the list can run
+    // to hundreds of processes; the first few show what to restart.
+    const SHOWN: usize = 15;
+    if !users.is_empty() {
+        println!("{} {}", ui::heading("still running from it:"), users.len());
+    }
+    for user in users.iter().take(SHOWN) {
         let command: String = user.command.chars().take(100).collect();
         println!("  {} {}", ui::dim(&format!("{:>7}", user.pid)), command);
+    }
+    if users.len() > SHOWN {
+        println!("  {}", ui::dim(&format!("… and {} more", users.len() - SHOWN)));
     }
 }
 
