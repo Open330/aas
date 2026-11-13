@@ -5,6 +5,13 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A Codex profile with its own `config.toml` also takes hook trust the user granted in
+  `~/.codex/config.toml`, when the hash matches the hook the profile declares. Such a profile
+  previously asked again after its hooks were rewritten, even though the same hooks were
+  trusted for every linked profile.
+
 ## [0.2.2] - 2026-11-13
 
 ### Fixed
