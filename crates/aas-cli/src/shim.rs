@@ -9,7 +9,7 @@
 use crate::exec::{agent_bin, SHIM_BIN_ENV};
 use crate::ui;
 use aas_core::naming::normalize_provider_key;
-use aas_core::platform::asx_config_dir;
+use aas_core::platform::config_dir;
 use std::path::{Path, PathBuf};
 
 /// Providers whose native CLI `aas exec` can launch.
@@ -58,7 +58,7 @@ fn override_env(provider: &str) -> &'static [&'static str] {
 }
 
 pub fn shim_dir() -> PathBuf {
-    asx_config_dir().join("shims")
+    config_dir().join("shims")
 }
 
 fn sh_quote(path: &Path) -> String {

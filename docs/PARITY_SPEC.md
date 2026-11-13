@@ -1,5 +1,9 @@
 # aas ⇄ asx Parity Spec
 
+> Historical port checklist. aas no longer shares state with `asx`: it keeps `<base>/aas`,
+> reads `AAS_*` variables and names its proxy `aas-proxy` (see `DESIGN.md` §4). Identifiers below
+> are the `asx` originals.
+
 The behavioral contract `aas` (Rust) reproduces from `asx` (TypeScript v0.3.0 plus current-main
 commits `fa24cfa` and `0e819cd`). Every
 `file:line` points into `/Users/june/personal/asx/src/`. This is the port checklist; wire

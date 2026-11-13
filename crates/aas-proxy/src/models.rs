@@ -3,7 +3,7 @@
 //! Each choice is one entry in the agent's model picker; the agent sends the chosen `id` back and
 //! the backend adapter maps it to the real upstream (model + reasoning effort).
 //!
-//! Precedence: `ASX_<PROV>_MODELS` env > `<asx config dir>/models.json` > live provider
+//! Precedence: `AAS_<PROV>_MODELS` env > `<aas config dir>/models.json` > live provider
 //! discovery > built-in defaults. Live results are cached for the lifetime of the proxy process.
 
 use serde_json::Value;
@@ -110,7 +110,7 @@ fn defaults(provider: &str, endpoint: Option<&str>) -> Vec<BackendChoice> {
             .map(|m| BackendChoice::new(*m, *m, None))
             .collect();
     }
-    vec![BackendChoice::new("asx-proxy", "asx-proxy", None)]
+    vec![BackendChoice::new("aas-proxy", "aas-proxy", None)]
 }
 
 /// `"model"` or `"model:effort"` -> a choice. The picker id is `"model-effort"` (or `"model"`).
@@ -165,9 +165,9 @@ fn normalize_entry(e: &Value) -> Option<BackendChoice> {
     None
 }
 
-/// Override via env: `ASX_<PROV>_MODELS="model:effort,model:effort"`.
+/// Override via env: `AAS_<PROV>_MODELS="model:effort,model:effort"`.
 fn from_env(provider: &str) -> Option<Vec<BackendChoice>> {
-    let raw = std::env::var(format!("ASX_{}_MODELS", provider.to_uppercase())).ok()?;
+    let raw = std::env::var(format!("AAS_{}_MODELS", provider.to_uppercase())).ok()?;
     if raw.is_empty() {
         return None;
     }
@@ -184,14 +184,14 @@ fn from_env(provider: &str) -> Option<Vec<BackendChoice>> {
     }
 }
 
-/// `ASX_MODELS_CONFIG` overrides the path (mainly for tests); default is `<asx config dir>/models.json`.
+/// `AAS_MODELS_CONFIG` overrides the path (mainly for tests); default is `<aas config dir>/models.json`.
 fn models_config_path() -> PathBuf {
-    if let Ok(p) = std::env::var("ASX_MODELS_CONFIG") {
+    if let Ok(p) = std::env::var("AAS_MODELS_CONFIG") {
         if !p.is_empty() {
             return PathBuf::from(p);
         }
     }
-    aas_core::platform::asx_config_dir().join("models.json")
+    aas_core::platform::config_dir().join("models.json")
 }
 
 fn load_config() -> Option<Value> {
@@ -282,7 +282,7 @@ pub fn pick_tier_choice(list: &[BackendChoice], tier: AgentTier) -> BackendChoic
     let fallback = || {
         list.first()
             .cloned()
-            .unwrap_or_else(|| BackendChoice::new("asx-proxy", "asx-proxy", None))
+            .unwrap_or_else(|| BackendChoice::new("aas-proxy", "aas-proxy", None))
     };
     let effort = |wanted: &str| {
         list.iter()
@@ -380,7 +380,7 @@ pub fn resolve_choice_for(provider: &str, endpoint: Option<&str>, id: &str) -> B
     {
         return exact.clone();
     }
-    let stripped = id.strip_prefix("claude-asx-").unwrap_or(id);
+    let stripped = id.strip_prefix("claude-aas-").unwrap_or(id);
     if stripped != id {
         if let Some(exact) = list
             .iter()
@@ -394,7 +394,7 @@ pub fn resolve_choice_for(provider: &str, endpoint: Option<&str>, id: &str) -> B
     }
     list.first()
         .cloned()
-        .unwrap_or_else(|| BackendChoice::new("asx-proxy", "asx-proxy", None))
+        .unwrap_or_else(|| BackendChoice::new("aas-proxy", "aas-proxy", None))
 }
 
 fn grok_token_from_credential(credential: &str) -> Option<String> {

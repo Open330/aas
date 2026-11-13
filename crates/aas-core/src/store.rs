@@ -72,7 +72,7 @@ pub struct AccountStore {
 impl AccountStore {
     pub fn open_default() -> Self {
         Self {
-            dir: crate::platform::asx_config_dir(),
+            dir: crate::platform::config_dir(),
         }
     }
 

@@ -453,6 +453,23 @@ pub fn seed_profile_hook_trust(
     })
 }
 
+/// Drop every trust entry recorded for a config path under `dir`, e.g. profile paths that no
+/// longer exist after the state directory moved. Returns how many were removed; the file is only
+/// rewritten when that is non-zero.
+pub fn prune_entries_under(config: &Path, dir: &Path) -> std::io::Result<usize> {
+    let real = match std::fs::canonicalize(config) {
+        Ok(real) => real,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let body = std::fs::read_to_string(&real)?;
+    let (kept, pruned) = filter_state_tables(&body, |k| Path::new(&k.config).starts_with(dir));
+    if pruned > 0 {
+        write_atomic(&real, &kept)?;
+    }
+    Ok(pruned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
