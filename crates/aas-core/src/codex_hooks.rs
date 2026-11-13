@@ -366,20 +366,18 @@ impl SeedReport {
 /// answered the review prompt. An entry left stale by a changed hook is refreshed the same way.
 /// A hook nobody trusted is never touched, so Codex still asks about it.
 ///
-/// `profile_config` must be the symlink inside the profile home; it is a no-op unless that link
-/// actually resolves to `system_config`. Errors are swallowed by the caller — a profile that
-/// cannot be seeded simply falls back to Codex's interactive trust prompt.
+/// `profile_config` is the config inside the profile home: normally a symlink to
+/// `system_config`, in which case the shared file is edited. A profile with its own (isolated)
+/// config is handled the same way within that file, so trust it recorded under an earlier path
+/// of the same profile — before a rename, or before the state directory moved — carries over.
+/// Errors are swallowed by the caller — a profile that cannot be seeded simply falls back to
+/// Codex's interactive trust prompt.
 pub fn seed_profile_hook_trust(
     system_config: &Path,
     profile_config: &Path,
     profiles_dir: &Path,
 ) -> std::io::Result<SeedReport> {
-    let real = std::fs::canonicalize(system_config)?;
-    // Only meaningful while the profile shares the system config; an isolated (real) config
-    // carries its own trust state and must not be touched.
-    if std::fs::canonicalize(profile_config)? != real {
-        return Ok(SeedReport::default());
-    }
+    let real = std::fs::canonicalize(profile_config)?;
     let system_key = system_config.to_string_lossy().into_owned();
     let profile_key = profile_config.to_string_lossy().into_owned();
     if system_key == profile_key {
@@ -727,15 +725,33 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn an_isolated_profile_config_is_left_alone() {
+    fn an_isolated_profile_config_keeps_its_own_trust() {
         let f = fixture();
         let profile_config = f.profile_home.join("config.toml");
         std::fs::remove_file(&profile_config).unwrap();
+        // The profile's own config, trusted under the path it had before the state dir moved.
+        let old_path = f
+            .profiles
+            .join("..")
+            .join("asx-profiles/codex-a_b/config.toml");
+        let own = sample(&old_path.to_string_lossy(), HOOK, &session_start_hash(HOOK));
+        std::fs::write(&profile_config, &own).unwrap();
+        let system_before = std::fs::read_to_string(&f.system).unwrap();
+
+        let report = seed_profile_hook_trust(&f.system, &profile_config, &f.profiles).unwrap();
+        assert_eq!(report.seeded, 1);
+        let body = std::fs::read_to_string(&profile_config).unwrap();
+        let key = profile_config.to_string_lossy().into_owned();
+        assert_eq!(
+            collect_state(&body).get(&(key, "session_start:0:0".into())),
+            Some(&session_start_hash(HOOK))
+        );
+        // The shared system config is not touched for an isolated profile.
+        assert_eq!(std::fs::read_to_string(&f.system).unwrap(), system_before);
+        // An isolated config with no trust gains none.
         std::fs::write(&profile_config, "model = \"gpt-5\"\n").unwrap();
-        let before = std::fs::read_to_string(&f.system).unwrap();
         let report = seed_profile_hook_trust(&f.system, &profile_config, &f.profiles).unwrap();
         assert_eq!(report, SeedReport::default());
-        assert_eq!(std::fs::read_to_string(&f.system).unwrap(), before);
     }
 
     #[cfg(unix)]
