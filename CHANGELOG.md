@@ -5,6 +5,8 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-13
+
 ### Fixed
 
 - On macOS hosts with `AAS_NO_KEYCHAIN=1`, the move to `…/aas` now also carries Claude Code's
@@ -470,7 +472,8 @@ All notable user-facing changes are recorded here. The format follows
 - Hardened account storage, provider adapters, proxy authentication, retries, installers, and
   portable app packaging.
 
-[Unreleased]: https://github.com/Open330/aas/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Open330/aas/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/Open330/aas/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Open330/aas/compare/v0.1.16...v0.2.0
 [0.1.16]: https://github.com/Open330/aas/compare/v0.1.15...v0.1.16
 [0.1.15]: https://github.com/Open330/aas/compare/v0.1.14...v0.1.15
