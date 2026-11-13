@@ -5,6 +5,8 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-13
+
 ### Added
 
 - `aas migrate` shows what is left of the old `asx` state directory, and `aas migrate --finish`
@@ -460,7 +462,14 @@ All notable user-facing changes are recorded here. The format follows
 - Hardened account storage, provider adapters, proxy authentication, retries, installers, and
   portable app packaging.
 
-[Unreleased]: https://github.com/Open330/aas/compare/v0.1.10...HEAD
+[Unreleased]: https://github.com/Open330/aas/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Open330/aas/compare/v0.1.16...v0.2.0
+[0.1.16]: https://github.com/Open330/aas/compare/v0.1.15...v0.1.16
+[0.1.15]: https://github.com/Open330/aas/compare/v0.1.14...v0.1.15
+[0.1.14]: https://github.com/Open330/aas/compare/v0.1.13...v0.1.14
+[0.1.13]: https://github.com/Open330/aas/compare/v0.1.12...v0.1.13
+[0.1.12]: https://github.com/Open330/aas/compare/v0.1.11...v0.1.12
+[0.1.11]: https://github.com/Open330/aas/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/Open330/aas/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/Open330/aas/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/Open330/aas/compare/v0.1.7...v0.1.8
