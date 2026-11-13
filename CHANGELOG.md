@@ -5,6 +5,17 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `aas exec` carries Codex hook trust to a profile from wherever the user granted it. Codex
+  hashes a hook by what it does, not where it is declared, so aas now recomputes each hook's
+  hash and copies a grant made in any profile (not only `~/.codex/config.toml`) onto the
+  profile being launched. It also refreshes a profile entry left stale after a hook is
+  rewritten, for example by `tend init`. A hook the user has trusted nowhere is left for Codex
+  to ask about.
+- The CLI's end-to-end tests run with a private `HOME`, so they no longer add hook trust
+  entries for temporary profiles to the developer's real `~/.codex/config.toml`.
+
 ## [0.1.16] - 2026-11-12
 
 ### Security

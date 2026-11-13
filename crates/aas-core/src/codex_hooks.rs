@@ -5,9 +5,11 @@
 //! home, so Codex sees a different path per profile and re-prompts "Hooks need review" the first
 //! time every profile runs — and again whenever an account rename changes the profile directory.
 //!
-//! Seeding copies the trust hashes already recorded for the system config onto the profile path,
-//! so a profile inherits exactly the trust the user granted in `~/.codex/config.toml` — never more.
-//! Entries for profile directories that no longer exist are pruned at the same time.
+//! Codex's trust hash covers only what a hook does, not where it was declared, so a grant made
+//! under one path is equally valid under another. Seeding copies a hook's trust onto the profile
+//! path when the user already trusted that exact hook under some path in the same file — the
+//! system config or another profile — and never trusts a hook the user has not. Entries for
+//! profile directories that no longer exist are pruned at the same time.
 //!
 //! The file is edited textually (append + line filter) rather than round-tripped through a TOML
 //! serializer, so the user's comments, ordering and formatting survive untouched.
@@ -112,7 +114,7 @@ fn collect_state(body: &str) -> BTreeMap<(String, String), String> {
 }
 
 /// Drop whole `[hooks.state."…"]` tables whose key satisfies `drop`.
-fn filter_state_tables(body: &str, drop: impl Fn(&StateKey) -> bool) -> (String, usize) {
+fn filter_state_tables(body: &str, mut drop: impl FnMut(&StateKey) -> bool) -> (String, usize) {
     let mut out = String::with_capacity(body.len());
     let mut dropping = false;
     let mut dropped = 0usize;
@@ -163,10 +165,187 @@ fn write_atomic(path: &Path, body: &str) -> std::io::Result<()> {
     }
 }
 
+/// Codex's trust label for a `[[hooks.<Event>]]` table name.
+fn event_label(event: &str) -> Option<&'static str> {
+    Some(match event {
+        "PreToolUse" => "pre_tool_use",
+        "PermissionRequest" => "permission_request",
+        "PostToolUse" => "post_tool_use",
+        "PreCompact" => "pre_compact",
+        "PostCompact" => "post_compact",
+        "PreModelRequest" => "pre_model_request",
+        "PostModelRequest" => "post_model_request",
+        "SessionStart" => "session_start",
+        "SessionEnd" => "session_end",
+        "UserPromptSubmit" => "user_prompt_submit",
+        "SubagentStart" => "subagent_start",
+        "SubagentStop" => "subagent_stop",
+        "Stop" => "stop",
+        "Interrupt" => "interrupt",
+        _ => return None,
+    })
+}
+
+/// Events whose matcher takes part in the hook's identity; the rest drop it before hashing.
+fn event_uses_matcher(label: &str) -> bool {
+    !matches!(
+        label,
+        "pre_model_request" | "post_model_request" | "user_prompt_submit" | "stop" | "interrupt"
+    )
+}
+
+/// Events that can emit `additionalContext`, so `additionalContextLimit` is kept for them.
+fn event_takes_context_limit(label: &str) -> bool {
+    matches!(
+        label,
+        "pre_tool_use"
+            | "post_tool_use"
+            | "session_start"
+            | "user_prompt_submit"
+            | "subagent_start"
+    )
+}
+
+/// Codex's default `additionalContextLimit`; a hook that names it hashes as if it named none.
+const DEFAULT_CONTEXT_LIMIT: i64 = 2_500;
+
+/// Serialize with every object's keys sorted, the canonical form Codex hashes.
+fn canonical_json(value: &serde_json::Value, out: &mut String) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            out.push('{');
+            for (i, key) in keys.into_iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::Value::String(key.clone()).to_string());
+                out.push(':');
+                canonical_json(&map[key], out);
+            }
+            out.push('}');
+        }
+        serde_json::Value::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                canonical_json(item, out);
+            }
+            out.push(']');
+        }
+        other => out.push_str(&other.to_string()),
+    }
+}
+
+/// The trust hash Codex computes for one command handler: sha256 over the canonical JSON of the
+/// event label, the group's matcher and the normalized handler. It covers what the hook *does*,
+/// never where it was declared, which is why one grant can be carried to another config path.
+///
+/// `None` for anything this does not model (non-command handlers, malformed values); those
+/// hooks fall back to the conservative copy rule in [`seed_profile_hook_trust`].
+fn command_hook_hash(label: &str, matcher: Option<&str>, handler: &toml::Value) -> Option<String> {
+    use serde_json::{json, Map, Value};
+    use sha2::{Digest, Sha256};
+
+    let table = handler.as_table()?;
+    if table.get("type")?.as_str()? != "command" {
+        return None;
+    }
+    let windows = table
+        .get("commandWindows")
+        .or_else(|| table.get("command_windows"))
+        .and_then(toml::Value::as_str);
+    let command = match (cfg!(windows), windows) {
+        (true, Some(windows)) => windows,
+        _ => table.get("command")?.as_str()?,
+    };
+    if command.trim().is_empty() {
+        return None;
+    }
+    let timeout = match table.get("timeout") {
+        None => None,
+        Some(value) => Some(u64::try_from(value.as_integer()?).ok()?),
+    };
+    let timeout = match label {
+        "session_end" | "interrupt" => timeout.unwrap_or(1).clamp(1, 3),
+        _ => timeout.unwrap_or(600).max(1),
+    };
+    let r#async = match table.get("async") {
+        None => false,
+        Some(value) => value.as_bool()?,
+    };
+
+    let mut normalized = Map::new();
+    normalized.insert("type".into(), json!("command"));
+    normalized.insert("command".into(), json!(command));
+    normalized.insert("timeout".into(), json!(timeout));
+    normalized.insert("async".into(), json!(r#async));
+    if let Some(status) = table.get("statusMessage") {
+        normalized.insert("statusMessage".into(), json!(status.as_str()?));
+    }
+    if let Some(limit) = table.get("additionalContextLimit") {
+        let limit = limit.as_integer().filter(|limit| *limit >= 0)?;
+        if event_takes_context_limit(label) && limit != DEFAULT_CONTEXT_LIMIT {
+            normalized.insert("additionalContextLimit".into(), json!(limit));
+        }
+    }
+
+    let mut identity = Map::new();
+    identity.insert("event_name".into(), json!(label));
+    if let Some(matcher) = matcher {
+        identity.insert("matcher".into(), json!(matcher));
+    }
+    identity.insert(
+        "hooks".into(),
+        Value::Array(vec![Value::Object(normalized)]),
+    );
+
+    let mut text = String::new();
+    canonical_json(&Value::Object(identity), &mut text);
+    let digest = Sha256::digest(text.as_bytes());
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    Some(format!("sha256:{hex}"))
+}
+
+/// The hash Codex would expect for every command hook `body` declares, keyed `<event>:<i>:<j>`.
+/// Empty when the file does not parse; callers then fall back to the conservative rule.
+fn declared_hashes(body: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let Ok(doc) = body.parse::<toml::Value>() else {
+        return out;
+    };
+    let Some(hooks) = doc.get("hooks").and_then(toml::Value::as_table) else {
+        return out;
+    };
+    for (event, groups) in hooks {
+        let (Some(label), Some(groups)) = (event_label(event), groups.as_array()) else {
+            continue;
+        };
+        for (group_index, group) in groups.iter().enumerate() {
+            let matcher = group
+                .get("matcher")
+                .and_then(toml::Value::as_str)
+                .filter(|_| event_uses_matcher(label));
+            let Some(handlers) = group.get("hooks").and_then(toml::Value::as_array) else {
+                continue;
+            };
+            for (handler_index, handler) in handlers.iter().enumerate() {
+                if let Some(hash) = command_hook_hash(label, matcher, handler) {
+                    out.insert(format!("{label}:{group_index}:{handler_index}"), hash);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// What a seeding run changed.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SeedReport {
-    /// Trust entries copied onto the profile config path.
+    /// Trust entries written onto the profile config path, new or refreshed.
     pub seeded: usize,
     /// Stale entries removed because their profile directory is gone.
     pub pruned: usize,
@@ -178,8 +357,14 @@ impl SeedReport {
     }
 }
 
-/// Copy the system config's hook trust onto `profile_config`, and prune entries belonging to
-/// profile directories under `profiles_dir` that no longer exist.
+/// Carry hook trust the user already granted onto `profile_config`, and prune entries belonging
+/// to profile directories under `profiles_dir` that no longer exist.
+///
+/// A hook is trusted on the profile path only when the user trusted that exact hook somewhere:
+/// its current hash (computed as Codex does) must already be recorded as `trusted_hash` under
+/// some config path in the same file — the system config, or another profile where the user
+/// answered the review prompt. An entry left stale by a changed hook is refreshed the same way.
+/// A hook nobody trusted is never touched, so Codex still asks about it.
 ///
 /// `profile_config` must be the symlink inside the profile home; it is a no-op unless that link
 /// actually resolves to `system_config`. Errors are swallowed by the caller — a profile that
@@ -203,6 +388,26 @@ pub fn seed_profile_hook_trust(
 
     let body = std::fs::read_to_string(&real)?;
     let state = collect_state(&body);
+    let trusted: std::collections::BTreeSet<&String> = state.values().collect();
+    let declared = declared_hashes(&body);
+
+    let mut wanted: BTreeMap<String, String> = BTreeMap::new();
+    for (suffix, hash) in &declared {
+        let current = state.get(&(profile_key.clone(), suffix.clone()));
+        if current != Some(hash) && trusted.contains(hash) {
+            wanted.insert(suffix.clone(), hash.clone());
+        }
+    }
+    // Hooks whose identity is not modelled keep the conservative rule: a profile with no entry
+    // inherits the system config's.
+    for ((config, suffix), hash) in &state {
+        if config == &system_key
+            && !declared.contains_key(suffix)
+            && !state.contains_key(&(profile_key.clone(), suffix.clone()))
+        {
+            wanted.insert(suffix.clone(), hash.clone());
+        }
+    }
 
     let profiles_dir = profiles_dir.to_path_buf();
     let is_stale_profile = |k: &StateKey| {
@@ -211,16 +416,18 @@ pub fn seed_profile_hook_trust(
             && k.config != profile_key
             && !path.parent().map(Path::is_dir).unwrap_or(false)
     };
-    let (kept, pruned) = filter_state_tables(&body, is_stale_profile);
+    let mut pruned = 0usize;
+    let (kept, _) = filter_state_tables(&body, |k| {
+        if k.config == profile_key {
+            // Replaced below with the refreshed hash.
+            return wanted.contains_key(&k.suffix);
+        }
+        let stale = is_stale_profile(k);
+        pruned += usize::from(stale);
+        stale
+    });
 
-    let missing: Vec<(String, String)> = state
-        .iter()
-        .filter(|((config, _), _)| config == &system_key)
-        .filter(|((_, suffix), _)| !state.contains_key(&(profile_key.clone(), suffix.clone())))
-        .map(|((_, suffix), hash)| (suffix.clone(), hash.clone()))
-        .collect();
-
-    if missing.is_empty() && pruned == 0 {
+    if wanted.is_empty() && pruned == 0 {
         return Ok(SeedReport::default());
     }
 
@@ -228,9 +435,9 @@ pub fn seed_profile_hook_trust(
     if !out.ends_with('\n') {
         out.push('\n');
     }
-    if !missing.is_empty() {
-        out.push_str("\n# Hook trust inherited from the Codex system config by aas exec.\n");
-        for (suffix, hash) in &missing {
+    if !wanted.is_empty() {
+        out.push_str("\n# Hook trust carried over by aas exec from a path where it was granted.\n");
+        for (suffix, hash) in &wanted {
             out.push_str(&format!(
                 "[hooks.state.\"{}:{}\"]\ntrusted_hash = \"{}\"\n",
                 escape_basic(&profile_key),
@@ -241,7 +448,7 @@ pub fn seed_profile_hook_trust(
     }
     write_atomic(&real, &out)?;
     Ok(SeedReport {
-        seeded: missing.len(),
+        seeded: wanted.len(),
         pruned,
     })
 }
@@ -250,16 +457,27 @@ pub fn seed_profile_hook_trust(
 mod tests {
     use super::*;
 
+    const HOOK: &str = "muxa hook codex";
+
+    /// The hash Codex records for the sample `SessionStart` hook.
+    fn session_start_hash(command: &str) -> String {
+        let handler: toml::Value =
+            toml::from_str(&format!("type = \"command\"\ncommand = \"{command}\"\n")).unwrap();
+        command_hook_hash("session_start", None, &handler).unwrap()
+    }
+
     #[cfg(unix)]
-    fn sample(system: &str) -> String {
+    fn sample(trusted_at: &str, command: &str, hash: &str) -> String {
         format!(
             "model = \"gpt-5\"\n\n\
              [[hooks.SessionStart]]\n\
-             hooks = [{{ type = \"command\", command = \"muxa hook codex\" }}]\n\n\
+             hooks = [{{ type = \"command\", command = \"{command}\" }}]\n\n\
+             [[hooks.Stop]]\n\
+             hooks = [{{ type = \"mcp_tool\", server = \"s\", tool = \"t\" }}]\n\n\
              [hooks.state]\n\n\
-             [hooks.state.\"{system}:session_start:0:0\"]\n\
-             trusted_hash = \"sha256:aaa\"\n\n\
-             [hooks.state.\"{system}:stop:0:0\"]\n\
+             [hooks.state.\"{trusted_at}:session_start:0:0\"]\n\
+             trusted_hash = \"{hash}\"\n\n\
+             [hooks.state.\"{trusted_at}:stop:0:0\"]\n\
              trusted_hash = \"sha256:bbb\"\n\n\
              [projects.\"/tmp\"]\n\
              trust_level = \"trusted\"\n"
@@ -288,13 +506,79 @@ mod tests {
         std::fs::create_dir_all(&system_home).unwrap();
         std::fs::create_dir_all(&profile_home).unwrap();
         let system = system_home.join("config.toml");
-        std::fs::write(&system, sample(&system.to_string_lossy())).unwrap();
+        let body = sample(&system.to_string_lossy(), HOOK, &session_start_hash(HOOK));
+        std::fs::write(&system, body).unwrap();
         std::os::unix::fs::symlink(&system, profile_home.join("config.toml")).unwrap();
         Fixture {
             system,
             profile_home,
             profiles,
         }
+    }
+
+    #[cfg(unix)]
+    fn profile_state(f: &Fixture) -> BTreeMap<String, String> {
+        let key = f
+            .profile_home
+            .join("config.toml")
+            .to_string_lossy()
+            .into_owned();
+        collect_state(&std::fs::read_to_string(&f.system).unwrap())
+            .into_iter()
+            .filter(|((config, _), _)| config == &key)
+            .map(|((_, suffix), hash)| (suffix, hash))
+            .collect()
+    }
+
+    #[test]
+    fn hashes_match_what_codex_records() {
+        // Hashes taken from a real Codex config: a trivial hook trusted in a scratch home, and
+        // a production SessionStart hook.
+        assert_eq!(
+            session_start_hash("true"),
+            "sha256:696abd07fc74736ff2d809abef82925e1ea697cd2e547d73317c677b0d407441"
+        );
+        assert_eq!(
+            session_start_hash("tend hook codex --event session_start"),
+            "sha256:d5dfe8ff78f5821ef13e45eee31023f02fae0b64f5620e2219239bf02ce5c1a2"
+        );
+        let handler: toml::Value = toml::from_str(
+            "type = \"command\"\ncommand = \"tend hook codex --event pre_tool_use\"",
+        )
+        .unwrap();
+        assert_eq!(
+            command_hook_hash("pre_tool_use", None, &handler).unwrap(),
+            "sha256:270142e975acd1e3788822119c11b61b665c5db864cf75ba457d952e23e347ef"
+        );
+    }
+
+    #[test]
+    fn normalization_follows_codex() {
+        let parse = |s: &str| -> toml::Value { toml::from_str(s).unwrap() };
+        let base = parse("type = \"command\"\ncommand = \"x\"");
+        // The default timeout and context limit hash the same as leaving them out.
+        let explicit = parse(
+            "type = \"command\"\ncommand = \"x\"\ntimeout = 600\nadditionalContextLimit = 2500",
+        );
+        assert_eq!(
+            command_hook_hash("session_start", None, &base),
+            command_hook_hash("session_start", None, &explicit)
+        );
+        // Stop drops its matcher; PreToolUse keeps it.
+        assert_eq!(
+            command_hook_hash("stop", None, &base),
+            declared_hashes("[[hooks.Stop]]\nmatcher = \"m\"\nhooks = [{ type = \"command\", command = \"x\" }]\n")
+                .get("stop:0:0")
+                .cloned()
+        );
+        assert_ne!(
+            command_hook_hash("pre_tool_use", None, &base),
+            command_hook_hash("pre_tool_use", Some("m"), &base)
+        );
+        assert_eq!(
+            command_hook_hash("stop", None, &parse("type = \"prompt\"")),
+            None
+        );
     }
 
     #[cfg(unix)]
@@ -310,21 +594,86 @@ mod tests {
                 pruned: 0
             }
         );
-
-        let body = std::fs::read_to_string(&f.system).unwrap();
-        let state = collect_state(&body);
-        let key = profile_config.to_string_lossy().into_owned();
+        let state = profile_state(&f);
         assert_eq!(
-            state.get(&(key.clone(), "session_start:0:0".into())),
-            Some(&"sha256:aaa".to_string())
+            state.get("session_start:0:0"),
+            Some(&session_start_hash(HOOK))
         );
-        assert_eq!(
-            state.get(&(key, "stop:0:0".into())),
-            Some(&"sha256:bbb".to_string())
-        );
+        // An unmodelled handler inherits the system entry as before.
+        assert_eq!(state.get("stop:0:0"), Some(&"sha256:bbb".to_string()));
         // The user's own content is preserved verbatim.
+        let body = std::fs::read_to_string(&f.system).unwrap();
         assert!(body.contains("[projects.\"/tmp\"]"));
         assert!(body.contains("model = \"gpt-5\""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trust_granted_in_another_profile_is_carried_over() {
+        let f = fixture();
+        // The user answered the review prompt in a sibling profile, never in the system home.
+        let sibling = f.profiles.join("codex-c_d").join("config.toml");
+        std::fs::create_dir_all(sibling.parent().unwrap()).unwrap();
+        let body = sample(&sibling.to_string_lossy(), HOOK, &session_start_hash(HOOK));
+        std::fs::write(&f.system, body).unwrap();
+
+        let profile_config = f.profile_home.join("config.toml");
+        let report = seed_profile_hook_trust(&f.system, &profile_config, &f.profiles).unwrap();
+        assert_eq!(report.seeded, 1);
+        let state = profile_state(&f);
+        assert_eq!(
+            state.get("session_start:0:0"),
+            Some(&session_start_hash(HOOK))
+        );
+        // Without a system entry the unmodelled hook stays for Codex to ask about.
+        assert_eq!(state.get("stop:0:0"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stale_profile_entry_is_refreshed_from_a_newer_grant() {
+        let f = fixture();
+        let profile_config = f.profile_home.join("config.toml");
+        let sibling = f.profiles.join("codex-c_d").join("config.toml");
+        std::fs::create_dir_all(sibling.parent().unwrap()).unwrap();
+        // The hook was rewritten; the sibling re-trusted it, this profile still holds the old hash.
+        let new_hook = "muxa hook codex --v2";
+        let mut body = sample(
+            &sibling.to_string_lossy(),
+            new_hook,
+            &session_start_hash(new_hook),
+        );
+        body.push_str(&format!(
+            "\n[hooks.state.\"{}:session_start:0:0\"]\ntrusted_hash = \"{}\"\n",
+            profile_config.to_string_lossy(),
+            session_start_hash(HOOK)
+        ));
+        std::fs::write(&f.system, body).unwrap();
+
+        seed_profile_hook_trust(&f.system, &profile_config, &f.profiles).unwrap();
+        let state = profile_state(&f);
+        assert_eq!(
+            state.get("session_start:0:0"),
+            Some(&session_start_hash(new_hook))
+        );
+        let after = std::fs::read_to_string(&f.system).unwrap();
+        assert_eq!(after.matches(&session_start_hash(HOOK)).count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_changed_hook_nobody_retrusted_is_left_for_codex() {
+        let f = fixture();
+        // Every recorded grant is for the old command; the declared hook is new.
+        let old = std::fs::read_to_string(&f.system).unwrap();
+        std::fs::write(
+            &f.system,
+            old.replace(&format!("command = \"{HOOK}\""), "command = \"other\""),
+        )
+        .unwrap();
+        let profile_config = f.profile_home.join("config.toml");
+        seed_profile_hook_trust(&f.system, &profile_config, &f.profiles).unwrap();
+        assert_eq!(profile_state(&f).get("session_start:0:0"), None);
     }
 
     #[cfg(unix)]
@@ -356,7 +705,7 @@ mod tests {
         assert_eq!(report.pruned, 1);
         let after = std::fs::read_to_string(&f.system).unwrap();
         assert!(!after.contains("codex-old_name"));
-        assert!(after.contains("sha256:aaa"));
+        assert!(after.contains("sha256:bbb"));
     }
 
     #[cfg(unix)]
@@ -366,20 +715,22 @@ mod tests {
         let profile_config = f.profile_home.join("config.toml");
         std::fs::remove_file(&profile_config).unwrap();
         std::fs::write(&profile_config, "model = \"gpt-5\"\n").unwrap();
+        let before = std::fs::read_to_string(&f.system).unwrap();
         let report = seed_profile_hook_trust(&f.system, &profile_config, &f.profiles).unwrap();
         assert_eq!(report, SeedReport::default());
-        assert_eq!(
-            std::fs::read_to_string(&f.system).unwrap(),
-            sample(&f.system.to_string_lossy())
-        );
+        assert_eq!(std::fs::read_to_string(&f.system).unwrap(), before);
     }
 
     #[cfg(unix)]
     #[test]
     fn untrusted_hooks_are_not_invented() {
         let f = fixture();
-        // A config with no trust at all must not gain any.
-        std::fs::write(&f.system, "model = \"gpt-5\"\n").unwrap();
+        // Hooks with no trust anywhere must not gain any.
+        std::fs::write(
+            &f.system,
+            format!("[[hooks.SessionStart]]\nhooks = [{{ type = \"command\", command = \"{HOOK}\" }}]\n"),
+        )
+        .unwrap();
         let profile_config = f.profile_home.join("config.toml");
         let report = seed_profile_hook_trust(&f.system, &profile_config, &f.profiles).unwrap();
         assert_eq!(report, SeedReport::default());

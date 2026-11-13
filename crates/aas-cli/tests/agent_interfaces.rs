@@ -16,9 +16,18 @@ impl Fixture {
         Self(dir)
     }
     fn command(&self) -> Command {
+        // A private HOME keeps the run off the real agent homes: `exec` links a profile's
+        // shared state from the system home and records hook trust in its config.
+        let home = self.0.join("home");
+        std::fs::create_dir_all(&home).unwrap();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_aas"));
         cmd.env("AAS_CONFIG_DIR", &self.0)
-            .env("AAS_NO_KEYCHAIN", "1");
+            .env("AAS_NO_KEYCHAIN", "1")
+            .env("HOME", &home)
+            .env_remove("CODEX_HOME")
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("GROK_HOME")
+            .env_remove("PI_CODING_AGENT_DIR");
         cmd
     }
 }
