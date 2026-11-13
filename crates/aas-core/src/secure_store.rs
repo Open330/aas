@@ -108,6 +108,9 @@ fn reconcile_legacy(provider: &str, name: &str, current: Option<String>) -> Opti
     };
     let service = claude_profile_service(provider, name);
     match current {
+        // A credential too large for the Keychain lives in the profile file; the old item is
+        // then older than that file, not a replacement for it.
+        None if profile_credential_path(provider, name).is_file() => None,
         None => {
             let _ = keychain_write(&service, &old);
             Some(old)
@@ -130,7 +133,11 @@ fn reconcile_legacy(provider: &str, name: &str, current: Option<String>) -> Opti
 fn mirror_to_legacy(provider: &str, name: &str, value: &str) {
     if let Some(legacy) = legacy_profile_service(provider, name) {
         if matches!(keychain_read_result(&legacy), Ok(Some(ref old)) if old != value) {
-            let _ = keychain_write(&legacy, value);
+            // A value the Keychain cannot hold went to the profile file; drop the old item
+            // rather than leave a stale token next to it.
+            if !credential_fits_security_cli(value) || keychain_write(&legacy, value).is_err() {
+                let _ = keychain_delete(&legacy);
+            }
         }
     }
 }
