@@ -54,8 +54,13 @@ fn claude_profile_service(provider: &str, name: &str) -> String {
 }
 
 /// The Keychain item Claude Code uses for this profile when started from the old state path.
+///
+/// Not gated on `AAS_NO_KEYCHAIN`: that setting keeps *aas's* copy in the profile file, but
+/// Claude Code still writes its own item whenever the Keychain is unlocked, and that item is
+/// what a session reads first. A locked Keychain just makes these reads fail, which every
+/// caller treats as "no item".
 fn legacy_profile_service(provider: &str, name: &str) -> Option<String> {
-    if !is_mac_claude(provider) {
+    if !cfg!(target_os = "macos") || !provider.to_lowercase().contains("claude") {
         return None;
     }
     let home = crate::migrate::legacy_profile_home(provider, name)?;
@@ -126,6 +131,32 @@ fn reconcile_legacy(provider: &str, name: &str, current: Option<String>) -> Opti
                 Some(cur)
             }
         }
+    }
+}
+
+/// Keep Claude Code's own items for the old and new path in step, for a profile whose aas copy
+/// lives in the file store: the later-expiring token wins both. Before the move a session read
+/// the old item ahead of the file, so a missing new item is filled from it.
+fn sync_claude_items(provider: &str, name: &str) {
+    let Some(legacy) = legacy_profile_service(provider, name) else {
+        return;
+    };
+    let Ok(Some(old)) = keychain_read_result(&legacy) else {
+        return;
+    };
+    let service = claude_profile_service(provider, name);
+    match keychain_read_result(&service) {
+        Ok(None) => {
+            let _ = keychain_write(&service, &old);
+        }
+        Ok(Some(cur)) if cur != old => {
+            if claude_expiry(&old) > claude_expiry(&cur) {
+                let _ = keychain_write(&service, &old);
+            } else {
+                let _ = keychain_write(&legacy, &cur);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -469,6 +500,11 @@ fn move_secret_unchecked(provider: &str, old_name: &str, new_name: &str) -> io::
 }
 
 pub fn get_secret_result(provider: &str, name: &str) -> io::Result<Option<String>> {
+    if !is_mac_claude(provider) && legacy_profile_service(provider, name).is_some() {
+        // aas keeps this profile in the file store, but Claude Code's own item still has to
+        // follow the profile to its new path.
+        sync_claude_items(provider, name);
+    }
     if is_mac_claude(provider) {
         let current = keychain_read_result(&claude_profile_service(provider, name))?;
         if let Some(v) = reconcile_legacy(provider, name, current) {
