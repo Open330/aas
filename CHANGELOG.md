@@ -5,6 +5,12 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A Codex profile with its own `config.toml` (not linked to `~/.codex/config.toml`) keeps the
+  hook trust it recorded under the profile's earlier path. Such entries are keyed by path, so
+  after the move to `…/aas` (or an account rename) Codex asked to review every hook again.
+
 ## [0.2.1] - 2026-11-13
 
 ### Fixed
