@@ -5,6 +5,14 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- On macOS hosts with `AAS_NO_KEYCHAIN=1`, the move to `…/aas` now also carries Claude Code's
+  own Keychain item to the new profile path and keeps the two in step until
+  `aas migrate --finish`. aas keeps its copy in the profile file there, but Claude Code still
+  writes its item whenever the Keychain is unlocked and reads it first, so a session started
+  from the new path could fall back to an older token.
+
 ## [0.2.0] - 2026-11-13
 
 ### Added
