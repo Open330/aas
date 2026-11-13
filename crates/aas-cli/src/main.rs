@@ -857,7 +857,10 @@ fn print_legacy_users(users: &[aas_core::migrate::LegacyUser]) {
         println!("  {} {}", ui::dim(&format!("{:>7}", user.pid)), command);
     }
     if users.len() > SHOWN {
-        println!("  {}", ui::dim(&format!("… and {} more", users.len() - SHOWN)));
+        println!(
+            "  {}",
+            ui::dim(&format!("… and {} more", users.len() - SHOWN))
+        );
     }
 }
 
