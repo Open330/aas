@@ -18,7 +18,7 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::PathBuf;
 
-use crate::platform::asx_config_dir;
+use crate::platform::config_dir;
 
 /// Floor for a backoff window when the server sends no (parsable) `Retry-After`.
 const BASE_MS: i64 = 60_000; // 60s
@@ -45,7 +45,7 @@ fn version() -> u32 {
 }
 
 fn path() -> PathBuf {
-    asx_config_dir().join("usage-backoff.json")
+    config_dir().join("usage-backoff.json")
 }
 
 fn now_ms() -> i64 {
@@ -71,7 +71,7 @@ fn store_unlocked(file: &BackoffFile) -> io::Result<()> {
 }
 
 fn open_lock() -> io::Result<File> {
-    let dir = asx_config_dir();
+    let dir = config_dir();
     std::fs::create_dir_all(&dir)?;
     #[cfg(unix)]
     {

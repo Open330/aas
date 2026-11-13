@@ -277,7 +277,7 @@ async fn handle(State(st): State<Arc<ProxyState>>, req: Request) -> Response {
             None => {
                 let data: Vec<Value> = choices
                     .iter()
-                    .map(|m| json!({ "id": m.id, "object": "model", "created": 0, "owned_by": format!("asx-{}", st.backend_provider) }))
+                    .map(|m| json!({ "id": m.id, "object": "model", "created": 0, "owned_by": format!("aas-{}", st.backend_provider) }))
                     .collect();
                 json!({ "object": "list", "data": data })
             }
@@ -305,7 +305,7 @@ async fn handle(State(st): State<Arc<ProxyState>>, req: Request) -> Response {
     if !is_inference(&method, &path) {
         return json_response(
             StatusCode::OK,
-            json!({ "ok": true, "authenticated": true, "via": "asx-proxy" }),
+            json!({ "ok": true, "authenticated": true, "via": "aas-proxy" }),
         );
     }
 
@@ -399,7 +399,7 @@ async fn handle(State(st): State<Arc<ProxyState>>, req: Request) -> Response {
 
     let req_id = short_id();
     let ctx = StreamCtx::new(
-        format!("chatcmpl-asx-{req_id}"),
+        format!("chatcmpl-aas-{req_id}"),
         now_secs(),
         common.model.clone(),
         common.tool_namespaces.clone(),
@@ -409,7 +409,7 @@ async fn handle(State(st): State<Arc<ProxyState>>, req: Request) -> Response {
         UpstreamOutcome::Error { status, detail } => {
             let detail300: String = detail.chars().take(300).collect();
             let msg = format!(
-                "[asx-proxy] backend {} error {}: {}",
+                "[aas-proxy] backend {} error {}: {}",
                 st.backend_provider, status, detail300
             );
             let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -617,7 +617,7 @@ pub(crate) fn finalize_stream(
     if let Some(err) = stream_err {
         // Mid-stream break: surface a readable error as SSE text, then a clean done.
         let msg = format!(
-            "\n[asx-proxy] stream interrupted: {}",
+            "\n[aas-proxy] stream interrupted: {}",
             if err.is_empty() {
                 "connection lost".to_string()
             } else {
@@ -633,7 +633,7 @@ pub(crate) fn finalize_stream(
         ));
     } else if !saw_done {
         // Stream ended without an explicit done — synthetic warning + done.
-        let warn = "\n[asx-proxy] upstream stream ended unexpectedly (connection may have been interrupted)";
+        let warn = "\n[aas-proxy] upstream stream ended unexpectedly (connection may have been interrupted)";
         tail.push(agent.format_stream_chunk(
             &CommonEvent::Text {
                 text: warn.to_string(),
@@ -702,7 +702,7 @@ async fn accumulate_non_stream(
     }
     if let Some(e) = stream_err {
         text.push_str(&format!(
-            "\n[asx-proxy] stream interrupted: {}",
+            "\n[aas-proxy] stream interrupted: {}",
             if e.is_empty() {
                 "connection lost".to_string()
             } else {

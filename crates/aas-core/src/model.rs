@@ -1,4 +1,4 @@
-//! On-disk data model — byte-compatible with asx `accounts.json` (`version: 1`).
+//! On-disk data model for `accounts.json` (`version: 1`).
 
 use serde::{Deserialize, Serialize};
 
@@ -145,7 +145,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn roundtrips_asx_shape() {
+    fn roundtrips_the_stored_shape() {
         let json = r#"{"version":1,"accounts":[
           {"provider":"claude","name":"june@rtzr","label":"june@rtzr","email":"june@rtzr.ai",
            "addedAt":"2026-07-06T02:02:35.648Z","profileType":"isolated"}]}"#;

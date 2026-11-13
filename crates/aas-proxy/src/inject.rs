@@ -23,7 +23,7 @@ fn set_mode(path: &Path, mode: u32) {
 #[cfg(not(unix))]
 fn set_mode(_path: &Path, _mode: u32) {}
 
-/// Last-resort scratch home under the asx config dir (never `/tmp`).
+/// Last-resort scratch home under the aas config dir (never `/tmp`).
 fn fallback_agent_home(provider: &str) -> PathBuf {
     let dir = aas_core::platform::profiles_dir()
         .join(".agents")
@@ -92,25 +92,25 @@ fn inject_codex(
     let catalog_path = codex_home.join("models.json");
     mkdir_0700(&codex_home)?;
 
-    let provider_id = "asx-proxy";
+    let provider_id = "aas-proxy";
     let model = models
         .first()
         .cloned()
-        .unwrap_or_else(|| "asx-proxy".to_string());
+        .unwrap_or_else(|| "aas-proxy".to_string());
     let base = trim_trailing_slashes(proxy_base_url);
 
     env.insert(
-        "ASX_PROXY_API_KEY".to_string(),
+        "AAS_PROXY_API_KEY".to_string(),
         proxy_auth_token.to_string(),
     );
 
     // JSON.stringify quoting for the two path/string values embedded in TOML.
-    let model_q = serde_json::to_string(&model).unwrap_or_else(|_| "\"asx-proxy\"".to_string());
+    let model_q = serde_json::to_string(&model).unwrap_or_else(|_| "\"aas-proxy\"".to_string());
     let catalog_q =
         serde_json::to_string(&catalog_path.to_string_lossy().to_string()).unwrap_or_default();
 
     let clean_config = format!(
-        "# ASX Proxy injected config for cross-provider execution\n# This file is inside a private CODEX_HOME for this run only.\nmodel = {model_q}\nmodel_provider = \"{provider_id}\"\nmodel_catalog_json = {catalog_q}\nmodel_context_window = 200000\nmodel_auto_compact_token_limit = 160000\nmodel_supports_reasoning_summaries = false\nmodel_reasoning_summary = \"none\"\n\n[model_providers.{provider_id}]\nname = \"ASX Proxy\"\nbase_url = \"{base}/v1\"\nenv_key = \"ASX_PROXY_API_KEY\"\nwire_api = \"responses\"\nrequires_openai_auth = false\n"
+        "# aas proxy injected config for cross-provider execution\n# This file is inside a private CODEX_HOME for this run only.\nmodel = {model_q}\nmodel_provider = \"{provider_id}\"\nmodel_catalog_json = {catalog_q}\nmodel_context_window = 200000\nmodel_auto_compact_token_limit = 160000\nmodel_supports_reasoning_summaries = false\nmodel_reasoning_summary = \"none\"\n\n[model_providers.{provider_id}]\nname = \"aas proxy\"\nbase_url = \"{base}/v1\"\nenv_key = \"AAS_PROXY_API_KEY\"\nwire_api = \"responses\"\nrequires_openai_auth = false\n"
     );
 
     let catalog = json!({
@@ -150,7 +150,7 @@ fn inject_claude(
         env.insert(format!("ANTHROPIC_DEFAULT_{slot}_MODEL_NAME"), m.clone());
         env.insert(
             format!("ANTHROPIC_DEFAULT_{slot}_MODEL_DESCRIPTION"),
-            "via asx proxy".to_string(),
+            "via aas proxy".to_string(),
         );
     }
     if let Some(first) = models.first() {
@@ -191,14 +191,14 @@ fn inject_grok(
 
     let base = trim_trailing_slashes(proxy_base_url);
     let list: Vec<String> = if models.is_empty() {
-        vec!["asx-proxy".to_string()]
+        vec!["aas-proxy".to_string()]
     } else {
         models.to_vec()
     };
     let proxy_auth_token = toml_string(proxy_auth_token)?;
     let base_url = toml_string(&format!("{base}/v1"))?;
 
-    // Model ids come from remote catalogs, `ASX_<PROV>_MODELS` and `models.json`, so every one is
+    // Model ids come from remote catalogs, `AAS_<PROV>_MODELS` and `models.json`, so every one is
     // quoted: a raw `"` plus a newline would otherwise let an id add its own tables (such as
     // `[ui] permission_mode = "always-approve"`) to the agent's config.
     let entries: String = list
@@ -216,7 +216,7 @@ fn inject_grok(
         ""
     };
     let config_content = format!(
-        "# ASX Proxy injected config for cross-provider execution\n[models]\ndefault = {}\n\n{permission_config}{entries}",
+        "# aas proxy injected config for cross-provider execution\n[models]\ndefault = {}\n\n{permission_config}{entries}",
         toml_string(&list[0])?,
     );
 
@@ -252,14 +252,14 @@ fn inject_pi(
     mkdir_0700(&agent_dir)?;
 
     let list: Vec<String> = if models.is_empty() {
-        vec!["asx-proxy".into()]
+        vec!["aas-proxy".into()]
     } else {
         models.to_vec()
     };
     let base_url = format!("{}/v1", trim_trailing_slashes(proxy_base_url));
     let models_doc = json!({
         "providers": {
-            "asx-proxy": {
+            "aas-proxy": {
                 "baseUrl": base_url,
                 "api": "openai-completions",
                 "apiKey": proxy_auth_token,
@@ -282,7 +282,7 @@ fn inject_pi(
         }
     });
     let settings_doc = json!({
-        "defaultProvider": "asx-proxy",
+        "defaultProvider": "aas-proxy",
         "defaultModel": list[0],
         "defaultProjectTrust": "always"
     });
@@ -327,7 +327,7 @@ mod tests {
 
         assert_eq!(env.get("CODEX_HOME"), Some(&scratch.display().to_string()));
         assert_eq!(
-            env.get("ASX_PROXY_API_KEY").map(String::as_str),
+            env.get("AAS_PROXY_API_KEY").map(String::as_str),
             Some("secret-token")
         );
         assert!(scratch.join("config.toml").is_file());
@@ -461,12 +461,12 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(home.join("models.json")).unwrap()).unwrap();
         let settings: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(home.join("settings.json")).unwrap()).unwrap();
-        assert_eq!(models["providers"]["asx-proxy"]["apiKey"], "run-token");
+        assert_eq!(models["providers"]["aas-proxy"]["apiKey"], "run-token");
         assert_eq!(
-            models["providers"]["asx-proxy"]["baseUrl"],
+            models["providers"]["aas-proxy"]["baseUrl"],
             "http://127.0.0.1:1234/v1"
         );
-        assert_eq!(settings["defaultProvider"], "asx-proxy");
+        assert_eq!(settings["defaultProvider"], "aas-proxy");
         assert!(home.join("auth.json").is_file());
         let _ = fs::remove_dir_all(home);
     }

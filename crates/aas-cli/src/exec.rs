@@ -1,6 +1,6 @@
 //! `exec`/`e` and `proxy` commands. Mirrors asx cli.ts exec (735-957) + proxy (677-729).
 //! Same-provider runs inject the profile home + shared-state symlinks; cross-provider runs
-//! spin up the local ASX Proxy and point the agent binary at it.
+//! spin up the local aas proxy and point the agent binary at it.
 
 use aas_core::execargs::{parse_exec_args, take_pick_mode, PickMode};
 use aas_core::model::ProfileType;
@@ -62,7 +62,7 @@ fn agent_spec(provider: &str) -> Option<AgentSpec> {
             home_env: "CLAUDE_CONFIG_DIR",
             file: ".credentials.json",
             bypass: &["--dangerously-skip-permissions"],
-            stub: Some("{\"claudeAiOauth\":{\"accessToken\":\"asx-proxy-dummy\"}}"),
+            stub: Some("{\"claudeAiOauth\":{\"accessToken\":\"aas-proxy-dummy\"}}"),
         }),
         "grok" => Some(AgentSpec {
             bin: "grok",
@@ -229,15 +229,15 @@ fn scrub_inherited_credentials(env: &mut HashMap<String, String>) {
         "GROK_API_KEY",
         "ZAI_API_KEY",
         "ZAI_KEY",
-        "ASX_ZAI_API_KEY",
+        "AAS_ZAI_API_KEY",
         "KIMI_API_KEY",
         "KIMI_KEY",
         "MOONSHOT_API_KEY",
         "MOONSHOT_KEY",
-        "ASX_KIMI_API_KEY",
+        "AAS_KIMI_API_KEY",
         "PI_AUTH_JSON",
         "CURSOR_ACCESS_TOKEN",
-        "ASX_PROXY_API_KEY",
+        "AAS_PROXY_API_KEY",
         "ANTHROPIC_BASE_URL",
         "OPENAI_BASE_URL",
         "CLAUDE_CONFIG_DIR",
@@ -617,7 +617,7 @@ pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyh
         forward = b;
     }
     if exec_args.debug {
-        env.insert("ASX_DEBUG".into(), "1".into());
+        env.insert("AAS_DEBUG".into(), "1".into());
     }
 
     // Spawn the native binary (interactive; stdio inherited).
@@ -680,7 +680,7 @@ async fn cleanup(proxy: Option<aas_proxy::ProxyHandle>, cross_home: &Option<Path
         h.stop().await;
     }
     if let Some(dir) = cross_home {
-        let keep = keep || std::env::var("ASX_KEEP_CONTEXT").ok().as_deref() == Some("1");
+        let keep = keep || std::env::var("AAS_KEEP_CONTEXT").ok().as_deref() == Some("1");
         if keep {
             eprintln!("[aas] keeping cross context: {}", dir.display());
         } else {
@@ -732,7 +732,7 @@ pub async fn cmd_proxy(store: &AccountStore, name: &str, frontend: &str) -> anyh
         false,
     )?;
 
-    println!("ASX Proxy: {}", handle.url);
+    println!("aas proxy: {}", handle.url);
     println!("  backend:  {backend_provider}/{}", acct.name);
     println!("  frontend: {frontend_norm}");
     let mut keys: Vec<&String> = injected

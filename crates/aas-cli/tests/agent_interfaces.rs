@@ -323,3 +323,60 @@ fn update_runs_the_pinned_cli_outside_profiles_and_prunes_superseded_releases() 
     assert!(releases.join("2.0.0").exists());
     assert!(!releases.join("1.0.0").exists() && !releases.join("0.9.0").exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn state_moves_from_the_old_directory_and_the_link_is_removed_on_finish() {
+    let root = std::env::temp_dir().join(format!("aas-migrate-test-{}", uuid::Uuid::new_v4()));
+    let base = if cfg!(target_os = "macos") {
+        root.join("Library/Application Support")
+    } else {
+        root.join(".config")
+    };
+    let legacy = base.join("asx");
+    std::fs::create_dir_all(legacy.join("profiles/codex-primary")).unwrap();
+    std::fs::write(
+        legacy.join("accounts.json"),
+        json!({"version":1,"accounts":[{"provider":"codex","name":"primary","addedAt":"2026-01-01","profileType":"isolated"}]}).to_string(),
+    )
+    .unwrap();
+    let aas = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_aas"))
+            .env("HOME", &root)
+            .env("AAS_NO_KEYCHAIN", "1")
+            .env_remove("AAS_CONFIG_DIR")
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("CODEX_HOME")
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    let output = aas(&["list"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("moved state"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("primary"));
+    assert!(base.join("aas/accounts.json").is_file());
+    // Agents started from the old path still reach their profile.
+    assert!(std::fs::symlink_metadata(&legacy).unwrap().file_type().is_symlink());
+    assert!(legacy.join("profiles/codex-primary").is_dir());
+
+    // A second run neither moves nor announces anything.
+    let output = aas(&["list"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("moved state"));
+
+    let output = aas(&["migrate"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("--finish"));
+
+    let output = aas(&["migrate", "--finish"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(std::fs::symlink_metadata(&legacy).is_err());
+    assert!(base.join("aas/profiles/codex-primary").is_dir());
+
+    let output = aas(&["list"]);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("primary"));
+    let _ = std::fs::remove_dir_all(&root);
+}

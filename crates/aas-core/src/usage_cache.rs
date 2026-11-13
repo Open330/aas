@@ -67,11 +67,11 @@ fn version() -> u32 {
 }
 
 fn path() -> std::path::PathBuf {
-    crate::platform::asx_config_dir().join("usage-cache.json")
+    crate::platform::config_dir().join("usage-cache.json")
 }
 
 fn open_lock() -> io::Result<File> {
-    let dir = crate::platform::asx_config_dir();
+    let dir = crate::platform::config_dir();
     std::fs::create_dir_all(&dir)?;
     #[cfg(unix)]
     {

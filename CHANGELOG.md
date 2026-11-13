@@ -5,6 +5,32 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `aas migrate` shows what is left of the old `asx` state directory, and `aas migrate --finish`
+  removes the old path's link, its macOS Keychain items and the Codex hook trust recorded for
+  old profile paths once no running agent still uses them.
+
+### Changed
+
+- **State moves from `…/asx` to `…/aas`.** The first run of this version renames the directory
+  (`~/Library/Application Support/asx` on macOS, `~/.config/asx` on Linux, `%APPDATA%\asx` on
+  Windows) and leaves `asx` as a link to `aas`, so agents already running keep their profile.
+  Each macOS Claude profile's Keychain item is copied to the name for its new path, and until
+  `aas migrate --finish` the two items are kept in step so a token rotated by a running
+  session is not lost. Shims now live in `…/aas/shims`; update `PATH` entries that name
+  `…/asx/shims`.
+- Environment variables use the `AAS_` prefix: `AAS_<PROVIDER>_MODELS`, `AAS_MODELS_CONFIG`,
+  `AAS_CLAUDE_CODE_OAUTH_TOKEN`, `AAS_<PROVIDER>_API_KEY` for `aas login`, `AAS_KEEP_CONTEXT`
+  and `AAS_DEBUG`. The `ASX_` names are no longer read.
+- The cross-provider proxy identifies itself as `aas-proxy` (provider id, model owner, response
+  ids, `claude-aas-` model prefix, `[aas-proxy]` messages).
+
+### Removed
+
+- `aas import` without a file, which only reported the shared `asx` state. `aas import` now
+  requires a bundle file (or `-` for stdin).
+
 ### Fixed
 
 - `aas exec` carries Codex hook trust to a profile from wherever the user granted it. Codex

@@ -312,12 +312,12 @@ pub(crate) fn grok_auth_file_from_credential(raw: &str) -> Value {
     if let Ok(data) = serde_json::from_str::<Value>(raw) {
         if data.is_object() {
             if data.get("key").is_some() {
-                return json!({ "asx": data });
+                return json!({ "aas": data });
             }
             return data;
         }
     }
-    json!({ "asx": { "key": raw } })
+    json!({ "aas": { "key": raw } })
 }
 
 /// asx `grokBearer`: the bearer token from a credential (`.key`, first `{key}`, or raw).
@@ -1634,20 +1634,20 @@ mod tests {
 
     #[test]
     fn grok_auth_file_normalization() {
-        // bare `{key}` gets wrapped under `asx`
+        // bare `{key}` gets wrapped under `aas`
         assert_eq!(
             grok_auth_file_from_credential(r#"{"key":"k"}"#),
-            json!({"asx": {"key": "k"}})
+            json!({"aas": {"key": "k"}})
         );
         // already-wrapped map is preserved
         assert_eq!(
             grok_auth_file_from_credential(r#"{"issuer":{"key":"k"}}"#),
             json!({"issuer": {"key": "k"}})
         );
-        // raw string becomes asx.key
+        // raw string becomes aas.key
         assert_eq!(
             grok_auth_file_from_credential("raw"),
-            json!({"asx": {"key": "raw"}})
+            json!({"aas": {"key": "raw"}})
         );
     }
 

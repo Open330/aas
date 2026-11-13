@@ -1,7 +1,7 @@
-//! Path roots and provider-home resolution. Mirrors asx `utils/platform.ts`.
+//! Path roots and provider-home resolution.
 //!
-//! `dirs::config_dir()` matches asx's `getConfigBaseDir()` exactly on every platform:
-//! win `%APPDATA%`, macOS `~/Library/Application Support`, linux `$XDG_CONFIG_HOME | ~/.config`.
+//! The config base is `dirs::config_dir()`: win `%APPDATA%`, macOS `~/Library/Application
+//! Support`, linux `$XDG_CONFIG_HOME | ~/.config`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,7 +11,7 @@ pub fn home_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Expand a leading `~/` or `~\` to the home directory (asx `expandHome`).
+/// Expand a leading `~/` or `~\` to the home directory.
 pub fn expand_home(p: &str) -> PathBuf {
     if let Some(rest) = p.strip_prefix("~/").or_else(|| p.strip_prefix("~\\")) {
         home_dir().join(rest)
@@ -24,27 +24,57 @@ pub fn config_base_dir() -> PathBuf {
     dirs::config_dir().unwrap_or_else(|| home_dir().join(".config"))
 }
 
-/// asx config dir. Defaults to `<base>/asx` (shared with asx for zero-migration adoption);
-/// override with `AAS_CONFIG_DIR` for a clean-slate install.
-pub fn asx_config_dir() -> PathBuf {
-    if let Ok(d) = std::env::var("AAS_CONFIG_DIR") {
-        if !d.is_empty() {
-            return expand_home(&d);
+/// The directory name aas keeps its state under, inside the platform config base.
+pub const CONFIG_DIR_NAME: &str = "aas";
+
+/// The directory name used before aas had its own; [`crate::migrate`] moves it to
+/// [`CONFIG_DIR_NAME`].
+pub const LEGACY_CONFIG_DIR_NAME: &str = "asx";
+
+fn config_dir_override() -> Option<PathBuf> {
+    std::env::var("AAS_CONFIG_DIR")
+        .ok()
+        .filter(|d| !d.is_empty())
+        .map(|d| expand_home(&d))
+}
+
+/// The aas state directory: `AAS_CONFIG_DIR`, else `<base>/aas`.
+///
+/// Until [`crate::migrate::ensure_config_dir`] has moved an older `<base>/asx` into place, that
+/// directory is returned instead, so a run that could not migrate still sees its accounts rather
+/// than an empty store.
+pub fn config_dir() -> PathBuf {
+    if let Some(dir) = config_dir_override() {
+        return dir;
+    }
+    let dir = config_base_dir().join(CONFIG_DIR_NAME);
+    if !dir.exists() {
+        if let Some(legacy) = legacy_config_dir().filter(|legacy| legacy.is_dir()) {
+            return legacy;
         }
     }
-    config_base_dir().join("asx")
+    dir
+}
+
+/// Where state lived before it moved to [`config_dir`]. `None` when `AAS_CONFIG_DIR` picks the
+/// directory explicitly, since nothing was ever kept in the default location then.
+pub fn legacy_config_dir() -> Option<PathBuf> {
+    if config_dir_override().is_some() {
+        return None;
+    }
+    Some(config_base_dir().join(LEGACY_CONFIG_DIR_NAME))
 }
 
 pub fn accounts_path() -> PathBuf {
-    asx_config_dir().join("accounts.json")
+    config_dir().join("accounts.json")
 }
 
 pub fn active_path() -> PathBuf {
-    asx_config_dir().join(".active.json")
+    config_dir().join(".active.json")
 }
 
 pub fn profiles_dir() -> PathBuf {
-    asx_config_dir().join("profiles")
+    config_dir().join("profiles")
 }
 
 fn home_dot_dir(name: &str) -> PathBuf {
@@ -188,10 +218,10 @@ mod tests {
     }
 
     #[test]
-    fn asx_config_dir_env_override() {
+    fn config_dir_env_override() {
         let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         std::env::set_var("AAS_CONFIG_DIR", "/tmp/aas-test-cfg");
-        assert_eq!(asx_config_dir(), PathBuf::from("/tmp/aas-test-cfg"));
+        assert_eq!(config_dir(), PathBuf::from("/tmp/aas-test-cfg"));
         std::env::remove_var("AAS_CONFIG_DIR");
     }
 

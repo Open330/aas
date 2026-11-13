@@ -144,7 +144,7 @@ fn anth_messages_to_common(messages: &Value) -> Vec<CommonMessage> {
     out
 }
 
-const CLAUDE_ID_PREFIX: &str = "claude-asx-";
+const CLAUDE_ID_PREFIX: &str = "claude-aas-";
 
 pub fn wrap_model_id(id: &str) -> String {
     let lower = id.to_lowercase();
@@ -312,7 +312,7 @@ impl AgentAdapter for ClaudeAgent {
                     out += &open_text!();
                     out += &anth_event(
                         "content_block_delta",
-                        &json!({ "type": "content_block_delta", "index": ctx.text_index, "delta": { "type": "text_delta", "text": format!("[asx-proxy] {message}") } }),
+                        &json!({ "type": "content_block_delta", "index": ctx.text_index, "delta": { "type": "text_delta", "text": format!("[aas-proxy] {message}") } }),
                     );
                 }
                 if !ctx.text_open && ctx.items.is_empty() {
@@ -350,7 +350,7 @@ impl AgentAdapter for ClaudeAgent {
             content.push(json!({ "type": "text", "text": "" }));
         }
         json!({
-            "id": "msg_asx",
+            "id": "msg_aas",
             "type": "message",
             "role": "assistant",
             "content": content,

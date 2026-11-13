@@ -22,11 +22,12 @@ brew install open330/tap/aas
   entry, and `aas switch` makes it the active login.
 - **Usage at a glance:** `aas usage` fetches every account's quota in parallel through a shared
   success cache; use `--fresh` for an explicit live request.
-- **Cross-provider execution:** run one agent's UI against another provider's backend (ASX Proxy).
+- **Cross-provider execution:** run one agent's UI against another provider's backend (aas proxy).
 - **One static binary, no dependencies.** Supports Claude Code, Codex, Grok/xAI, Z.AI,
   Kimi/Moonshot, Cursor and Pi.
-- **Coming from [`asx`](https://github.com/jiunbae/asx)?** aas is its Rust rewrite and reads the
-  same state, so your existing logins usually appear without re-login.
+- **Coming from [`asx`](https://github.com/jiunbae/asx)?** aas moves its state directory
+  (`…/asx` → `…/aas`) on first run, so existing logins appear without re-login. Agents already
+  running keep working; `aas migrate` shows when the old path can go.
 
 ## Quickstart for Agents
 
@@ -43,8 +44,6 @@ Install the aas CLI (Agent Account Switcher) from https://github.com/Open330/aas
    Windows PowerShell:  irm https://raw.githubusercontent.com/open330/aas/main/install.ps1 | iex
 2. Verify it works:     aas --version
 3. Show my accounts and live usage:  aas list  &&  aas usage
-
-aas reads my existing asx state, so my current logins should already appear.
 ```
 
 <div><img src="https://quickstart-for-agents.vercel.app/api/footer.svg?theme=claude-code&tokens=1.8k&model=Opus+4.8" /></div>
@@ -118,9 +117,6 @@ eval "$(aas export personal.codex)"       # POSIX (bash/zsh)
 aas export zai work                        # prints: export ZAI_API_KEY="…"
 aas export codex work --shell fish | source          # fish
 aas export codex work --shell powershell | iex       # PowerShell
-
-# Adopt / inspect existing asx state (usually a no-op — aas reads the same files)
-aas import
 
 # Move ALL accounts + credentials to another host
 aas export --all | ssh other-host aas import -    # over ssh — nothing touches disk
@@ -233,14 +229,15 @@ request is blocked. Start with `--fallback` to handle that case at the proxy lay
 | `login [provider] [name]` `--long-lived`, `--device-auth`/`--headless`, `--endpoint <id>`, *share flags* | Login and store a new **isolated** profile. `--long-lived` uses Claude's `setup-token`; `--device-auth` uses a browserless device-code flow; `--endpoint` picks the API host for providers that run several (kimi). |
 | `load [provider] [name]` | Snapshot the **currently logged-in** credential as a **system** profile (auto-scans providers if none given). |
 | `switch <provider> <name>` or `switch <account>` (alias `s`) | Make a stored account the active credential. The one-argument form resolves a globally unique stored account name. |
-| `exec <name> [target] [args…]` (alias `e`) | Run the native CLI under a profile. `<name>` is a stored account, or a provider to auto-pick from (`aas exec codex`; `--pick active` runs its active account instead). If `target` ≠ the profile's provider, requests route through the local **ASX Proxy** (cross-provider). `-b` full-access bypass; cross-run share flags `-s/-i/--share/--isolate/--keep-context`; `--` passes the rest to the agent. |
+| `exec <name> [target] [args…]` (alias `e`) | Run the native CLI under a profile. `<name>` is a stored account, or a provider to auto-pick from (`aas exec codex`; `--pick active` runs its active account instead). If `target` ≠ the profile's provider, requests route through the local **aas proxy** (cross-provider). `-b` full-access bypass; cross-run share flags `-s/-i/--share/--isolate/--keep-context`; `--` passes the rest to the agent. |
 | `export [name]` or `export <provider> <name>` `--all`, `--vault`, `-o <file>`, `--shell posix\|fish\|powershell` | Print shell env to use a profile in the current shell (`eval "$(aas export <name>)"`), or `--all` for a portable bundle of **every account + credential**. `--vault` encrypts it with an age/scrypt passphrase. |
 | `sharing <name>` *share flags* | Show or change which state (sessions/skills/agents/hooks/settings) an isolated profile shares from the provider's home. |
 | `rename <from> <to>` | Rename an account, moving its profile home + markers. Codex rollout index paths follow the move; close its sessions and daemon first. |
 | `remove [provider] <name>` (alias `rm`) | Remove a stored account. |
 | `refresh <provider> <name>` or `refresh <account>` `--no-login` | Request credential renewal (falls back to login when required unless `--no-login`). Codex verifies the resulting token expiration and reports an unchanged credential separately. |
-| `proxy <name> <frontend>` | Start a standalone ASX Proxy for `<name>`'s backend and print env to point a `<frontend>` agent at it. |
-| `import [file]` | No arg: adopt/inspect existing `asx` state. With a file (or `-` for stdin): restore a bundle from `export --all` on another host. |
+| `proxy <name> <frontend>` | Start a standalone aas proxy for `<name>`'s backend and print env to point a `<frontend>` agent at it. |
+| `import <file>` | Restore a bundle from `export --all` on another host (a file, or `-` for stdin). |
+| `migrate [--finish]` | Show what is left of the old `asx` state directory after aas moved it to `aas`; `--finish` removes the old path's link and Keychain items once no agent runs from it. |
 
 On macOS, `AAS_NO_KEYCHAIN=1` stores Claude credentials in the profile's owner-only
 `.credentials.json` rather than the login Keychain. A non-interactive SSH session cannot reach that
@@ -342,7 +339,7 @@ See [`widgets/barshelf-aas-usage/`](widgets/barshelf-aas-usage/) for details
 
 ## Status
 
-The port covers the `asx` P1–P5 surface plus the current post-v0.3.0 proxy/provider updates:
+The Rust rewrite covers the original `asx` P1–P5 surface plus the current post-v0.3.0 proxy/provider updates:
 Pi, GPT-5.6 Sol/Terra/Luna, live Grok/Z.AI/Kimi model discovery, Claude tier aliases,
 Anthropic `count_tokens`, strict tool-argument normalization, and Grok OIDC refresh. It includes
 storage/keychain/import, provider adapters,

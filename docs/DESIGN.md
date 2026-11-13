@@ -25,8 +25,8 @@ agent's UI onto another provider's backend.
    nvm bootstrap. This is the primary motivation for the rewrite.
 3. **Fast startup** (~2ms vs Node's ~100ms) for a frequently-invoked switcher.
 4. **Native async** for parallel usage fetches (`aas list -u` fans out all accounts at once).
-5. **Read existing `asx` state** — import/adopt `asx`'s `accounts.json`, profile homes, and
-   keychain entries so current users migrate with zero re-login where possible.
+5. **Take over existing `asx` state** — move `asx`'s directory, profile homes and keychain
+   entries to aas's own location without a re-login (see §4).
 6. **A modern, polished CLI** — tables, aligned meters, color, spinners.
 
 ### Non-Goals
@@ -89,7 +89,7 @@ aas/
 │  ├─ aas-core/              # accounts store, profile homes, secure store, platform paths
 │  ├─ aas-providers/         # provider adapters (claude/codex/grok/zai/cursor/pi)
 │  ├─ aas-proxy/             # cross-provider translating HTTP server (axum) + adapters
-│  └─ aas-import/            # read/adopt existing `asx` state (accounts.json, homes, keychain)
+│  └─ aas-import/            # portable credential bundles (export --all / import)
 ├─ apps/aas-bar/             # optional native macOS usage menubar app
 ├─ widgets/                  # optional BarShelf usage widget
 ├─ docs/
@@ -103,33 +103,26 @@ to make the port a near 1:1 translation and keep diffs reviewable against the TS
 
 ---
 
-## 4. Compatibility & `asx` Import Strategy
+## 4. State Directory and the Move from `asx`
 
-The design constraint: **an existing `asx` user runs `aas` and their accounts just work.**
+aas keeps its state in `<configBase>/aas` (`AAS_CONFIG_DIR` overrides it). Earlier releases
+shared `<configBase>/asx` with the TypeScript `asx`; that sharing is gone.
 
-`aas` will default to the **same on-disk locations** `asx` uses (so no migration needed at
-all in the common case), and additionally provide an explicit adopt/import path:
-
-- **Config/data dir:** default to `asx`'s dir (`~/Library/Application Support/asx/` on macOS;
-  XDG on Linux) so `accounts.json` and `profiles/<provider>-<name>/` are shared. A distinct
-  `AAS_*`/`aas/` dir is opt-in via env for a clean-slate install. *(Exact paths + env
-  overrides: finalized in §Data Model / §Platform Paths from the codebase mapping.)*
-- **accounts.json:** read the existing `version: 1` schema verbatim (serde struct matching
-  `AccountRecord`). Write back in the same shape so `asx` and `aas` can coexist during
-  migration.
-- **Profile homes:** reuse `profiles/<safeProfileDirName(provider,name)>/` unchanged — the
-  native auth files (`auth.json`, `.credentials.json`) inside stay put. Because the legacy
-  sanitizer is not injective, every add/import/rename reserves the logical name under the
-  account-store lock and rejects a second name that resolves to the same home.
-- **macOS Keychain:** reproduce `asx`'s exact service-name derivation
-  (`Claude Code-credentials-<sha256(CLAUDE_CONFIG_DIR)[:8]>`) so stored Claude credentials
-  are found without re-login. *(Exact scheme + `security` argv: from §Keychain mapping.)*
-- **`aas import` command (aas-import crate):** with no file, validates and reports the shared
-  `asx` state. With a file or stdin, restores an aas portable credential bundle. Bundles can be
-  plaintext JSON or passphrase-encrypted age/scrypt files; encrypted input is auto-detected.
-
-Guiding rule: **prefer zero-migration adoption** (same paths, same formats) over a copy step;
-the `import` command is the safety net, not the primary flow.
+- **Move:** the first aas run that finds `<configBase>/asx` and no `<configBase>/aas` renames
+  the directory in one step and leaves `asx` as a relative symlink to `aas`. Agents started
+  before the move keep their `CLAUDE_CONFIG_DIR`/`CODEX_HOME` under `asx` and still reach their
+  profile through the link. If the rename fails, aas keeps using the old directory.
+- **macOS Keychain:** Claude Code names its item `Claude Code-credentials-<sha256(CLAUDE_CONFIG_DIR)[:8]>`,
+  so the item name changes with the path. The move copies each Claude profile's old item to the
+  new name. While the link exists, reads take whichever of the two holds the later-expiring
+  token and copy it to the other, writes update both, and removals remove both, so a token a
+  running session rotates under the old name is not lost.
+- **Finish:** `aas migrate` lists processes whose profile variable still points under `asx`
+  (`PATH` entries alone do not count). `aas migrate --finish` refuses while any remain, then
+  deletes the old Keychain items, the Codex hook-trust entries recorded for old profile paths,
+  and the link.
+- **`aas import <file>`** restores a portable credential bundle (plain JSON or age/scrypt).
+- **Formats** are unchanged: `accounts.json` `version: 1`, `profiles/<safeProfileDirName>/`.
 
 ---
 
@@ -148,7 +141,7 @@ Summary:
 | `load [provider] [name]` | | Snapshot the live system credential as a **system** profile (auto-scans all providers if none given; email-dedup). Rejects share flags. |
 | `login [provider] [name]` `--long-lived` +share | | Fresh native login into an **isolated** profile home; `--long-lived` = Claude `setup-token`. |
 | `switch <provider> <name>` or `switch <account>` | `s` | Write a stored profile back to the provider's live store. |
-| `status [provider]` | | Show asx-tracked active account per provider. |
+| `status [provider]` | | Show the active account per provider. |
 | `active <provider>` | | Active account name on stdout, exit 1 when unset. Script/shim-facing form of `status`. |
 | `shim install\|uninstall [provider…]` / `shim status` | | Manage `<config>/shims` wrappers that re-enter through `aas exec <active>`, so the bare agent CLI follows `switch` even for credentials that cannot be written to the provider's native store (Claude long-lived tokens). |
 | `rename <from> <to>` | | Move profile home + update metadata + active markers. |
@@ -158,7 +151,8 @@ Summary:
 | `refresh <provider> <name>` or `refresh <account>` `--no-login` | | Rotate credential via refresh token; falls back to login unless `--no-login`. |
 | `proxy <name> <frontend>` | | Standalone proxy; prints env/config to point `<frontend>` at the profile's backend. |
 | `export [name]` / `export --all [--vault]` | | Print profile environment or export every account and credential as a portable JSON/encrypted bundle. |
-| `import [file|-]` | | Inspect shared `asx` state or restore a portable JSON/encrypted bundle (see §4). |
+| `import <file|->` | | Restore a portable JSON/encrypted bundle (see §4). |
+| `migrate [--finish]` | | Show or finish the move from the old `asx` state directory (see §4). |
 
 A bare `asx <account> …` (unknown subcommand that resolves to an account) is shimmed to
 `exec` — replicate this default-command behavior.
@@ -276,9 +270,9 @@ Two different services. PARITY_SPEC §5 has both.
 Non-macOS (and keychain-less): `.credentials.json` file — live at `<claudeConfigDir>/.credentials.json`,
 per-profile at `<profileHome>/.credentials.json`.
 
-**Path roots & env overrides** (default to `asx`'s locations for zero-migration adoption):
+**Path roots & env overrides:**
 `<configBase>` = win `%APPDATA%` · macOS `~/Library/Application Support` · linux `$XDG_CONFIG_HOME|~/.config`;
-`<config>` = `<configBase>/asx`; profiles = `<config>/profiles`. Provider homes honor
+`<config>` = `AAS_CONFIG_DIR` or `<configBase>/aas` (see §4); profiles = `<config>/profiles`. Provider homes honor
 `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `GROK_HOME` / `PI_CODING_AGENT_DIR` (with `~` expansion);
 system homes `~/.claude`, `~/.codex`, `~/.grok`, `~/.pi/agent`. `aas` reads these same vars so it
 drives the same native CLIs.
@@ -335,19 +329,19 @@ backend** and thinking disabled for non-Fable; Codex namespace/subagent tool fla
 (`ns__name` ↔ `{namespace,name}`) so Codex multi-agent works against any backend; z.ai uses
 `thinking:{type:enabled|disabled}` (not `reasoning_effort`); grok drops `reasoning_content`
 deltas and forwards live-model `reasoning_effort`, using the installed Grok version in client
-headers; Claude-frontend model-id `claude-asx-` wrap/unwrap survives Claude Code's `/model` picker
+headers; Claude-frontend model-id `claude-aas-` wrap/unwrap survives Claude Code's `/model` picker
 filter.
 
 **Injection** (`aas-proxy::inject`, per frontend, so the launched binary talks to the proxy and
-skips its own auth): codex → write `config.toml` (`model_provider="asx-proxy"`, `base_url=<url>/v1`,
-`wire_api="responses"`) + `models.json`, set `CODEX_HOME`/`ASX_PROXY_API_KEY`; claude → env only
+skips its own auth): codex → write `config.toml` (`model_provider="aas-proxy"`, `base_url=<url>/v1`,
+`wire_api="responses"`) + `models.json`, set `CODEX_HOME`/`AAS_PROXY_API_KEY`; claude → env only
 (`ANTHROPIC_BASE_URL`, per-run `ANTHROPIC_AUTH_TOKEN`, slot→model remap, drop gateway
 discovery); grok → `config.toml` per-model blocks + `GROK_HOME`; Pi → custom-provider
 `models.json`/`settings.json` + `PI_CODING_AGENT_DIR`. All frontends use the same
 per-run proxy token. Explicit scratch homes override inherited agent-home variables, and Grok's
 `always-approve` mode is emitted only for an explicit `--bypass`. Model registry
 (`aas-proxy::models`) resolves picker `id` → real `{model, effort}`, override precedence
-`env(ASX_<PROV>_MODELS) > <config>/models.json > live Grok/Z.AI catalog > defaults`. Codex defaults
+`env(AAS_<PROV>_MODELS) > <config>/models.json > live Grok/Z.AI catalog > defaults`. Codex defaults
 cover GPT-5.6 Sol/Terra/Luna with GPT-5.5 fallback, and Claude tier aliases map to safe effort rows.
 
 ---

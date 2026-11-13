@@ -1,4 +1,4 @@
-//! ASX Proxy — hub-and-spoke transcoder COMMON types (port of `proxy/types.ts`).
+//! aas proxy — hub-and-spoke transcoder COMMON types (port of `proxy/types.ts`).
 //!
 //! ```text
 //!   agent wire ──parse──▶ COMMON ──build──▶ backend wire
