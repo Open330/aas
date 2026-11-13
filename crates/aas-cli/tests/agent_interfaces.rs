@@ -359,7 +359,10 @@ fn state_moves_from_the_old_directory_and_the_link_is_removed_on_finish() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("primary"));
     assert!(base.join("aas/accounts.json").is_file());
     // Agents started from the old path still reach their profile.
-    assert!(std::fs::symlink_metadata(&legacy).unwrap().file_type().is_symlink());
+    assert!(std::fs::symlink_metadata(&legacy)
+        .unwrap()
+        .file_type()
+        .is_symlink());
     assert!(legacy.join("profiles/codex-primary").is_dir());
 
     // A second run neither moves nor announces anything.
