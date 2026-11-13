@@ -19,7 +19,7 @@ use crate::types::{
 use serde_json::{json, Value};
 use std::sync::Mutex;
 
-// Serializes tests that read/write the process-global model env (`ASX_*_MODELS`, `ASX_MODELS_CONFIG`).
+// Serializes tests that read/write the process-global model env (`AAS_*_MODELS`, `AAS_MODELS_CONFIG`).
 static MODEL_LOCK: Mutex<()> = Mutex::new(());
 
 fn lock_models() -> std::sync::MutexGuard<'static, ()> {
@@ -28,14 +28,14 @@ fn lock_models() -> std::sync::MutexGuard<'static, ()> {
 
 /// Clear model env and the live-discovery cache so `backend_choices` falls back to built-in
 /// defaults (point the config file at a path that does not exist so a real
-/// `~/.../asx/models.json` on the dev machine can't leak in).
+/// `~/.../aas/models.json` on the dev machine can't leak in).
 fn reset_model_env() {
     clear_remote_model_cache();
     for p in ["CODEX", "ZAI", "CLAUDE", "GROK", "KIMI"] {
-        std::env::remove_var(format!("ASX_{p}_MODELS"));
+        std::env::remove_var(format!("AAS_{p}_MODELS"));
     }
     std::env::set_var(
-        "ASX_MODELS_CONFIG",
+        "AAS_MODELS_CONFIG",
         "/nonexistent/aas-proxy-test-models.json",
     );
 }
@@ -374,7 +374,7 @@ fn claude_backend_token_extraction() {
 fn claude_backend_fable_keeps_thinking() {
     let _g = lock_models();
     reset_model_env();
-    std::env::set_var("ASX_CLAUDE_MODELS", "claude-fable-5");
+    std::env::set_var("AAS_CLAUDE_MODELS", "claude-fable-5");
     let req = CommonRequest {
         model: "claude-fable-5".into(),
         stream: true,
@@ -387,7 +387,7 @@ fn claude_backend_fable_keeps_thinking() {
         body.get("thinking").is_none(),
         "Fable cannot disable thinking, so the key is omitted"
     );
-    std::env::remove_var("ASX_CLAUDE_MODELS");
+    std::env::remove_var("AAS_CLAUDE_MODELS");
 }
 
 #[test]
@@ -453,7 +453,7 @@ fn claude_empty_end_turn_emits_materialized_text_and_stop_sequence() {
 #[test]
 fn claude_agent_parse_request_tools_and_messages() {
     let body = json!({
-        "model": "claude-asx-glm-5.2",
+        "model": "claude-aas-glm-5.2",
         "system": "sys prompt",
         "stream": true,
         "max_tokens": 500,
@@ -466,7 +466,7 @@ fn claude_agent_parse_request_tools_and_messages() {
         ]
     });
     let req = ClaudeAgent.parse_request("/v1/messages", &body);
-    assert_eq!(req.model, "glm-5.2"); // claude-asx- prefix stripped
+    assert_eq!(req.model, "glm-5.2"); // claude-aas- prefix stripped
     assert_eq!(req.system.as_deref(), Some("sys prompt"));
     assert_eq!(req.parallel_tool_calls, Some(false));
     assert_eq!(req.tools.as_ref().unwrap()[0].name, "search");
@@ -494,7 +494,7 @@ fn claude_agent_format_models_wraps_ids() {
         },
     ];
     let out = ClaudeAgent.format_models(&choices);
-    assert_eq!(out["data"][0]["id"], "claude-asx-glm-5.2"); // wrapped
+    assert_eq!(out["data"][0]["id"], "claude-aas-glm-5.2"); // wrapped
     assert_eq!(out["data"][0]["display_name"], "glm-5.2");
     assert_eq!(out["data"][1]["id"], "claude-opus-4-8"); // already claude* -> unchanged
     assert_eq!(out["has_more"], false);
@@ -687,7 +687,7 @@ fn grok_backend_drops_reasoning_content() {
 fn grok_backend_forwards_live_model_reasoning_effort() {
     let _g = lock_models();
     reset_model_env();
-    std::env::set_var("ASX_GROK_MODELS", "grok-4.5:high");
+    std::env::set_var("AAS_GROK_MODELS", "grok-4.5:high");
     let up = GrokBackend.build_request(
         &CommonRequest {
             model: "grok-4.5-high".into(),
@@ -700,7 +700,7 @@ fn grok_backend_forwards_live_model_reasoning_effort() {
     let body: Value = serde_json::from_str(&up.body).unwrap();
     assert_eq!(body["model"], "grok-4.5");
     assert_eq!(body["reasoning_effort"], "high");
-    std::env::remove_var("ASX_GROK_MODELS");
+    std::env::remove_var("AAS_GROK_MODELS");
     reset_model_env();
 }
 
@@ -871,12 +871,12 @@ fn models_precedence_env_over_file_over_defaults() {
     // File override.
     let tmp = std::env::temp_dir().join(format!("aas-proxy-models-{}.json", uuid::Uuid::new_v4()));
     std::fs::write(&tmp, r#"{"zai":["glm-file-model"]}"#).unwrap();
-    std::env::set_var("ASX_MODELS_CONFIG", tmp.to_string_lossy().to_string());
-    std::env::remove_var("ASX_ZAI_MODELS");
+    std::env::set_var("AAS_MODELS_CONFIG", tmp.to_string_lossy().to_string());
+    std::env::remove_var("AAS_ZAI_MODELS");
     assert_eq!(backend_choices("zai")[0].id, "glm-file-model");
 
     // Env override wins over file.
-    std::env::set_var("ASX_ZAI_MODELS", "glm-env:high,glm-two");
+    std::env::set_var("AAS_ZAI_MODELS", "glm-env:high,glm-two");
     let choices = backend_choices("zai");
     assert_eq!(choices[0].id, "glm-env-high");
     assert_eq!(choices[0].effort.as_deref(), Some("high"));
@@ -886,7 +886,7 @@ fn models_precedence_env_over_file_over_defaults() {
     assert_eq!(resolve_choice("zai", "does-not-exist").id, "glm-env-high");
     assert_eq!(resolve_choice("zai", "glm-two").id, "glm-two");
 
-    std::env::remove_var("ASX_ZAI_MODELS");
+    std::env::remove_var("AAS_ZAI_MODELS");
     let _ = std::fs::remove_file(&tmp);
     reset_model_env();
 }
@@ -1084,7 +1084,7 @@ async fn server_models_and_fake_auth_routes() {
         .unwrap();
     assert_eq!(auth["ok"], true);
     assert_eq!(auth["authenticated"], true);
-    assert_eq!(auth["via"], "asx-proxy");
+    assert_eq!(auth["via"], "aas-proxy");
 
     let counted: Value = client
         .post(format!("{}/v1/messages/count_tokens", handle.url))
@@ -1339,7 +1339,7 @@ fn passthrough_rewrites_the_picker_id_to_the_real_upstream_model() {
     let _g = lock_models();
     reset_model_env();
     // id "kimi-real-high" -> upstream model "kimi-real", so an unrewritten body is detectable.
-    std::env::set_var("ASX_KIMI_MODELS", "kimi-real:high");
+    std::env::set_var("AAS_KIMI_MODELS", "kimi-real:high");
 
     let backend = KimiBackend::new(None);
     let up = backend

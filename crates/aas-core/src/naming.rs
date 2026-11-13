@@ -120,7 +120,7 @@ mod tests {
     }
 
     #[test]
-    fn derive_name_matches_asx() {
+    fn derive_name_matches_known_examples() {
         assert_eq!(
             derive_account_name(Some("e-ed@callabo.ai"), "codex"),
             "e-ed.codex"

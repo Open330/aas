@@ -12,7 +12,7 @@ use std::path::Path;
 
 /// Acquire an exclusive process lock for `(scope, key)`.
 pub fn acquire(scope: &str, key: &str) -> io::Result<File> {
-    let dir = crate::platform::asx_config_dir();
+    let dir = crate::platform::config_dir();
     acquire_in(&dir, scope, key)
 }
 

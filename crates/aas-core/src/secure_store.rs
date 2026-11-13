@@ -1,11 +1,15 @@
-//! Per-profile credential storage. Mirrors asx `storage/secure-store.ts`.
+//! Per-profile credential storage.
 //!
 //! Each profile owns a `0700` home under the profiles dir; file providers keep the credential
 //! in that home under the native filename, while **macOS Claude** prefers a profile-scoped
 //! Keychain service (derived in [`crate::keychain`]) via the `security` CLI. Large credentials
 //! that cannot safely pass through its bounded interactive parser use Claude's owner-only profile
-//! file instead. Service/account identifiers remain compatible with asx; secret values are sent
-//! over stdin, never argv.
+//! file instead. Secret values are sent over stdin, never argv.
+//!
+//! While the old state directory is still linked (see [`crate::migrate`]), each macOS Claude
+//! profile has a second Keychain item named for its old path. Reads take whichever of the two
+//! holds the later-expiring token and copy it to the other, writes update both, and removals
+//! remove both.
 
 use crate::keychain::{
     claude_keychain_service, credential_fits_security_cli, delete_credential as keychain_delete,
@@ -49,9 +53,110 @@ fn claude_profile_service(provider: &str, name: &str) -> String {
     claude_keychain_service(Some(&profile_home(provider, name)))
 }
 
+/// The Keychain item Claude Code uses for this profile when started from the old state path.
+fn legacy_profile_service(provider: &str, name: &str) -> Option<String> {
+    if !is_mac_claude(provider) {
+        return None;
+    }
+    let home = crate::migrate::legacy_profile_home(provider, name)?;
+    Some(claude_keychain_service(Some(&home)))
+}
+
+/// `claudeAiOauth.expiresAt` (epoch ms) of a stored Claude credential.
+fn claude_expiry(raw: &str) -> Option<i64> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    value.get("claudeAiOauth")?.get("expiresAt")?.as_i64()
+}
+
+/// Copy the old-path Keychain item to the current name when the current one is missing.
+/// Returns whether anything was copied.
+pub fn adopt_legacy_keychain_item(provider: &str, name: &str) -> bool {
+    let Some(legacy) = legacy_profile_service(provider, name) else {
+        return false;
+    };
+    let service = claude_profile_service(provider, name);
+    if !matches!(keychain_read_result(&service), Ok(None)) {
+        return false;
+    }
+    match keychain_read_result(&legacy) {
+        Ok(Some(raw)) => keychain_write(&service, &raw).is_ok(),
+        _ => false,
+    }
+}
+
+/// Delete the old-path Keychain item, first adopting it if the current name has none.
+/// Returns whether an item was deleted.
+pub fn remove_legacy_keychain_item(provider: &str, name: &str) -> bool {
+    let Some(legacy) = legacy_profile_service(provider, name) else {
+        return false;
+    };
+    adopt_legacy_keychain_item(provider, name);
+    if !matches!(keychain_read_result(&legacy), Ok(Some(_))) {
+        return false;
+    }
+    keychain_delete(&legacy).is_ok()
+}
+
+/// Reconcile the current item with its old-path twin and return the credential to use.
+/// Best effort: a twin that cannot be read or written is ignored.
+fn reconcile_legacy(provider: &str, name: &str, current: Option<String>) -> Option<String> {
+    let Some(legacy) = legacy_profile_service(provider, name) else {
+        return current;
+    };
+    let Ok(Some(old)) = keychain_read_result(&legacy) else {
+        return current;
+    };
+    let service = claude_profile_service(provider, name);
+    match current {
+        // A credential too large for the Keychain lives in the profile file; the old item is
+        // then older than that file, not a replacement for it.
+        None if profile_credential_path(provider, name).is_file() => None,
+        None => {
+            let _ = keychain_write(&service, &old);
+            Some(old)
+        }
+        Some(cur) if cur == old => Some(cur),
+        Some(cur) => {
+            if claude_expiry(&old) > claude_expiry(&cur) {
+                // A session started from the old path refreshed the token.
+                let _ = keychain_write(&service, &old);
+                Some(old)
+            } else {
+                let _ = keychain_write(&legacy, &cur);
+                Some(cur)
+            }
+        }
+    }
+}
+
+/// Keep the old-path item, when one exists, in step with a value just written.
+fn mirror_to_legacy(provider: &str, name: &str, value: &str) {
+    if let Some(legacy) = legacy_profile_service(provider, name) {
+        if matches!(keychain_read_result(&legacy), Ok(Some(ref old)) if old != value) {
+            // A value the Keychain cannot hold went to the profile file; drop the old item
+            // rather than leave a stale token next to it.
+            if !credential_fits_security_cli(value) || keychain_write(&legacy, value).is_err() {
+                let _ = keychain_delete(&legacy);
+            }
+        }
+    }
+}
+
+fn delete_legacy(provider: &str, name: &str) {
+    if let Some(legacy) = legacy_profile_service(provider, name) {
+        let _ = keychain_delete(&legacy);
+    }
+}
+
 // ---- public API ----
 
 pub fn set_secret(provider: &str, name: &str, value: &str) -> io::Result<()> {
+    set_secret_inner(provider, name, value)?;
+    mirror_to_legacy(provider, name, value);
+    Ok(())
+}
+
+fn set_secret_inner(provider: &str, name: &str, value: &str) -> io::Result<()> {
     validate_storage_key(provider, name)?;
     if is_mac_claude(provider) {
         let service = claude_profile_service(provider, name);
@@ -348,6 +453,7 @@ fn move_secret_unchecked(provider: &str, old_name: &str, new_name: &str) -> io::
             let _ = keychain_delete(&claude_profile_service(provider, new_name));
             return Err(error);
         }
+        delete_legacy(provider, old_name);
     }
 
     if path_exists(&from)? {
@@ -364,7 +470,8 @@ fn move_secret_unchecked(provider: &str, old_name: &str, new_name: &str) -> io::
 
 pub fn get_secret_result(provider: &str, name: &str) -> io::Result<Option<String>> {
     if is_mac_claude(provider) {
-        if let Some(v) = keychain_read_result(&claude_profile_service(provider, name))? {
+        let current = keychain_read_result(&claude_profile_service(provider, name))?;
+        if let Some(v) = reconcile_legacy(provider, name, current) {
             return Ok(Some(v));
         }
     }
@@ -385,6 +492,7 @@ pub fn get_secret(provider: &str, name: &str) -> Option<String> {
 pub fn clear_secret_value(provider: &str, name: &str) -> io::Result<()> {
     if is_mac_claude(provider) {
         keychain_delete(&claude_profile_service(provider, name))?;
+        delete_legacy(provider, name);
     }
     remove_file_if_exists(&profile_credential_path(provider, name))
 }
@@ -490,6 +598,7 @@ pub fn quarantine_secret(provider: &str, name: &str) -> io::Result<SecretQuarant
         }
     }
 
+    delete_legacy(provider, name);
     Ok(SecretQuarantine {
         provider: provider.to_string(),
         name: name.to_string(),

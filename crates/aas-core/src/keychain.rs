@@ -1,5 +1,5 @@
 //! macOS Keychain service-name derivation and serialized `security` CLI access. The naming
-//! reproduces asx's `getClaudeKeychainService` so existing entries remain discoverable.
+//! matches the item Claude Code itself reads for a given `CLAUDE_CONFIG_DIR`.
 //!
 //! service = `"Claude Code-credentials"` when no config dir, else
 //! `"Claude Code-credentials-" + hex(sha256(configDir))[..8]`.
@@ -31,7 +31,7 @@ fn with_keychain_lock<T>(f: impl FnOnce() -> T) -> T {
     {
         use std::os::unix::fs::OpenOptionsExt;
         use std::os::unix::io::AsRawFd;
-        let dir = crate::platform::asx_config_dir();
+        let dir = crate::platform::config_dir();
         let _ = std::fs::create_dir_all(&dir);
         if let Ok(file) = std::fs::OpenOptions::new()
             .create(true)
@@ -55,7 +55,7 @@ pub fn claude_keychain_service(config_dir: Option<&Path>) -> String {
         None => SERVICE_PREFIX.to_string(),
         Some(dir) => {
             let mut hasher = Sha256::new();
-            // asx hashes the string form of the path (Node `crypto.createHash('sha256').update(dir)`).
+            // Claude Code hashes the string form of the path, not a canonicalized one.
             hasher.update(dir.to_string_lossy().as_bytes());
             let digest = hasher.finalize();
             let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();

@@ -573,7 +573,7 @@ impl AgentAdapter for CodexAgent {
             other => {
                 if let CommonEvent::Error { message } = other {
                     out += &open_text!();
-                    ctx.acc.push_str(&format!("[asx-proxy] {message}"));
+                    ctx.acc.push_str(&format!("[aas-proxy] {message}"));
                 }
                 if !ctx.text_open && ctx.items.is_empty() {
                     out += &open_text!();
@@ -616,7 +616,7 @@ impl AgentAdapter for CodexAgent {
         if output.is_empty() {
             output.push(json!({ "type": "message", "role": "assistant", "content": [{ "type": "output_text", "text": "" }] }));
         }
-        json!({ "id": "resp_asx", "object": "response", "status": "completed", "output": output })
+        json!({ "id": "resp_aas", "object": "response", "status": "completed", "output": output })
     }
 
     fn format_models(&self, choices: &[BackendChoice]) -> Value {

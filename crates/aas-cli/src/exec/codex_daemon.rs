@@ -90,7 +90,7 @@ mod tests {
         assert!(socket_path_too_long(Path::new(&"x".repeat(home_len))));
         assert!(socket_path_too_long(Path::new(&"한".repeat(home_len))));
         assert!(socket_path_too_long(Path::new(
-            "/Users/june/Library/Application Support/asx/profiles/codex-e-ed_codex"
+            "/Users/june/Library/Application Support/aas/profiles/codex-e-ed_codex"
         )));
     }
 

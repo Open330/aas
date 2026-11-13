@@ -40,7 +40,7 @@ impl AgentAdapter for GrokAgent {
             model: body
                 .get("model")
                 .and_then(|v| v.as_str())
-                .unwrap_or("asx-proxy")
+                .unwrap_or("aas-proxy")
                 .to_string(),
             system,
             messages: chat_messages_to_common(&non_system),
@@ -134,7 +134,7 @@ impl AgentAdapter for GrokAgent {
                 .unwrap_or_else(|| "stop".to_string())
         };
         json!({
-            "id": "chatcmpl-asx",
+            "id": "chatcmpl-aas",
             "object": "chat.completion",
             "created": now_secs(),
             "model": req.model,
@@ -146,7 +146,7 @@ impl AgentAdapter for GrokAgent {
         let data: Vec<Value> = choices
             .iter()
             .map(
-                |c| json!({ "id": c.id, "object": "model", "created": 0, "owned_by": "asx-proxy" }),
+                |c| json!({ "id": c.id, "object": "model", "created": 0, "owned_by": "aas-proxy" }),
             )
             .collect();
         json!({ "object": "list", "data": data })

@@ -1,10 +1,6 @@
-//! Adopt existing `asx` state, and export/import a portable credential **bundle** for moving
-//! all accounts to another host.
-//!
-//! Because `aas` defaults to asx's on-disk locations, plain adoption (`inspect`) is usually a
-//! no-op. The bundle is for host-to-host migration: `export_bundle` collects every account +
-//! its credential; `import_bundle` recreates them (writing each secret to the local keychain /
-//! profile home).
+//! Export/import a portable credential **bundle** for moving all accounts to another host:
+//! `export_bundle` collects every account + its credential; `import_bundle` recreates them
+//! (writing each secret to the local keychain / profile home).
 
 use aas_core::model::AccountRecord;
 use aas_core::naming::normalize_provider_key;
@@ -12,31 +8,6 @@ use aas_core::secure_store;
 use aas_core::store::{AccountStore, StoreError};
 use age::secrecy::SecretString;
 use serde::{Deserialize, Serialize};
-
-/// Summary of what an adopt/inspect pass found.
-#[derive(Debug, Default)]
-pub struct ImportReport {
-    pub accounts: usize,
-    pub with_profile_home: usize,
-    pub missing_credential: Vec<String>,
-}
-
-/// Inspect the current (shared) asx config and report adoptable state. Non-destructive.
-pub fn inspect() -> anyhow::Result<ImportReport> {
-    let store = AccountStore::open_default();
-    let accounts = store.list(None)?;
-    let mut report = ImportReport {
-        accounts: accounts.len(),
-        ..Default::default()
-    };
-    for a in &accounts {
-        let home = aas_core::naming::profile_home(&a.provider, &a.name);
-        if home.exists() {
-            report.with_profile_home += 1;
-        }
-    }
-    Ok(report)
-}
 
 // ---- portable credential bundle (host → host migration) ----
 

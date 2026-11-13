@@ -1,4 +1,4 @@
-//! `aas-core` — foundational, provider-agnostic layer ported from asx's `storage/` + `utils/`.
+//! `aas-core` — foundational, provider-agnostic layer.
 //!
 //! Data + filesystem logic: platform paths, account store, profile homes, sharing categories,
 //! JWT claim decode, keychain service-name derivation + secure credential store, and the
@@ -12,6 +12,7 @@ pub mod execargs;
 pub mod jwt;
 pub mod keychain;
 pub mod keyed_lock;
+pub mod migrate;
 pub mod model;
 pub mod naming;
 pub mod pick;

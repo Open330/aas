@@ -163,7 +163,7 @@ pub async fn run_login_flow(
             };
             anyhow::bail!(message);
         }
-        let token = match std::env::var("ASX_CLAUDE_CODE_OAUTH_TOKEN") {
+        let token = match std::env::var("AAS_CLAUDE_CODE_OAUTH_TOKEN") {
             Ok(t) if !t.trim().is_empty() => t.trim().to_string(),
             _ => prompt_secret("Paste the long-lived token (CLAUDE_CODE_OAUTH_TOKEN): ")?,
         };
@@ -178,7 +178,7 @@ pub async fn run_login_flow(
     // third-party provider needs no branch here.
     if provider.takes_api_key_login() {
         let upper = key.to_uppercase();
-        let key_val = match std::env::var(format!("ASX_{upper}_API_KEY"))
+        let key_val = match std::env::var(format!("AAS_{upper}_API_KEY"))
             .or_else(|_| std::env::var(format!("{upper}_API_KEY")))
         {
             Ok(k) if !k.trim().is_empty() => k.trim().to_string(),

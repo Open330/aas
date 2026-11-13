@@ -34,9 +34,7 @@ Examples:
   aas login claude work    add a Claude account as an isolated profile
   aas switch codex work    make a stored account active
   aas e work               run the agent under a profile
-  aas e work claude        cross-provider: run Claude's UI on this backend
-
-Reads existing asx state directly — no migration needed.";
+  aas e work claude        cross-provider: run Claude's UI on this backend";
 
 #[derive(Parser)]
 #[command(
@@ -141,7 +139,7 @@ enum Command {
         #[arg(long)]
         fresh: bool,
     },
-    /// Show asx-tracked active account(s).
+    /// Show the active account(s).
     Status { provider: Option<String> },
     /// Print shell env for a profile (`eval "$(aas export <name>)"`), or `--all` for a
     /// portable credential bundle to migrate every account to another host.
@@ -162,10 +160,10 @@ enum Command {
         #[arg(short = 'o', long)]
         out: Option<std::path::PathBuf>,
     },
-    /// Adopt existing asx state, or restore a JSON/encrypted vault bundle (file, or `-` for stdin).
+    /// Restore a JSON/encrypted vault bundle from `aas export --all` (file, or `-` for stdin).
     Import {
         /// Bundle path; encrypted age vaults are detected automatically.
-        file: Option<String>,
+        file: String,
     },
     /// Snapshot the live credential as a system profile.
     Load {
@@ -243,6 +241,15 @@ enum Command {
         #[arg(long)]
         no_prune: bool,
     },
+    /// Show, or with `--finish` complete, the move of state from the old `asx` directory.
+    Migrate {
+        /// Remove the old directory's link and Keychain items once no agent runs from it.
+        #[arg(long)]
+        finish: bool,
+        /// Finish even while agents still run from the old directory; they lose their profile.
+        #[arg(long, requires = "finish")]
+        force: bool,
+    },
     /// Put the bare provider CLI (`claude`, `codex`, …) on the active account.
     Shim {
         #[command(subcommand)]
@@ -259,6 +266,7 @@ async fn main() {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
+    move_state_dir();
     let store = AccountStore::open_default();
     let cli = match parse_cli_with_default_exec(&store) {
         Ok(cli) => cli,
@@ -318,7 +326,8 @@ async fn main() {
             shell,
             out,
         } => export::run(&store, name, account, all, vault, shell, out),
-        Command::Import { file } => cmd_import(file.as_deref()),
+        Command::Import { file } => cmd_import(&file),
+        Command::Migrate { finish, force } => cmd_migrate(finish, force),
         Command::Load {
             provider,
             name,
@@ -404,6 +413,7 @@ fn rewrite_default_exec_args(
         "status",
         "export",
         "import",
+        "migrate",
         "load",
         "login",
         "switch",
@@ -757,26 +767,92 @@ fn cmd_status(store: &AccountStore, provider: Option<&str>) -> anyhow::Result<()
     Ok(())
 }
 
-fn cmd_import(file: Option<&str>) -> anyhow::Result<()> {
-    let Some(src) = file else {
-        // No file → inspect/adopt the existing (shared) asx state.
-        let report = aas_import::inspect()?;
-        let dir = aas_core::platform::asx_config_dir();
-        println!(
-            "{} {}",
-            ui::heading("asx state:"),
-            ui::dim(&dir.display().to_string())
-        );
-        println!("  {} {}", ui::dim("accounts         "), report.accounts);
-        println!(
-            "  {} {}",
-            ui::dim("with profile home"),
-            report.with_profile_home
-        );
-        ui::success("Adopted directly — no migration needed.");
+/// Move state out of the old `asx` directory before anything opens the store.
+fn move_state_dir() {
+    match aas_core::migrate::ensure_config_dir() {
+        Ok(Some(moved)) => eprintln!(
+            "aas: moved state from {} to {}. The old path stays as a link for agents already \
+             running from it; `aas migrate --finish` removes it once they exit.",
+            moved.from.display(),
+            moved.to.display()
+        ),
+        Ok(None) => {}
+        Err(error) => eprintln!(
+            "aas: could not move state to {}: {error}; still using {}",
+            aas_core::platform::config_base_dir()
+                .join(aas_core::platform::CONFIG_DIR_NAME)
+                .display(),
+            aas_core::platform::config_dir().display()
+        ),
+    }
+}
+
+fn cmd_migrate(finish: bool, force: bool) -> anyhow::Result<()> {
+    use aas_core::migrate;
+    println!(
+        "{} {}",
+        ui::heading("state:"),
+        aas_core::platform::config_dir().display()
+    );
+    let Some(link) = migrate::legacy_link() else {
+        if let Some(legacy) = aas_core::platform::legacy_config_dir().filter(|d| d.is_dir()) {
+            if legacy != aas_core::platform::config_dir() {
+                ui::warn(format!(
+                    "{} also exists and is not used; remove it once nothing in it is needed.",
+                    legacy.display()
+                ));
+                return Ok(());
+            }
+        }
+        ui::success("Nothing left from the old asx directory.");
         return Ok(());
     };
+    if finish {
+        return match migrate::finish(force) {
+            Ok(done) => {
+                ui::success(format!(
+                    "Removed {} (old Keychain items: {}, old Codex hook trust entries: {}).",
+                    link.display(),
+                    done.keychain_removed,
+                    done.hook_trust_pruned
+                ));
+                Ok(())
+            }
+            Err(migrate::FinishError::InUse(users)) => {
+                print_legacy_users(&users);
+                anyhow::bail!(
+                    "{} agent(s) still run from {}; restart them, or pass --force",
+                    users.len(),
+                    link.display()
+                )
+            }
+            Err(error) => Err(error.into()),
+        };
+    }
+    let users = migrate::legacy_users();
+    println!(
+        "{} {} {}",
+        ui::heading("old path:"),
+        link.display(),
+        ui::dim("(link kept for agents started before the move)")
+    );
+    print_legacy_users(&users);
+    if users.is_empty() {
+        println!("Nothing runs from it any more; `aas migrate --finish` removes it.");
+    } else {
+        println!("Restart them, then run `aas migrate --finish`.");
+    }
+    Ok(())
+}
 
+fn print_legacy_users(users: &[aas_core::migrate::LegacyUser]) {
+    for user in users {
+        let command: String = user.command.chars().take(100).collect();
+        println!("  {} {}", ui::dim(&format!("{:>7}", user.pid)), command);
+    }
+}
+
+fn cmd_import(src: &str) -> anyhow::Result<()> {
     // Restore a bundle produced by `aas export --all` (a file, or `-` for stdin).
     let data = if src == "-" {
         use std::io::Read;
