@@ -361,7 +361,7 @@ impl SeedReport {
 /// to profile directories under `profiles_dir` that no longer exist.
 ///
 /// A hook is trusted on the profile path only when the user trusted that exact hook somewhere:
-/// its current hash (see [`command_hook_hash`]) must already be recorded as `trusted_hash` under
+/// its current hash (computed as Codex does) must already be recorded as `trusted_hash` under
 /// some config path in the same file — the system config, or another profile where the user
 /// answered the review prompt. An entry left stale by a changed hook is refreshed the same way.
 /// A hook nobody trusted is never touched, so Codex still asks about it.
