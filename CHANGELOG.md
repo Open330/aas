@@ -5,6 +5,8 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-13
+
 ### Fixed
 
 - A Codex profile with its own `config.toml` (not linked to `~/.codex/config.toml`) keeps the
@@ -478,7 +480,8 @@ All notable user-facing changes are recorded here. The format follows
 - Hardened account storage, provider adapters, proxy authentication, retries, installers, and
   portable app packaging.
 
-[Unreleased]: https://github.com/Open330/aas/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/Open330/aas/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/Open330/aas/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Open330/aas/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Open330/aas/compare/v0.1.16...v0.2.0
 [0.1.16]: https://github.com/Open330/aas/compare/v0.1.15...v0.1.16
