@@ -5,6 +5,17 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-11-16
+
+### Fixed
+
+- Codex profiles no longer share `skills/.system`. Codex rewrites that directory on start
+  whenever it holds another build's bundled skills, so the desktop app, its daemon and CLI
+  sessions of different versions kept deleting each other's copy and invalidating every
+  session's skills cache. A profile's `skills` is now a directory of links to the user's skills
+  with a `.system` of its own; a skill installed from inside a profile still moves to the
+  provider home and reaches every profile. `aas migrate` converts existing profiles at once.
+
 ## [0.2.3] - 2026-11-13
 
 ### Fixed
@@ -489,7 +500,8 @@ All notable user-facing changes are recorded here. The format follows
 - Hardened account storage, provider adapters, proxy authentication, retries, installers, and
   portable app packaging.
 
-[Unreleased]: https://github.com/Open330/aas/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/Open330/aas/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/Open330/aas/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/Open330/aas/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/Open330/aas/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Open330/aas/compare/v0.2.0...v0.2.1
