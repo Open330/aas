@@ -294,6 +294,11 @@ pub fn link_shared_state(
             continue;
         }
 
+        if entry.name == "skills" && normalize_provider_key(provider) == "codex" {
+            link_codex_skills(&target, &link);
+            continue;
+        }
+
         match std::fs::symlink_metadata(&link) {
             Ok(meta) if meta.file_type().is_symlink() => {
                 let _ = std::fs::remove_file(&link); // replace stale symlink
@@ -302,6 +307,106 @@ pub fn link_shared_state(
             Err(_) => {}
         }
         let _ = symlink(&target, &link);
+    }
+}
+
+/// The directory under `skills` that Codex owns: it writes the skills bundled into the binary
+/// there, with a marker naming the bundle, on every start.
+pub const CODEX_SYSTEM_SKILLS: &str = ".system";
+
+/// Share a Codex profile's skills entry by entry, keeping [`CODEX_SYSTEM_SKILLS`] per profile.
+///
+/// Linking the whole `skills` directory made every profile — and the system home, which the
+/// Codex desktop app and its daemon use — write the same `.system`. Two Codex builds bundle
+/// different skills, so each found the other's marker on start, deleted the directory and wrote
+/// its own, invalidating the skills cache of every session sharing it. A profile now gets its
+/// own `.system`; only the user's skills are shared.
+///
+/// - A `skills` link left by an older aas becomes a real directory.
+/// - Every system skill gets a link here; links to skills that were removed are dropped.
+/// - A skill installed from inside the profile (a real entry the system home lacks) moves to
+///   the system home and is linked back, so it reaches every profile as before. One the system
+///   home also has stays here, private to the profile.
+#[cfg(unix)]
+fn link_codex_skills(target: &std::path::Path, link: &std::path::Path) {
+    use std::os::unix::fs::symlink;
+
+    match std::fs::symlink_metadata(link) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            if std::fs::remove_file(link).is_err() || std::fs::create_dir(link).is_err() {
+                return;
+            }
+            // Sessions already running read their bundled skills through this path and only
+            // write them on start. Hand them the bundle they were reading until they restart;
+            // the next start replaces it with its own if it differs.
+            let _ = copy_tree(
+                &target.join(CODEX_SYSTEM_SKILLS),
+                &link.join(CODEX_SYSTEM_SKILLS),
+            );
+        }
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => return, // a file: not ours to replace
+        Err(_) => {
+            if std::fs::create_dir(link).is_err() {
+                return;
+            }
+        }
+    }
+
+    if let Ok(entries) = std::fs::read_dir(link) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name == CODEX_SYSTEM_SKILLS {
+                continue;
+            }
+            let here = entry.path();
+            let shared = target.join(&name);
+            let Ok(meta) = std::fs::symlink_metadata(&here) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                let ours = std::fs::read_link(&here).is_ok_and(|to| to == shared);
+                if ours && std::fs::symlink_metadata(&shared).is_err() {
+                    let _ = std::fs::remove_file(&here);
+                }
+            } else if std::fs::symlink_metadata(&shared).is_err()
+                && std::fs::rename(&here, &shared).is_ok()
+            {
+                let _ = symlink(&shared, &here);
+            }
+        }
+    }
+
+    let Ok(entries) = std::fs::read_dir(target) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name == CODEX_SYSTEM_SKILLS {
+            continue;
+        }
+        let here = link.join(&name);
+        if std::fs::symlink_metadata(&here).is_err() {
+            let _ = symlink(entry.path(), &here);
+        }
+    }
+}
+
+/// Copy a directory tree, keeping symlinks as symlinks.
+#[cfg(unix)]
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(from)?;
+    if meta.file_type().is_symlink() {
+        std::os::unix::fs::symlink(std::fs::read_link(from)?, to)
+    } else if meta.is_dir() {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            copy_tree(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else {
+        std::fs::copy(from, to).map(|_| ())
     }
 }
 
@@ -362,6 +467,84 @@ pub fn link_codex_package_root(_provider: &str, _home: &std::path::Path) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_profiles_keep_their_own_system_skills() {
+        use std::os::unix::fs::symlink;
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let root = std::env::temp_dir().join(format!("aas-codex-skills-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let codex_home = root.join("codex");
+        let skills = codex_home.join("skills");
+        std::fs::create_dir_all(skills.join(".system/imagegen")).unwrap();
+        std::fs::write(skills.join(".system/.codex-system-skills.marker"), "app").unwrap();
+        std::fs::create_dir_all(skills.join("mine")).unwrap();
+        std::fs::create_dir_all(skills.join("gone")).unwrap();
+        std::env::set_var("CODEX_HOME", &codex_home);
+
+        // A profile from an older aas: the whole directory linked.
+        let home = root.join("profile");
+        std::fs::create_dir_all(&home).unwrap();
+        symlink(&skills, home.join("skills")).unwrap();
+        link_shared_state("codex", &home, false, None);
+        let here = home.join("skills");
+        assert!(!std::fs::symlink_metadata(&here)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_link(here.join("mine")).unwrap(),
+            skills.join("mine")
+        );
+        assert_eq!(
+            std::fs::read_to_string(here.join(".system/.codex-system-skills.marker")).unwrap(),
+            "app",
+            "sessions already running keep the bundle they were reading"
+        );
+        assert!(here.join(".system/imagegen").is_dir());
+
+        // Codex writes this profile's bundle; the system home's is untouched.
+        std::fs::write(here.join(".system/.codex-system-skills.marker"), "cli").unwrap();
+        // A skill installed from inside the profile, one removed from the system home, and
+        // one added there since.
+        std::fs::create_dir_all(here.join("installed")).unwrap();
+        std::fs::write(here.join("installed/SKILL.md"), "x").unwrap();
+        std::fs::remove_dir_all(skills.join("gone")).unwrap();
+        std::fs::create_dir_all(skills.join("new")).unwrap();
+
+        link_shared_state("codex", &home, false, None);
+        assert_eq!(
+            std::fs::read_to_string(skills.join(".system/.codex-system-skills.marker")).unwrap(),
+            "app"
+        );
+        assert_eq!(
+            std::fs::read_to_string(here.join(".system/.codex-system-skills.marker")).unwrap(),
+            "cli"
+        );
+        assert_eq!(
+            std::fs::read_to_string(skills.join("installed/SKILL.md")).unwrap(),
+            "x"
+        );
+        assert_eq!(
+            std::fs::read_link(here.join("installed")).unwrap(),
+            skills.join("installed")
+        );
+        assert!(std::fs::symlink_metadata(here.join("gone")).is_err());
+        assert_eq!(
+            std::fs::read_link(here.join("new")).unwrap(),
+            skills.join("new")
+        );
+
+        // An isolated profile keeps a skills directory of its own.
+        let isolated = root.join("isolated");
+        std::fs::create_dir_all(&isolated).unwrap();
+        link_shared_state("codex", &isolated, false, Some(&[]));
+        assert!(!isolated.join("skills").exists());
+
+        std::env::remove_var("CODEX_HOME");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[cfg(unix)]
     #[test]

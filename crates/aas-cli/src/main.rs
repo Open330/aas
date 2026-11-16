@@ -789,6 +789,13 @@ fn move_state_dir() {
 
 fn cmd_migrate(finish: bool, force: bool) -> anyhow::Result<()> {
     use aas_core::migrate;
+    let relinked = relink_codex_profiles();
+    if relinked > 0 {
+        println!(
+            "{} {relinked} Codex profile(s) now keep their own skills/.system",
+            ui::heading("skills:")
+        );
+    }
     println!(
         "{} {}",
         ui::heading("state:"),
@@ -843,6 +850,36 @@ fn cmd_migrate(finish: bool, force: bool) -> anyhow::Result<()> {
         println!("Restart them, then run `aas migrate --finish`.");
     }
     Ok(())
+}
+
+/// Redo the shared-state links of every Codex profile, so a `skills` link left by an older aas
+/// becomes a directory with a private `.system` without waiting for the profile's next launch.
+/// Returns how many profiles were converted.
+fn relink_codex_profiles() -> usize {
+    let Ok(accounts) = AccountStore::open_default().list(None) else {
+        return 0;
+    };
+    let mut converted = 0;
+    for acct in accounts {
+        if aas_core::naming::normalize_provider_key(&acct.provider) != "codex"
+            || acct.profile_type == Some(aas_core::ProfileType::System)
+        {
+            continue;
+        }
+        let home = aas_core::naming::profile_home(&acct.provider, &acct.name);
+        if !home.is_dir() {
+            continue;
+        }
+        let was_link = std::fs::symlink_metadata(home.join("skills"))
+            .is_ok_and(|m| m.file_type().is_symlink());
+        aas_core::share::link_shared_state(&acct.provider, &home, false, acct.share.as_deref());
+        let is_link = std::fs::symlink_metadata(home.join("skills"))
+            .is_ok_and(|m| m.file_type().is_symlink());
+        if was_link && !is_link {
+            converted += 1;
+        }
+    }
+    converted
 }
 
 fn print_legacy_users(users: &[aas_core::migrate::LegacyUser]) {
