@@ -163,7 +163,9 @@ The bundled [aas skill](skills/aas/SKILL.md) teaches agents to discover register
 accounts, inspect quota, and retry unfinished work with an authorized alternate.
 From a checkout, install it into your agent's skill directory (for example,
 `~/.codex/skills/aas/SKILL.md` or `~/.claude/skills/aas/SKILL.md`). Shared aas profiles
-inherit their provider's skills unless skill sharing has been disabled.
+inherit their provider's skills unless skill sharing has been disabled. A Codex profile links each
+skill individually and keeps `skills/.system` (the skills bundled into the Codex binary) to
+itself, so Codex builds of different versions never rewrite each other's bundle.
 
 ```bash
 # Rank quota candidates; omit --provider to inspect all providers.
