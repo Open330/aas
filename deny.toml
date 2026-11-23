@@ -1,10 +1,6 @@
 [advisories]
 yanked = "deny"
 ignore = [
-    # age 0.11 uses this unmaintained build-time proc-macro through i18n-embed-fl 0.9.
-    # It emits a future Rust compatibility warning. Revisit when a published age
-    # release removes it and passes the vulnerability check for crypto-bigint.
-    { id = "RUSTSEC-2026-0173", reason = "build-only dependency; age 0.12.1 introduces RUSTSEC-2026-0387" },
     # basic-toml is used by age's compile-time translation macros via i18n-config.
     # Current i18n-config 0.4.8 still depends on it, including via age 0.12.1.
     # This advisory reports maintenance status, not a vulnerability.

@@ -9,6 +9,10 @@ All notable user-facing changes are recorded here. The format follows
 
 - Update `age` to the latest patch release in the 0.11 series.
 
+### Fixed
+
+- Resolve the Rust forward-compatibility warning in the build-time macro used by `age`.
+
 ## [0.2.5] - 2026-11-23
 
 ### Fixed

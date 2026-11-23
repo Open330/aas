@@ -7,6 +7,7 @@ members = [
     "crates/aas-import",
     "crates/aas-cli",
 ]
+exclude = ["vendor/proc-macro-error2"]
 
 [workspace.package]
 version = "0.2.5"
@@ -45,6 +46,10 @@ aas-core = { path = "crates/aas-core" }
 aas-providers = { path = "crates/aas-providers" }
 aas-proxy = { path = "crates/aas-proxy" }
 aas-import = { path = "crates/aas-import" }
+
+[patch.crates-io]
+# Compile-time compatibility fix for age 0.11's translation macro.
+proc-macro-error2 = { path = "vendor/proc-macro-error2" }
 
 [profile.release]
 opt-level = "z"
