@@ -17,6 +17,28 @@ pub fn acquire(scope: &str, key: &str) -> io::Result<File> {
 }
 
 fn acquire_in(dir: &Path, scope: &str, key: &str) -> io::Result<File> {
+    let file = open_in(dir, scope, key)?;
+    file.lock_exclusive()?;
+    Ok(file)
+}
+
+/// Open the lock file for an operation without waiting for its owner.
+pub fn open(scope: &str, key: &str) -> io::Result<File> {
+    open_in(&crate::platform::config_dir(), scope, key)
+}
+
+/// Try to lock an open file, returning false while another caller holds it.
+pub fn try_exclusive(file: &File) -> io::Result<bool> {
+    match FileExt::try_lock_exclusive(file) {
+        Ok(()) => Ok(true),
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn open_in(dir: &Path, scope: &str, key: &str) -> io::Result<File> {
     std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
     {
@@ -42,9 +64,7 @@ fn acquire_in(dir: &Path, scope: &str, key: &str) -> io::Result<File> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let file = options.open(path)?;
-    file.lock_exclusive()?;
-    Ok(file)
+    options.open(path)
 }
 
 #[cfg(test)]
@@ -61,6 +81,8 @@ mod tests {
             crate::model::now_iso().replace([':', '.'], "-")
         ));
         let first = acquire_in(&dir, "usage", "claude/a").unwrap();
+        let probe = open_in(&dir, "usage", "claude/a").unwrap();
+        assert!(!try_exclusive(&probe).unwrap());
         let (started_tx, started_rx) = mpsc::channel();
         let (acquired_tx, acquired_rx) = mpsc::channel();
         let thread_dir = dir.clone();
@@ -76,6 +98,8 @@ mod tests {
         drop(first);
         acquired_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         waiter.join().unwrap();
+        assert!(try_exclusive(&probe).unwrap());
+        drop(probe);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

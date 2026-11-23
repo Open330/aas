@@ -166,6 +166,77 @@ fn candidates_json_ranks_cached_accounts_and_honors_exclusions() {
 
 #[cfg(unix)]
 #[test]
+fn timed_out_auto_pick_exits_while_usage_locks_are_still_held() {
+    use std::os::{fd::AsRawFd, unix::fs::PermissionsExt};
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let fixture = Fixture::new();
+    let initialized = fixture
+        .command()
+        .args(["usage", "codex", "--json", "--fresh"])
+        .output()
+        .unwrap();
+    assert!(initialized.status.success(), "{initialized:?}");
+    std::fs::remove_file(fixture.0.join("usage-cache.json")).unwrap();
+    std::fs::write(fixture.0.join(".active.json"), r#"{"codex":"primary"}"#).unwrap();
+
+    let usage_locks: Vec<_> = std::fs::read_dir(&fixture.0)
+        .unwrap()
+        .map(Result::unwrap)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".operation-")
+        })
+        .map(|entry| {
+            let file = std::fs::File::open(entry.path()).unwrap();
+            assert_eq!(
+                unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+                0
+            );
+            file
+        })
+        .collect();
+    assert_eq!(usage_locks.len(), 2);
+
+    let mock = fixture.0.join("codex");
+    std::fs::write(&mock, "#!/bin/sh\nprintf '%s\\n' \"$CODEX_HOME\"\n").unwrap();
+    std::fs::set_permissions(&mock, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut child = fixture
+        .command()
+        .env("AAS_SHIM_BIN", mock)
+        .args(["exec", "codex"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(9);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            panic!("aas did not exit while usage locks were held: {output:?}");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("usage timed out"));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        fixture
+            .0
+            .join("profiles/codex-primary")
+            .display()
+            .to_string()
+    );
+    drop(usage_locks);
+}
+
+#[cfg(unix)]
+#[test]
 fn provider_exec_auto_picks_the_best_paced_account_unless_told_active() {
     use std::os::unix::fs::PermissionsExt;
     let fixture = Fixture::new();

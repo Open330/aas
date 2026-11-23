@@ -1,10 +1,21 @@
 //! Shared helpers for the provider adapters: HTTP client, time, JSON access, and the
 //! account-store / secret-store glue that every adapter calls after a successful load.
 
+use aas_core::keyed_lock;
 use aas_core::model::AccountRecord;
 use aas_core::secure_store;
 use aas_core::store::AccountStore;
 use serde_json::Value;
+use std::{fs::File, io, time::Duration};
+
+/// Wait for a cross-process lock without tying up a blocking task after caller cancellation.
+pub(crate) async fn acquire_lock(scope: &str, key: &str) -> io::Result<File> {
+    let file = keyed_lock::open(scope, key)?;
+    while !keyed_lock::try_exclusive(&file)? {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Ok(file)
+}
 
 /// A reqwest client with a sane timeout. asx's Claude fetch uses 15s; others use `fetch`
 /// defaults — a single shared bound is close enough and keeps `list -u` from hanging.

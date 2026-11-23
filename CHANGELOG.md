@@ -12,6 +12,8 @@ All notable user-facing changes are recorded here. The format follows
 ### Fixed
 
 - Resolve the Rust forward-compatibility warning in the build-time macro used by `age`.
+- Let `aas exec` exit after an automatic account-pick timeout even while another process
+  holds a usage fetch lock.
 
 ## [0.2.5] - 2026-11-23
 
