@@ -17,16 +17,12 @@ pub const FATAL_STATUS: [u16; 7] = [400, 401, 403, 404, 405, 410, 422];
 /// a permanent one (invalid URL, auth/permission). We err on the side of retrying.
 pub fn is_retryable_fetch_error(msg: &str) -> bool {
     let m = msg.to_lowercase();
-    if m.contains("auth")
+    !(m.contains("auth")
         || m.contains("forbidden")
         || m.contains("invalid url")
         || m.contains("invalid api key")
         || m.contains("cert")
-        || m.contains("hostname")
-    {
-        return false;
-    }
-    true
+        || m.contains("hostname"))
 }
 
 /// Happy-path check: return the streaming body untouched (no body read) when the response is OK and
