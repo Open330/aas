@@ -5,6 +5,10 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Update `age` to the latest patch release in the 0.11 series.
+
 ## [0.2.5] - 2026-11-23
 
 ### Fixed
