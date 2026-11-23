@@ -5,6 +5,8 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-11-23
+
 ### Fixed
 
 - Keep explicitly isolated profiles in their own homes after switching accounts. Require
@@ -515,7 +517,8 @@ All notable user-facing changes are recorded here. The format follows
 - Hardened account storage, provider adapters, proxy authentication, retries, installers, and
   portable app packaging.
 
-[Unreleased]: https://github.com/Open330/aas/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/Open330/aas/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/Open330/aas/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/Open330/aas/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/Open330/aas/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/Open330/aas/compare/v0.2.1...v0.2.2
