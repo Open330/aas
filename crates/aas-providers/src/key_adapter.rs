@@ -3,7 +3,9 @@
 //! Z.AI is an API-key provider. Grok additionally understands native OIDC credentials in
 //! `~/.grok/auth.json`, including access/refresh-token rotation.
 
-use crate::common::{http_client, num_alt, set_active, store_account_secret, value_display};
+use crate::common::{
+    http_client, now_ms, num_alt, set_active, store_account_secret, value_display,
+};
 use crate::RefreshOutcome;
 use aas_core::jwt::decode_jwt_claims;
 use aas_core::model::ProfileType;
@@ -524,7 +526,7 @@ pub(crate) fn is_grok_expired(account: &str) -> bool {
     else {
         return false;
     };
-    exp * 1000 < chrono::Utc::now().timestamp_millis() + 60_000
+    exp.saturating_mul(1000) < now_ms() + 60_000
 }
 
 pub(crate) async fn refresh_grok(account: &str) -> RefreshOutcome {
@@ -564,10 +566,11 @@ pub(crate) async fn refresh_grok(account: &str) -> RefreshOutcome {
             }
         }
     };
-    let expires_at = chrono::Utc::now()
-        .checked_add_signed(chrono::Duration::seconds(refreshed.expires_in.max(0)))
-        .unwrap_or_else(chrono::Utc::now)
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let now = jiff::Timestamp::now();
+    let expiry = now
+        .checked_add(jiff::SignedDuration::from_secs(refreshed.expires_in.max(0)))
+        .unwrap_or(now);
+    let expires_at = format!("{expiry:.3}");
     let mut updated_entry = stored.entry.clone();
     let Some(object) = updated_entry.as_object_mut() else {
         return RefreshOutcome {

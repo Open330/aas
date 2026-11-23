@@ -192,12 +192,22 @@ impl BackendAdapter for CodexBackend {
                 "response.completed" => out.push(CommonEvent::Done {
                     finish_reason: Some("stop".to_string()),
                 }),
+                "response.incomplete" => {
+                    let reason = j
+                        .pointer("/response/incomplete_details/reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown reason");
+                    out.push(CommonEvent::Error {
+                        message: format!("upstream response incomplete: {reason}"),
+                    });
+                }
                 "response.failed" | "error" => {
                     let msg = j
                         .get("response")
                         .and_then(|r| r.get("error"))
                         .and_then(|e| e.get("message"))
                         .and_then(|v| v.as_str())
+                        .or_else(|| j.pointer("/error/message").and_then(Value::as_str))
                         .or_else(|| j.get("message").and_then(|v| v.as_str()))
                         .unwrap_or("codex error")
                         .to_string();
@@ -570,11 +580,24 @@ impl AgentAdapter for CodexAgent {
                 );
                 out
             }
-            other => {
-                if let CommonEvent::Error { message } = other {
-                    out += &open_text!();
-                    ctx.acc.push_str(&format!("[aas-proxy] {message}"));
-                }
+            CommonEvent::Error { message } => {
+                out += &resp(
+                    "response.failed",
+                    &json!({
+                        "type": "response.failed",
+                        "response": {
+                            "id": ctx.id,
+                            "object": "response",
+                            "status": "failed",
+                            "model": ctx.model,
+                            "output": [],
+                            "error": { "code": "server_error", "message": message },
+                        },
+                    }),
+                );
+                out
+            }
+            CommonEvent::Done { .. } => {
                 if !ctx.text_open && ctx.items.is_empty() {
                     out += &open_text!();
                 }
@@ -585,6 +608,7 @@ impl AgentAdapter for CodexAgent {
                 );
                 out
             }
+            CommonEvent::ToolCallDelta { .. } => String::new(),
         }
     }
 

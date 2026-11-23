@@ -49,7 +49,7 @@ fn path() -> PathBuf {
 }
 
 fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
+    jiff::Timestamp::now().as_millisecond()
 }
 
 fn load_unlocked() -> BackoffFile {

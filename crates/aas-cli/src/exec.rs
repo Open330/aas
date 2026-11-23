@@ -250,13 +250,6 @@ fn scrub_inherited_credentials(env: &mut HashMap<String, String>) {
     }
 }
 
-async fn live_credential(provider: &str) -> Option<String> {
-    match get_adapter(provider) {
-        Some(p) => p.current_credential().await,
-        None => None,
-    }
-}
-
 /// The API host recorded for a backend account. Kimi's platforms issue keys that are not
 /// interchangeable, so the proxy must call the same host the key was validated against. The
 /// stored value is untrusted (a hand-edited `accounts.json` or an imported bundle can set it), so
@@ -526,27 +519,34 @@ pub async fn cmd_exec(store: &AccountStore, name: &str, rest: &[String]) -> anyh
     let secret = secure_store::get_secret(&profile_provider, &account_name);
 
     // Claude long-lived token → env auth (same-provider claude only).
-    if !use_proxy && normalize_provider_key(&agent_provider) == "claude" {
-        if let Some(tok) = secret.as_deref().and_then(claude_long_lived_token) {
-            env.insert("CLAUDE_CODE_OAUTH_TOKEN".into(), tok);
-        }
+    let claude_token = if !use_proxy && normalize_provider_key(&agent_provider) == "claude" {
+        secret.as_deref().and_then(claude_long_lived_token)
+    } else {
+        None
+    };
+    if let Some(token) = &claude_token {
+        env.insert("CLAUDE_CODE_OAUTH_TOKEN".into(), token.clone());
     }
-
-    let system_profile = acct.profile_type == Some(ProfileType::System)
-        || is_current_system_profile(&profile_provider, &account_name).await;
 
     let mut proxy_handle = None;
     let mut cross_home: Option<PathBuf> = None;
 
     if !use_proxy {
+        let system_profile = match acct.profile_type {
+            Some(ProfileType::System) => true,
+            Some(ProfileType::Isolated) => false,
+            None => is_current_system_profile(&profile_provider, &account_name).await,
+        };
         if system_profile {
-            if let (Some(stored), Some(live)) = (&secret, live_credential(&profile_provider).await)
+            let Some(stored) = secret.as_deref() else {
+                anyhow::bail!("No stored credential for {profile_provider}/{account_name}");
+            };
+            if claude_token.is_none()
+                && native_credential(&profile_provider).await.as_deref() != Some(stored)
             {
-                if stored != &live {
-                    anyhow::bail!(
-                        "{profile_provider}/{account_name} is a system profile but is not current in system. Run: aas switch {account_name}"
-                    );
-                }
+                anyhow::bail!(
+                    "{profile_provider}/{account_name} is a system profile but is not current in system. Run: aas switch {account_name}"
+                );
             }
             if let Some(dir) = caller_system_home(std::env::var(spec.home_env).ok()) {
                 env.insert(spec.home_env.into(), dir);

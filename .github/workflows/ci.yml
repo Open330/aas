@@ -80,21 +80,25 @@ jobs:
       - name: Validate BarShelf widget contract
         if: runner.os != 'Windows'
         run: |
-          jq -e '
-            .schemaVersion == 1 and
-            .entry.kind == "workflow" and
-            .entry.main == "workflow.json" and
-            .permissions.exec[0].command == "aas" and
-            .permissions.exec[0].allowedArgs == [["usage", "--json"]] and
-            .permissions.exec[0].sensitiveOutput == true
-          ' widgets/barshelf-aas-usage/widget.json >/dev/null
-          jq -e '
-            .schemaVersion == 1 and
-            .kind == "workflow" and
-            .sources.usage.use == "exec" and
-            .sources.usage.with.command == ["aas", "usage", "--json"] and
-            (.view | type == "object")
-          ' widgets/barshelf-aas-usage/workflow.json >/dev/null
+          for widget in widgets/barshelf-aas-{usage,alerts}; do
+            jq -e '
+              .schemaVersion == 1 and
+              .entry.kind == "workflow" and
+              .entry.main == "workflow.json" and
+              .permissions.exec[0].command == "aas" and
+              .permissions.exec[0].allowedArgs == [["usage", "--json"]] and
+              .permissions.exec[0].sensitiveOutput == true
+            ' "$widget/widget.json" >/dev/null
+            jq -e '
+              .schemaVersion == 1 and
+              .kind == "workflow" and
+              .sources.usage.use == "exec" and
+              .sources.usage.with.command == ["aas", "usage", "--json"] and
+              (.view | type == "object")
+            ' "$widget/workflow.json" >/dev/null
+          done
+          jq -e '.permissions.notifications == true' widgets/barshelf-aas-alerts/widget.json >/dev/null
+          jq -e '.alerts | has("low") and has("reset")' widgets/barshelf-aas-alerts/workflow.json >/dev/null
       - name: Parse PowerShell installer
         if: runner.os == 'Windows'
         shell: pwsh

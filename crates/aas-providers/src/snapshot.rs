@@ -11,7 +11,7 @@ use aas_core::usage::Usage;
 use aas_core::usage_cache::{self, Entry as CacheEntry, DEFAULT_MAX_AGE_MS};
 use std::fs::File;
 
-use crate::{all_providers, get_adapter, Provider};
+use crate::{all_providers, common::now_ms, get_adapter, Provider};
 
 type PendingUsage = (
     String,
@@ -49,10 +49,6 @@ struct FetchedUsage {
     usage: Usage,
     cached: bool,
     fetched_at_ms: Option<i64>,
-}
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
 }
 
 fn cache_key(provider: Provider, account: &str) -> String {

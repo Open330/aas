@@ -1,7 +1,8 @@
 //! Z.AI (GLM coding) backend adapter — backend only. Port of `proxy/adapters/zai.ts`.
 
 use crate::adapters::util::{
-    chat_messages_from_common, chat_tools_from_common, parse_chat_tool_deltas,
+    chat_messages_from_common, chat_tools_from_common, parse_chat_stream_error,
+    parse_chat_tool_deltas,
 };
 use crate::models::resolve_choice;
 use crate::types::{BackendAdapter, CommonEvent, CommonRequest, UpstreamRequest};
@@ -97,6 +98,10 @@ impl BackendAdapter for ZaiBackend {
             let Ok(j) = serde_json::from_str::<Value>(payload) else {
                 continue;
             };
+            if let Some(error) = parse_chat_stream_error(&j) {
+                out.push(error);
+                continue;
+            }
             let ch = j
                 .get("choices")
                 .and_then(|v| v.as_array())

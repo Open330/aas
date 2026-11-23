@@ -56,6 +56,21 @@ pub fn to_text(content: &Value) -> String {
 
 // --- OpenAI Chat Completions helpers (shared by grok + zai backends and the grok agent) ---
 
+pub fn parse_chat_stream_error(payload: &Value) -> Option<CommonEvent> {
+    let error = payload.get("error").filter(|error| !error.is_null());
+    if error.is_none() && payload.get("type").and_then(Value::as_str) != Some("error") {
+        return None;
+    }
+    let message = error
+        .map(|error| error.get("message").unwrap_or(error))
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("message").and_then(Value::as_str))
+        .unwrap_or("upstream chat completion failed");
+    Some(CommonEvent::Error {
+        message: message.to_string(),
+    })
+}
+
 /// COMMON messages -> Chat Completions messages, restoring assistant tool_calls and role=tool
 /// results so a multi-turn tool session survives the round trip.
 pub fn chat_messages_from_common(system: Option<&str>, messages: &[CommonMessage]) -> Vec<Value> {

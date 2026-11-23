@@ -3,7 +3,8 @@
 
 use crate::adapters::util::{
     chat_messages_from_common, chat_messages_to_common, chat_tools_from_common,
-    chat_tools_to_common, parse_chat_tool_deltas, sse_data as sse, sse_headers, to_text,
+    chat_tools_to_common, parse_chat_stream_error, parse_chat_tool_deltas, sse_data as sse,
+    sse_headers, to_text,
 };
 use crate::models::{resolve_choice, BackendChoice};
 use crate::types::{
@@ -111,7 +112,10 @@ impl AgentAdapter for GrokAgent {
                 };
                 format!("{}data: [DONE]\n\n", chunk(json!({}), json!(reason)))
             }
-            _ => format!("{}data: [DONE]\n\n", chunk(json!({}), json!("stop"))),
+            CommonEvent::Error { message } => {
+                sse(&json!({ "error": { "message": message, "type": "server_error" } }))
+            }
+            CommonEvent::ToolCallDelta { .. } => String::new(),
         }
     }
 
@@ -239,6 +243,10 @@ impl BackendAdapter for GrokBackend {
             let Ok(j) = serde_json::from_str::<Value>(payload) else {
                 continue;
             };
+            if let Some(error) = parse_chat_stream_error(&j) {
+                out.push(error);
+                continue;
+            }
             let Some(ch) = j
                 .get("choices")
                 .and_then(|v| v.as_array())

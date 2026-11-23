@@ -1,34 +1,33 @@
-# changes: what is new since the last release (release notes, update posts).
-# Rewrite these scenes for each release from CHANGELOG.md, alongside docs/launch/changes.md.
+# Changes in aas v0.2.5.
 
 Hide
-Type `scene "New: a provider name runs its active account"`
-Enter
-Show
-Type "aas active codex"
-Sleep 300ms
-Enter
-Sleep 1.2s
-Type "aas exec codex"
-Sleep 300ms
-Enter
-Sleep 2.5s
-
-Hide
-Type `scene "Switch, and the provider name follows"`
+Type `scene "Switch accounts and keep the isolated profile home"`
 Enter
 Show
 Type "aas switch codex team"
 Sleep 300ms
 Enter
 Sleep 1s
-Type "aas exec codex"
+Type "aas exec team"
 Sleep 300ms
 Enter
-Sleep 3s
+Sleep 2.5s
 
 Hide
-Type `end_card "Update: brew upgrade aas" "Release notes: github.com/Open330/aas/releases"`
+Type `scene "Apply isolation to an existing profile"`
+Enter
+Show
+Type "aas sharing team"
+Sleep 300ms
+Enter
+Sleep 1s
+Type "aas sharing team --isolated"
+Sleep 300ms
+Enter
+Sleep 2.5s
+
+Hide
+Type `end_card "Update: brew upgrade aas" "Release notes: github.com/Open330/aas/releases/tag/v0.2.5"`
 Enter
 Show
 Sleep 3s
