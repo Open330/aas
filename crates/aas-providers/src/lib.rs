@@ -73,13 +73,9 @@ pub fn all_providers() -> [Provider; 7] {
 
 impl Provider {
     async fn lifecycle_lock(&self) -> Result<File, String> {
-        let key = self.id().to_string();
-        tokio::task::spawn_blocking(move || {
-            aas_core::keyed_lock::acquire("credential-lifecycle", &key)
-        })
-        .await
-        .map_err(|error| format!("credential lifecycle lock task failed: {error}"))?
-        .map_err(|error| format!("could not acquire credential lifecycle lock: {error}"))
+        common::acquire_lock("credential-lifecycle", self.id())
+            .await
+            .map_err(|error| format!("could not acquire credential lifecycle lock: {error}"))
     }
 
     /// Canonical provider id.
@@ -221,7 +217,7 @@ impl Provider {
         if !self.is_expired(account).await {
             return None;
         }
-        let _lock = match self.lifecycle_lock().await {
+        let lock = match self.lifecycle_lock().await {
             Ok(lock) => lock,
             Err(message) => {
                 return Some(RefreshOutcome {
@@ -234,7 +230,21 @@ impl Provider {
         if !self.is_expired(account).await {
             return None;
         }
-        Some(self.refresh_unlocked(account).await)
+        // Once rotation starts, keep the lock until the result is stored even if an
+        // auto-picker cancels its snapshot while the agent session is still running.
+        let provider = *self;
+        let account = account.to_owned();
+        let outcome = tokio::spawn(async move {
+            let _lock = lock;
+            provider.refresh_unlocked(&account).await
+        })
+        .await
+        .unwrap_or_else(|error| RefreshOutcome {
+            ok: false,
+            message: format!("credential refresh task failed: {error}"),
+            needs_relogin: false,
+        });
+        Some(outcome)
     }
 
     async fn refresh_unlocked(&self, account: &str) -> RefreshOutcome {

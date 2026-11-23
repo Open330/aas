@@ -9,16 +9,20 @@ use aas_core::model::{sort_accounts, AccountSort};
 use aas_core::store::AccountStore;
 use aas_core::usage::Usage;
 use aas_core::usage_cache::{self, Entry as CacheEntry, DEFAULT_MAX_AGE_MS};
-use std::fs::File;
+use tokio_util::task::AbortOnDropHandle;
 
-use crate::{all_providers, common::now_ms, get_adapter, Provider};
+use crate::{
+    all_providers,
+    common::{acquire_lock, now_ms},
+    get_adapter, Provider,
+};
 
 type PendingUsage = (
     String,
     String,
     Option<String>,
     bool,
-    tokio::task::JoinHandle<FetchedUsage>,
+    AbortOnDropHandle<FetchedUsage>,
 );
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -123,13 +127,6 @@ fn permits_stale_fallback(error: &str) -> bool {
     .any(|marker| lower.contains(marker))
 }
 
-async fn fetch_lock(key: String) -> Result<File, String> {
-    tokio::task::spawn_blocking(move || aas_core::keyed_lock::acquire("usage", &key))
-        .await
-        .map_err(|error| format!("usage lock task failed: {error}"))?
-        .map_err(|error| format!("could not acquire usage lock: {error}"))
-}
-
 fn usage_failure(key: &str, usage: Usage, requested_at_ms: i64) -> FetchedUsage {
     let error = usage.error.clone().unwrap_or_default();
     usage_cache::get(key)
@@ -192,9 +189,15 @@ async fn fetch_account(provider: Provider, account: &str, mode: UsageCacheMode) 
         }
     }
 
-    let _fetch_lock = match fetch_lock(key.clone()).await {
+    let _fetch_lock = match acquire_lock("usage", &key).await {
         Ok(lock) => lock,
-        Err(error) => return failure_with_cache(&key, provider.id(), error),
+        Err(error) => {
+            return failure_with_cache(
+                &key,
+                provider.id(),
+                format!("could not acquire usage lock: {error}"),
+            )
+        }
     };
 
     if let Some(failed) = cached_failure(provider, account, mode, requested_at_ms) {
@@ -354,8 +357,11 @@ pub async fn snapshot_sorted_with_cache(
         for account in accounts {
             let is_active = active.as_deref() == Some(account.name.as_str());
             let task_name = account.name.clone();
-            let handle =
-                tokio::spawn(async move { fetch_account(provider, &task_name, cache_mode).await });
+            // The auto-picker can drop this snapshot on timeout. Cancel its pending fetches
+            // when their handles are dropped, including the one currently being awaited.
+            let handle = AbortOnDropHandle::new(tokio::spawn(async move {
+                fetch_account(provider, &task_name, cache_mode).await
+            }));
             pending.push((
                 provider.id().to_string(),
                 account.name,
