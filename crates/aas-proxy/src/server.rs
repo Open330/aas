@@ -477,7 +477,7 @@ fn channel_body(rx: mpsc::Receiver<Bytes>) -> Body {
 }
 
 /// Flush accumulated tool calls into formatted chunks and clear the accumulator.
-pub(crate) fn flush_tools(
+fn flush_tools(
     agent: &dyn AgentAdapter,
     ctx: &mut StreamCtx,
     acc: &mut ToolAccumulator,
@@ -491,42 +491,34 @@ pub(crate) fn flush_tools(
     chunks
 }
 
-/// Route one COMMON event to zero or more frontend SSE chunks. `tool_call_delta` is held in the
-/// accumulator; `done` flushes held tool calls first, then emits the done chunk.
+/// Buffer tool fragments until a successful terminal event.
 pub(crate) fn process_event(
     agent: &dyn AgentAdapter,
     ctx: &mut StreamCtx,
     acc: &mut ToolAccumulator,
-    saw_done: &mut bool,
-    ev: CommonEvent,
+    ev: &CommonEvent,
 ) -> Vec<String> {
-    if *saw_done {
-        return Vec::new();
-    }
-    match &ev {
+    match ev {
         CommonEvent::ToolCallDelta { .. } => {
-            acc.push(&ev);
+            acc.push(ev);
             Vec::new()
         }
         CommonEvent::Done { .. } => {
             let mut out = flush_tools(agent, ctx, acc);
-            *saw_done = true;
-            out.push(agent.format_stream_chunk(&ev, ctx));
+            out.push(agent.format_stream_chunk(ev, ctx));
             out
         }
         CommonEvent::Error { .. } => {
-            let mut out = flush_tools(agent, ctx, acc);
-            *saw_done = true;
-            out.push(agent.format_stream_chunk(&ev, ctx));
-            out
+            acc.clear();
+            vec![agent.format_stream_chunk(ev, ctx)]
         }
-        _ => vec![agent.format_stream_chunk(&ev, ctx)],
+        _ => vec![agent.format_stream_chunk(ev, ctx)],
     }
 }
 
-/// The happy streaming path: read upstream, transcode, write frontend SSE to the channel. Reproduces
-/// asx invariants: buffer+flush tool calls, synthetic terminator on missing `done`, mid-stream error
-/// → flush + error text + terminator, client-disconnect cancels upstream reads.
+const UNEXPECTED_EOF: &str = "upstream stream ended unexpectedly";
+const INTERRUPTED_STREAM: &str = "upstream stream interrupted";
+
 async fn stream_producer(
     res: reqwest::Response,
     agent: Arc<dyn AgentAdapter>,
@@ -536,121 +528,50 @@ async fn stream_producer(
 ) {
     let mut framer = SseFramer::new();
     let mut acc = ToolAccumulator::new();
-    let mut saw_done = false;
-    let mut client_closed = false;
-    let mut stream_err: Option<String> = None;
-
     let mut body = std::pin::pin!(res.bytes_stream());
 
-    'outer: loop {
+    let failure = loop {
         let next = tokio::select! {
-            _ = tx.closed() => { client_closed = true; break 'outer; }
-            c = body.next() => c,
+            _ = tx.closed() => return,
+            chunk = body.next() => chunk,
         };
-        match next {
-            Some(Ok(bytes)) => {
-                for block in framer.feed(&bytes) {
-                    for ev in backend.parse_stream_chunk(&block) {
-                        for chunk in
-                            process_event(agent.as_ref(), &mut ctx, &mut acc, &mut saw_done, ev)
-                        {
-                            if tx.send(Bytes::from(chunk)).await.is_err() {
-                                client_closed = true;
-                                break 'outer;
-                            }
-                        }
-                        if saw_done {
-                            break 'outer;
-                        }
+        let blocks = match &next {
+            Some(Ok(bytes)) => framer.feed(bytes),
+            Some(Err(_)) => break INTERRUPTED_STREAM,
+            None => framer.finish(),
+        };
+        for block in blocks {
+            for ev in backend.parse_stream_chunk(&block) {
+                for chunk in process_event(agent.as_ref(), &mut ctx, &mut acc, &ev) {
+                    if tx.send(Bytes::from(chunk)).await.is_err() {
+                        return;
                     }
                 }
-            }
-            Some(Err(e)) => {
-                stream_err = Some(e.to_string());
-                break;
-            }
-            None => {
-                for block in framer.finish() {
-                    for ev in backend.parse_stream_chunk(&block) {
-                        for chunk in
-                            process_event(agent.as_ref(), &mut ctx, &mut acc, &mut saw_done, ev)
-                        {
-                            if tx.send(Bytes::from(chunk)).await.is_err() {
-                                client_closed = true;
-                                break 'outer;
-                            }
-                        }
-                        if saw_done {
-                            break 'outer;
-                        }
-                    }
+                if matches!(ev, CommonEvent::Done { .. } | CommonEvent::Error { .. }) {
+                    return;
                 }
-                break;
             }
         }
-    }
-
-    if client_closed {
-        return; // client already gone — nothing to write
-    }
-
-    let tail = finalize_stream(agent.as_ref(), &mut ctx, &mut acc, saw_done, stream_err);
-    for chunk in tail {
-        if tx.send(Bytes::from(chunk)).await.is_err() {
-            break;
+        if next.is_none() {
+            break UNEXPECTED_EOF;
         }
-    }
+    };
+
+    let event = CommonEvent::Error {
+        message: failure.to_string(),
+    };
+    let chunk = agent.format_stream_chunk(&event, &mut ctx);
+    let _ = tx.send(Bytes::from(chunk)).await;
 }
 
-/// Post-loop terminator logic (extracted for testing). Flushes any held tool calls, then:
-///  - mid-stream error → error-text chunk + done;
-///  - clean end without a `done` → synthetic warning + done;
-///  - otherwise nothing (a real `done` was already emitted).
-pub(crate) fn finalize_stream(
-    agent: &dyn AgentAdapter,
-    ctx: &mut StreamCtx,
-    acc: &mut ToolAccumulator,
-    saw_done: bool,
-    stream_err: Option<String>,
-) -> Vec<String> {
-    let mut tail: Vec<String> = flush_tools(agent, ctx, acc);
-    if let Some(err) = stream_err {
-        // Mid-stream break: surface a readable error as SSE text, then a clean done.
-        let msg = format!(
-            "\n[aas-proxy] stream interrupted: {}",
-            if err.is_empty() {
-                "connection lost".to_string()
-            } else {
-                err
-            }
-        );
-        tail.push(agent.format_stream_chunk(&CommonEvent::Text { text: msg }, ctx));
-        tail.push(agent.format_stream_chunk(
-            &CommonEvent::Done {
-                finish_reason: None,
-            },
-            ctx,
-        ));
-    } else if !saw_done {
-        // Stream ended without an explicit done — synthetic warning + done.
-        let warn = "\n[aas-proxy] upstream stream ended unexpectedly (connection may have been interrupted)";
-        tail.push(agent.format_stream_chunk(
-            &CommonEvent::Text {
-                text: warn.to_string(),
-            },
-            ctx,
-        ));
-        tail.push(agent.format_stream_chunk(
-            &CommonEvent::Done {
-                finish_reason: None,
-            },
-            ctx,
-        ));
-    }
-    tail
+fn upstream_stream_error(message: &str) -> Response {
+    json_response(
+        StatusCode::BAD_GATEWAY,
+        json!({ "error": { "message": message } }),
+    )
 }
 
-/// Agent wanted non-stream but the backend streams — accumulate text/tools, then format once.
+/// Accumulate a transformed upstream stream into one response after successful completion.
 async fn accumulate_non_stream(
     res: reqwest::Response,
     agent: &dyn AgentAdapter,
@@ -658,64 +579,32 @@ async fn accumulate_non_stream(
     common: &crate::types::CommonRequest,
 ) -> Response {
     let mut text = String::new();
-    let mut finish_reason: Option<String> = None;
     let mut acc = ToolAccumulator::new();
     let mut framer = SseFramer::new();
-    let mut stream_err: Option<String> = None;
-    let mut protocol_error: Option<String> = None;
-
     let mut body = std::pin::pin!(res.bytes_stream());
-    'outer: loop {
-        match body.next().await {
-            Some(Ok(bytes)) => {
-                for block in framer.feed(&bytes) {
-                    for ev in backend.parse_stream_chunk(&block) {
-                        apply_accumulate(
-                            &ev,
-                            &mut text,
-                            &mut finish_reason,
-                            &mut acc,
-                            &mut protocol_error,
-                        );
-                    }
+
+    let finish_reason = 'body: loop {
+        let next = body.next().await;
+        let blocks = match &next {
+            Some(Ok(bytes)) => framer.feed(bytes),
+            Some(Err(_)) => return upstream_stream_error(INTERRUPTED_STREAM),
+            None => framer.finish(),
+        };
+        for block in blocks {
+            for ev in backend.parse_stream_chunk(&block) {
+                match ev {
+                    CommonEvent::Text { text: delta } => text.push_str(&delta),
+                    CommonEvent::ToolCallDelta { .. } => acc.push(&ev),
+                    CommonEvent::Done { finish_reason } => break 'body finish_reason,
+                    CommonEvent::Error { message } => return upstream_stream_error(&message),
+                    CommonEvent::ToolCall { .. } => {}
                 }
-            }
-            Some(Err(e)) => {
-                stream_err = Some(e.to_string());
-                break 'outer;
-            }
-            None => {
-                for block in framer.finish() {
-                    for ev in backend.parse_stream_chunk(&block) {
-                        apply_accumulate(
-                            &ev,
-                            &mut text,
-                            &mut finish_reason,
-                            &mut acc,
-                            &mut protocol_error,
-                        );
-                    }
-                }
-                break 'outer;
             }
         }
-    }
-    if let Some(e) = stream_err {
-        text.push_str(&format!(
-            "\n[aas-proxy] stream interrupted: {}",
-            if e.is_empty() {
-                "connection lost".to_string()
-            } else {
-                e
-            }
-        ));
-    }
-    if let Some(message) = protocol_error {
-        return json_response(
-            StatusCode::BAD_GATEWAY,
-            json!({ "error": { "message": message } }),
-        );
-    }
+        if next.is_none() {
+            return upstream_stream_error(UNEXPECTED_EOF);
+        }
+    };
     let tool_calls: Vec<CommonToolCall> = acc
         .list()
         .into_iter()
@@ -738,22 +627,6 @@ async fn accumulate_non_stream(
         finish_reason,
     };
     json_response(StatusCode::OK, agent.format_response(&resp, common))
-}
-
-pub(crate) fn apply_accumulate(
-    ev: &CommonEvent,
-    text: &mut String,
-    finish_reason: &mut Option<String>,
-    acc: &mut ToolAccumulator,
-    protocol_error: &mut Option<String>,
-) {
-    match ev {
-        CommonEvent::Text { text: t } => text.push_str(t),
-        CommonEvent::ToolCallDelta { .. } => acc.push(ev),
-        CommonEvent::Done { finish_reason: fr } => *finish_reason = fr.clone(),
-        CommonEvent::Error { message } => *protocol_error = Some(message.clone()),
-        _ => {}
-    }
 }
 
 fn short_id() -> String {

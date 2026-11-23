@@ -50,6 +50,78 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn switching_a_profile_preserves_its_explicit_isolation() {
+    let f = Fixture::new();
+    f.auth("synthetic-unexpired-token");
+    f.cli("printf '%s\\n' \"$CODEX_HOME\"\n");
+    let switched = f.command().args(["switch", "work"]).output().unwrap();
+    assert!(switched.status.success(), "{switched:?}");
+
+    let run = f.command().args(["exec", "work"]).output().unwrap();
+    assert!(run.status.success(), "{run:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        f.0.join("profiles/codex-work").to_str().unwrap()
+    );
+}
+
+#[test]
+fn sharing_command_removes_an_existing_link_from_the_profile() {
+    let f = Fixture::new();
+    f.auth("synthetic-unexpired-token");
+    let native_config = f.0.join("native/config.toml");
+    std::fs::write(&native_config, "# native fixture\n").unwrap();
+    let profile_config = f.0.join("profiles/codex-work/config.toml");
+
+    let run = f.command().args(["exec", "work"]).output().unwrap();
+    assert!(run.status.success(), "{run:?}");
+    assert_eq!(std::fs::read_link(&profile_config).unwrap(), native_config);
+
+    let isolate = f
+        .command()
+        .args(["sharing", "work", "--isolated"])
+        .output()
+        .unwrap();
+    assert!(isolate.status.success(), "{isolate:?}");
+    assert!(!profile_config.is_symlink());
+    assert!(native_config.is_file());
+
+    let run = f.command().args(["exec", "work"]).output().unwrap();
+    assert!(run.status.success(), "{run:?}");
+    assert!(!profile_config.is_symlink());
+}
+
+#[test]
+fn imported_system_profile_requires_its_native_credential_before_launch() {
+    let f = Fixture::new();
+    f.auth("synthetic-unexpired-token");
+    f.cli("printf '%s\\n' \"$CODEX_HOME\"\n");
+    let credential = std::fs::read_to_string(f.0.join("profiles/codex-work/auth.json")).unwrap();
+    let bundle = f.0.join("bundle.json");
+    std::fs::write(
+        &bundle,
+        json!({"version":1,"accounts":[{"provider":"codex","name":"restored","addedAt":"2026-01-01","profileType":"system","credential":credential}]}).to_string(),
+    ).unwrap();
+    let imported = f.command().arg("import").arg(bundle).output().unwrap();
+    assert!(imported.status.success(), "{imported:?}");
+
+    let run = || f.command().args(["exec", "restored"]).output().unwrap();
+    let missing = run();
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("aas switch restored"));
+    assert!(missing.stdout.is_empty());
+
+    let switched = f.command().args(["switch", "restored"]).output().unwrap();
+    assert!(switched.status.success(), "{switched:?}");
+    let activated = run();
+    assert!(activated.status.success(), "{activated:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&activated.stdout).trim(),
+        f.0.join("native").to_str().unwrap()
+    );
+}
+
+#[test]
 fn successful_native_command_does_not_report_an_expired_credential_as_refreshed() {
     let f = Fixture::new();
     let r = f

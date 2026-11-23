@@ -148,9 +148,11 @@ ssh -t jiun-mini 'aas import ~/aas-vault.age'
   shows the pinned path and other installations on PATH. Select a copy explicitly with
   `aas shim install codex --bin "$(npm prefix -g)/bin/codex"`, or pass another executable path.
   `--bin` requires exactly one provider; launcher symlinks are preserved across upgrades.
-- **`exec <name>`** runs the agent under a profile-scoped home without touching your default.
-  `<name>` is a stored account name, or a provider name — `aas exec codex` runs whatever
-  `aas status` lists as active for Codex.
+- **`exec <name>`** runs an isolated profile under its own home, including after `aas switch`.
+  A system profile uses the provider's native home. After importing a system profile on another
+  host, use `aas switch <name>` to activate its restored credential before running it.
+  A provider name such as `aas exec codex` auto-picks by quota. Use `--pick active` to run the
+  account listed as active by `aas status`.
 - **`export <name>`** prints the env (`CODEX_HOME=…`, `ZAI_API_KEY=…`, …) to activate a
   profile in the current shell only.
 
@@ -289,7 +291,8 @@ changes. Authentication failures do not display quota from an earlier successful
 
 **Share flags** (for `login` / `sharing`, and per-run on cross-provider `exec`): `--shared`
 (default), `--isolated`, `--share <a,b,…>`, `--isolate <a,b,…>` over the categories
-`sessions, skills, agents, hooks, settings`.
+`sessions, skills, agents, hooks, settings`. On macOS and Linux, reducing sharing removes
+the corresponding links from the profile. Windows profiles keep their own state.
 
 **Providers:** `claude`, `codex`, `grok` (alias `xai`), `zai`, `kimi` (alias `moonshot`),
 `cursor`, `pi`.

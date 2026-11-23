@@ -901,126 +901,200 @@ fn stream_buffers_tool_calls_and_flushes_before_done() {
     let agent = GrokAgent;
     let mut ctx = StreamCtx::new("cid".into(), 0, "grok-build".into(), None);
     let mut acc = ToolAccumulator::new();
-    let mut saw_done = false;
 
-    // tool_call_delta fragments are held (no output yet).
+    // Tool call fragments are held until the successful terminal event.
     assert!(process_event(
         &agent,
         &mut ctx,
         &mut acc,
-        &mut saw_done,
-        delta(0, Some("t1"), Some("f"), Some("{}"))
+        &delta(0, Some("t1"), Some("f"), Some("{}")),
     )
     .is_empty());
-    assert!(!saw_done);
-    // done -> flush the buffered tool call, THEN emit done.
     let out = process_event(
         &agent,
         &mut ctx,
         &mut acc,
-        &mut saw_done,
-        CommonEvent::Done {
+        &CommonEvent::Done {
             finish_reason: None,
         },
     );
-    assert!(saw_done);
     assert_eq!(out.len(), 2);
-    assert!(out[0].contains("\"tool_calls\"")); // flushed tool call first
+    assert!(out[0].contains("\"tool_calls\""));
     assert!(out[0].contains("\"id\":\"t1\""));
-    assert!(out[1].contains("\"finish_reason\":\"tool_calls\"")); // then the terminator
+    assert!(out[1].contains("\"finish_reason\":\"tool_calls\""));
     assert!(out[1].ends_with("data: [DONE]\n\n"));
 }
 
 #[test]
-fn truncated_stream_gets_synthetic_terminator() {
-    use crate::server::{finalize_stream, process_event};
-    let agent = GrokAgent;
-    let mut ctx = StreamCtx::new("cid".into(), 0, "grok-build".into(), None);
-    let mut acc = ToolAccumulator::new();
-    let mut saw_done = false;
-
-    // Some text arrives, but the upstream never sends a done event.
-    let _ = process_event(
-        &agent,
-        &mut ctx,
-        &mut acc,
-        &mut saw_done,
-        CommonEvent::Text {
-            text: "partial".into(),
-        },
-    );
-    assert!(!saw_done);
-    let tail = finalize_stream(&agent, &mut ctx, &mut acc, saw_done, None);
-    let joined = tail.join("");
-    assert!(joined.contains("ended unexpectedly"));
-    assert!(joined.ends_with("data: [DONE]\n\n"));
-}
-
-#[test]
-fn backend_error_is_a_single_terminal_stream_event() {
-    use crate::server::{finalize_stream, process_event};
-    let agent = ClaudeAgent;
+fn claude_stream_error_discards_buffered_tools() {
+    use crate::server::process_event;
     let mut ctx = StreamCtx::new("cid".into(), 0, "claude-opus-4-8".into(), None);
     let mut acc = ToolAccumulator::new();
-    acc.push(&delta(0, Some("t1"), Some("f"), Some("{}")));
-    let mut saw_done = false;
+    acc.push(&delta(0, Some("t1"), Some("f"), Some("{")));
 
     let chunks = process_event(
-        &agent,
+        &ClaudeAgent,
         &mut ctx,
         &mut acc,
-        &mut saw_done,
-        CommonEvent::Error {
+        &CommonEvent::Error {
             message: "backend rejected request".into(),
         },
     );
-    assert!(saw_done);
+    assert!(acc.is_empty());
     let joined = chunks.join("");
-    assert!(joined.contains("tool_use"));
+    assert!(joined.contains("event: error\ndata: "));
+    assert!(joined.contains("\"type\":\"api_error\""));
     assert!(joined.contains("backend rejected request"));
-    assert!(joined.contains("message_stop"));
-    assert!(!joined.contains("ended unexpectedly"));
-    assert!(finalize_stream(&agent, &mut ctx, &mut acc, saw_done, None).is_empty());
+    assert!(!joined.contains("tool_use"));
+    assert!(!joined.contains("message_stop"));
 }
 
 #[test]
-fn backend_error_is_retained_by_non_stream_accumulator() {
-    use crate::server::apply_accumulate;
-    let mut text = String::new();
-    let mut finish_reason = None;
-    let mut acc = ToolAccumulator::new();
-    let mut protocol_error = None;
-    apply_accumulate(
-        &CommonEvent::Error {
-            message: "invalid token".into(),
-        },
-        &mut text,
-        &mut finish_reason,
-        &mut acc,
-        &mut protocol_error,
+fn transformed_backends_recognize_terminal_errors() {
+    let chat_error = r#"data: {"error":{"message":"upstream failed"}}"#;
+    let expected = vec![CommonEvent::Error {
+        message: "upstream failed".into(),
+    }];
+    assert_eq!(GrokBackend.parse_stream_chunk(chat_error), expected);
+    assert_eq!(ZaiBackend.parse_stream_chunk(chat_error), expected);
+    assert_eq!(
+        CodexBackend.parse_stream_chunk(
+            r#"data: {"type":"response.failed","response":{"error":{"message":"upstream failed"}}}"#
+        ),
+        expected
     );
-    assert_eq!(protocol_error.as_deref(), Some("invalid token"));
+    assert_eq!(
+        CodexBackend.parse_stream_chunk(
+            r#"data: {"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}"#
+        ),
+        vec![CommonEvent::Error {
+            message: "upstream response incomplete: max_output_tokens".into(),
+        }]
+    );
 }
 
-#[test]
-fn midstream_error_flushes_and_terminates() {
-    use crate::server::finalize_stream;
-    let agent = ClaudeAgent;
-    let mut ctx = StreamCtx::new("cid".into(), 0, "claude-opus-4-8".into(), None);
-    let mut acc = ToolAccumulator::new();
-    // A pending tool call plus a mid-stream connection error.
-    acc.push(&delta(0, Some("t1"), Some("f"), Some("{}")));
-    let tail = finalize_stream(
-        &agent,
-        &mut ctx,
-        &mut acc,
-        false,
-        Some("connection reset".into()),
+#[tokio::test]
+async fn transformed_upstream_requires_success_before_releasing_tool_calls() {
+    use crate::server::{start_proxy, Credential, ProxyStartOptions};
+    use axum::{body::Body, response::Response, routing::post, Router};
+    use tokio::io::AsyncWriteExt;
+
+    const PREFIX: &str = concat!(
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial text\"}}\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_test\",\"name\":\"lookup\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\"}}\n\n",
     );
-    let joined = tail.join("");
-    assert!(joined.contains("tool_use")); // flushed the held tool call
-    assert!(joined.contains("stream interrupted: connection reset"));
-    assert!(joined.contains("message_stop")); // clean terminator, not raw JSON
+    const COMPLETE: &str = concat!(
+        "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"}\"}}\n\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    const ERROR: &str =
+        "event: error\ndata: {\"type\":\"error\",\"error\":{\"message\":\"upstream failed\"}}\n\n";
+
+    for (tail, interrupted, expected_error) in [
+        (COMPLETE, false, None),
+        ("", false, Some("upstream stream ended unexpectedly")),
+        ("", true, Some("upstream stream interrupted")),
+        (ERROR, false, Some("upstream failed")),
+    ] {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let body = format!("{PREFIX}{tail}");
+        let upstream = if interrupted {
+            tokio::spawn(async move {
+                loop {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    // Declare an additional byte and then end the connection mid-body.
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len() + 1
+                    );
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                    socket.shutdown().await.unwrap();
+                    // Drain the request so the server sends FIN rather than resetting the socket.
+                    tokio::io::copy(&mut socket, &mut tokio::io::sink())
+                        .await
+                        .unwrap();
+                }
+            })
+        } else {
+            let app = Router::new().route(
+                "/v1/messages",
+                post(move || async move {
+                    Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .body(Body::from(body))
+                        .unwrap()
+                }),
+            );
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() })
+        };
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        for (frontend, path, success_marker, error_marker) in [
+            ("grok", "chat/completions", "data: [DONE]", "\"error\":{"),
+            (
+                "codex",
+                "responses",
+                "response.completed",
+                "event: response.failed",
+            ),
+        ] {
+            let proxy = start_proxy(ProxyStartOptions {
+                source_provider: frontend.into(),
+                target_provider: "kimi".into(),
+                target_endpoint: Some(endpoint.clone()),
+                target_credential: Credential::default(),
+                fallback_credentials: Vec::new(),
+                tmp_dir: None,
+                port: None,
+            })
+            .await
+            .unwrap();
+            for stream in [true, false] {
+                let res = client
+                    .post(format!("{}/v1/{path}", proxy.url))
+                    .bearer_auth(&proxy.auth_token)
+                    .json(&json!({"model": "kimi-k2", "stream": stream}))
+                    .send()
+                    .await
+                    .unwrap();
+                let status = res.status();
+                let body = res.text().await.unwrap();
+                if let Some(error) = expected_error {
+                    assert!(!body.contains("call_test"), "{body}");
+                    assert!(!body.contains(success_marker), "{body}");
+                    if stream {
+                        assert_eq!(status, reqwest::StatusCode::OK);
+                        assert!(body.contains("partial text"), "{body}");
+                        assert_eq!(body.matches(error_marker).count(), 1, "{body}");
+                        assert!(body.contains(error), "{body}");
+                    } else {
+                        assert_eq!(status, reqwest::StatusCode::BAD_GATEWAY);
+                        assert_eq!(
+                            serde_json::from_str::<Value>(&body).unwrap(),
+                            json!({"error": {"message": error}})
+                        );
+                    }
+                } else {
+                    assert_eq!(status, reqwest::StatusCode::OK);
+                    assert!(body.contains("call_test"), "{body}");
+                    assert!(body.contains("partial text"), "{body}");
+                    if stream {
+                        assert!(body.contains(success_marker), "{body}");
+                    }
+                }
+            }
+            proxy.stop().await;
+        }
+        upstream.abort();
+    }
 }
 
 // ---------------------------------------------------------------------------

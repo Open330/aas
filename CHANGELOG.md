@@ -5,6 +5,21 @@ All notable user-facing changes are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep explicitly isolated profiles in their own homes after switching accounts. Require
+  system profiles to have the selected credential active before launching from the native home.
+- Remove shared-state links when profiles opt out of sharing, keeping profile files and Codex's
+  local `skills/.system` directory.
+- Report interrupted proxy responses as errors and discard buffered tool calls when upstream
+  fails before completion.
+- Let the BarShelf alerts widget recover when successful quota readings return above the
+  threshold, including when Pi or another account reports without a percentage.
+
+### Changed
+
+- Update the `url` dependency to 2.5.9 and replace `chrono` with Jiff.
+
 ## [0.2.4] - 2026-11-16
 
 ### Fixed

@@ -1191,8 +1191,20 @@ fn cmd_sharing(store: &AccountStore, name: &str, share: &ShareArgs) -> anyhow::R
     }
     let sel = resolve_share_selection(&share.to_opts(), Some(&acct.provider))?;
     if sel.provided {
-        store.set_share(&acct.provider, name, sel.value)?;
+        store.set_share(&acct.provider, name, sel.value.clone())?;
         ui::success(format!("Updated sharing for {}/{name}", acct.provider));
+        // Apply now rather than on the next launch: links the new setting no longer covers are
+        // removed (real data is never touched) and newly shared ones are created. Only a home
+        // that already exists — a profile never launched gets its links on first launch.
+        let home = aas_core::naming::profile_home(&acct.provider, name);
+        if home.is_dir() {
+            aas_core::share::link_shared_state(&acct.provider, &home, false, sel.value.as_deref());
+        }
+        if cfg!(not(unix)) {
+            ui::hint(
+                "Shared state is linked on macOS and Linux only; on this platform every profile keeps its own state.",
+            );
+        }
     }
     let cur = store.get(&acct.provider, name)?;
     println!(

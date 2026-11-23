@@ -13,7 +13,7 @@ use aas_core::keychain::{
 use aas_core::platform::{claude_credentials_path, claude_scoped_config_dir};
 use aas_core::secure_store::{get_secret, set_secret, write_restricted_file};
 use aas_core::usage::{Meter, Usage};
-use chrono::{SecondsFormat, TimeZone, Utc};
+use jiff::Timestamp;
 use serde_json::{json, Value};
 
 const PROVIDER: &str = "claude";
@@ -182,8 +182,8 @@ pub(crate) fn parse_flexible_reset_ms(v: &Value) -> Option<i64> {
         return Some(f as i64);
     }
     if let Some(s) = v.as_str() {
-        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
-            return Some(dt.timestamp_millis());
+        if let Ok(dt) = s.parse::<Timestamp>() {
+            return Some(dt.as_millisecond());
         }
         if let Ok(n) = s.parse::<f64>() {
             return Some(n as i64);
@@ -515,7 +515,7 @@ async fn usage_inner(account: &str, recheck: bool) -> Usage {
     if let Some(until) =
         aas_core::backoff::rate_limited_until(&backoff_key).filter(|_| !(recheck && long_lived))
     {
-        let secs = ((until - chrono::Utc::now().timestamp_millis()) / 1000).max(0);
+        let secs = ((until - now_ms()) / 1000).max(0);
         return Usage {
             headline: claude_base_info(long_lived, &sub_type, &tier, None),
             plan: if long_lived {
@@ -581,7 +581,7 @@ async fn usage_inner(account: &str, recheck: bool) -> Usage {
             .unwrap_or(0)
             .saturating_mul(1000);
         let until = aas_core::backoff::record_rate_limit(&backoff_key, hint_ms);
-        let secs = ((until - chrono::Utc::now().timestamp_millis()) / 1000).max(0);
+        let secs = ((until - now_ms()) / 1000).max(0);
         return rate_limited_usage(headline, plan, meters, long_lived, secs);
     }
     if meters.is_empty() {
@@ -808,10 +808,8 @@ pub(crate) async fn refresh(account: &str) -> RefreshOutcome {
     {
         synced = true;
     }
-    let iso = Utc
-        .timestamp_millis_opt(expires_at)
-        .single()
-        .map(|d| d.to_rfc3339_opts(SecondsFormat::Millis, true))
+    let iso = Timestamp::from_millisecond(expires_at)
+        .map(|timestamp| format!("{timestamp:.3}"))
         .unwrap_or_default();
     done(format!(
         "refreshed (expires {iso}){}",
@@ -1044,8 +1042,12 @@ mod tests {
             parse_flexible_reset_ms(&json!(1750000000000i64)),
             Some(1750000000000)
         );
-        let iso = parse_flexible_reset_ms(&json!("2026-07-06T00:00:00Z"));
-        assert!(iso.is_some());
+        let iso = parse_flexible_reset_ms(&json!("2026-07-06T00:00:00.125Z"));
+        assert_eq!(iso, Some(1_783_296_000_125));
+        assert_eq!(
+            parse_flexible_reset_ms(&json!("2026-07-06T09:00:00.125+09:00")),
+            iso
+        );
         assert!(parse_flexible_reset_ms(&json!(true)).is_none());
     }
 

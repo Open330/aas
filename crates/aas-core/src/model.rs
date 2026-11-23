@@ -137,7 +137,7 @@ fn default_version() -> u32 {
 
 /// asx `new Date().toISOString()` → e.g. `2026-07-06T02:05:06.244Z`.
 pub fn now_iso() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    format!("{:.3}", jiff::Timestamp::now())
 }
 
 #[cfg(test)]
@@ -195,9 +195,11 @@ mod tests {
     }
 
     #[test]
-    fn now_iso_ends_with_z() {
+    fn now_iso_has_utc_millisecond_precision() {
         let s = now_iso();
-        assert!(s.ends_with('Z'), "{s}");
+        let timestamp: jiff::Timestamp = s.parse().unwrap();
+        assert_eq!(s, format!("{timestamp:.3}"));
+        assert_eq!(s.len(), "2026-07-06T02:05:06.244Z".len());
     }
 
     #[test]

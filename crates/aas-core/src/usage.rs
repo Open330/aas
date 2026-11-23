@@ -2,7 +2,7 @@
 //! data and lets the CLI render bars/tables/colors. This is what enables the parallel
 //! `list -u` fan-out + single-render, and a provider-agnostic table.
 
-use chrono::{Local, TimeZone, Utc};
+use jiff::{tz::TimeZone, Timestamp};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -78,12 +78,12 @@ pub fn render_bar_plain(remaining_pct: f64, width: usize) -> String {
 
 /// asx `formatReset`: `resets Jul 6, 03:26 PM (2h 41m left)` / `(now)`, in local time.
 pub fn format_reset(reset_ms: i64) -> String {
-    let Some(dt) = Utc.timestamp_millis_opt(reset_ms).single() else {
+    let Ok(timestamp) = Timestamp::from_millisecond(reset_ms) else {
         return String::new();
     };
-    let local = dt.with_timezone(&Local);
-    let stamp = local.format("%b %-d, %I:%M %p").to_string();
-    let now = Utc::now().timestamp_millis();
+    let local = timestamp.to_zoned_datetime(TimeZone::system());
+    let stamp = local.strftime("%b %-d, %I:%M %p").to_string();
+    let now = Timestamp::now().as_millisecond();
     let diff = reset_ms - now;
     if diff <= 0 {
         return format!("resets {stamp} (now)");
@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn reset_now_and_future() {
-        let now = Utc::now().timestamp_millis();
+        let now = Timestamp::now().as_millisecond();
         assert!(format_reset(now - 1000).contains("(now)"));
         assert!(format_reset(now + 3_600_000).contains("left"));
     }

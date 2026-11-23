@@ -306,15 +306,14 @@ impl AgentAdapter for ClaudeAgent {
                 );
                 out
             }
-            other => {
-                // done or error: surface error text, ensure at least one block, then close the message.
-                if let CommonEvent::Error { message } = other {
-                    out += &open_text!();
-                    out += &anth_event(
-                        "content_block_delta",
-                        &json!({ "type": "content_block_delta", "index": ctx.text_index, "delta": { "type": "text_delta", "text": format!("[aas-proxy] {message}") } }),
-                    );
-                }
+            CommonEvent::Error { message } => {
+                out += &anth_event(
+                    "error",
+                    &json!({ "type": "error", "error": { "type": "api_error", "message": message } }),
+                );
+                out
+            }
+            CommonEvent::Done { .. } => {
                 if !ctx.text_open && ctx.items.is_empty() {
                     out += &open_text!();
                     out += &anth_event(
@@ -335,6 +334,7 @@ impl AgentAdapter for ClaudeAgent {
                 out += &anth_event("message_stop", &json!({ "type": "message_stop" }));
                 out
             }
+            CommonEvent::ToolCallDelta { .. } => String::new(),
         }
     }
 

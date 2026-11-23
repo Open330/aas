@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "kind": "workflow",
-  "_comment": "Notifies when any aas account runs low, and again when every account reports plenty left (a reset). Runs `aas usage --json` in the background; alerts fire on a change, never on every refresh. A reading is left out (null) rather than called false when an account failed to report, so a failure can neither re-arm nor fake a reset.",
+  "_comment": "Notifies on low quota and recovery. Uses successful percentage readings and skips accounts that report no percentage. A fetch error blocks recovery and leaves the low alert armed state unchanged unless a healthy reading crosses the low threshold.",
   "sources": {
     "usage": {
       "use": "exec",
@@ -15,10 +15,6 @@
     }
   },
   "transforms": {
-    "worst": {
-      "use": "assign",
-      "from": "number(sources.usage.worstRemainingPct)"
-    },
     "errored": {
       "use": "filter",
       "from": "sources.usage.accounts",
@@ -27,30 +23,49 @@
         "notEquals": null
       }
     },
-    "unmetered": {
+    "successful": {
       "use": "filter",
       "from": "sources.usage.accounts",
       "with": {
-        "field": "meters",
-        "equals": []
+        "field": "error",
+        "equals": null
       }
+    },
+    "metered": {
+      "use": "filter",
+      "from": "transforms.successful",
+      "with": {
+        "field": "remainingPct",
+        "notEquals": null
+      }
+    },
+    "ordered": {
+      "use": "sort",
+      "from": "transforms.metered",
+      "with": {
+        "by": "remainingPct"
+      }
+    },
+    "worst": {
+      "use": "assign",
+      "from": "number(transforms.ordered.0.remainingPct)"
     },
     "complete": {
       "use": "assign",
-      "from": "and(gt(count(sources.usage.accounts), 0), and(eq(count(transforms.errored), 0), eq(count(transforms.unmetered), 0)))"
+      "from": "eq(count(transforms.errored), 0)"
     }
   },
   "alerts": {
     "low": {
       "when": "${if(eq(transforms.worst, null), null, if(lte(transforms.worst, settings.lowPct), true, if(transforms.complete, false, null)))}",
-      "title": "An agent account is down to ${string(round(sources.usage.worstRemainingPct))}% left",
+      "title": "An agent account is down to ${string(round(transforms.worst))}% left",
       "body": "Open BarShelf to see which account, or switch with aas.",
       "cooldownSec": 3600
     },
     "reset": {
       "when": "${if(or(eq(transforms.worst, null), not(transforms.complete)), null, gte(transforms.worst, settings.resetPct))}",
       "title": "Agent limits look reset",
-      "body": "Every account aas reports has ${string(round(sources.usage.worstRemainingPct))}% or more left.",
+      "body": "Every account reporting a percentage has ${string(round(transforms.worst))}% or more left.",
       "cooldownSec": 3600
     }
   },

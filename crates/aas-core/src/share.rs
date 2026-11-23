@@ -274,16 +274,15 @@ pub fn link_shared_state(
     }
 
     for entry in shared_entries(provider) {
-        if let Some(cats) = categories {
-            if !cats.iter().any(|c| c == entry.category) {
-                continue;
-            }
-        }
-        if is_cross && INJECTED_WHEN_CROSS.contains(&entry.name) {
-            continue;
-        }
         let target = base.join(entry.name);
         let link = home.join(entry.name);
+        let selected = categories.is_none_or(|cats| cats.iter().any(|c| c == entry.category));
+        if !selected || (is_cross && INJECTED_WHEN_CROSS.contains(&entry.name)) {
+            // Opted out (or rewritten for cross runs): drop the link an earlier, wider sharing
+            // left, so the setting takes effect instead of the profile still reading through it.
+            unlink_shared_entry(provider, &target, &link);
+            continue;
+        }
 
         if entry.is_dir {
             if !target.exists() {
@@ -300,13 +299,69 @@ pub fn link_shared_state(
         }
 
         match std::fs::symlink_metadata(&link) {
-            Ok(meta) if meta.file_type().is_symlink() => {
+            Ok(meta) if meta.file_type().is_symlink() && !link.exists() => {
                 let _ = std::fs::remove_file(&link); // replace stale symlink
             }
-            Ok(_) => continue, // real data already present — never clobber
+            Ok(_) => continue, // preserve existing data and working links
             Err(_) => {}
         }
         let _ = symlink(&target, &link);
+    }
+}
+
+/// Whether the link points to the named entry in the provider's system home.
+#[cfg(unix)]
+fn links_to(link: &std::path::Path, target: &std::path::Path) -> bool {
+    let Ok(to) = std::fs::read_link(link) else {
+        return false;
+    };
+    if to == target {
+        return true;
+    }
+    let to = if to.is_absolute() {
+        to
+    } else {
+        link.with_file_name(to)
+    };
+    // Resolve aliased parent paths without following the provider's entry itself.
+    if to.file_name() != target.file_name() {
+        return false;
+    }
+    let canonical_parent = |path: &std::path::Path| path.parent()?.canonicalize().ok();
+    matches!(
+        (canonical_parent(&to), canonical_parent(target)),
+        (Some(a), Some(b)) if a == b
+    )
+}
+
+/// Undo [`link_shared_state`] for one entry no longer shared: remove the link to the system
+/// home, and for Codex `skills` the per-skill links inside the profile's own directory, keeping
+/// its `.system`, real skills and links that point anywhere else.
+#[cfg(unix)]
+fn unlink_shared_entry(provider: &str, target: &std::path::Path, link: &std::path::Path) {
+    if links_to(link, target) {
+        let _ = std::fs::remove_file(link);
+        return;
+    }
+    if !(link.ends_with("skills") && normalize_provider_key(provider) == "codex") {
+        return;
+    }
+    let is_real_dir = std::fs::symlink_metadata(link).is_ok_and(|m| m.is_dir());
+    if !is_real_dir {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(link) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name == CODEX_SYSTEM_SKILLS {
+            continue;
+        }
+        let here = entry.path();
+        if links_to(&here, &target.join(&name)) {
+            let _ = std::fs::remove_file(&here);
+        }
     }
 }
 
@@ -332,7 +387,7 @@ fn link_codex_skills(target: &std::path::Path, link: &std::path::Path) {
     use std::os::unix::fs::symlink;
 
     match std::fs::symlink_metadata(link) {
-        Ok(meta) if meta.file_type().is_symlink() => {
+        Ok(meta) if meta.file_type().is_symlink() && links_to(link, target) => {
             if std::fs::remove_file(link).is_err() || std::fs::create_dir(link).is_err() {
                 return;
             }
@@ -541,6 +596,128 @@ mod tests {
         std::fs::create_dir_all(&isolated).unwrap();
         link_shared_state("codex", &isolated, false, Some(&[]));
         assert!(!isolated.join("skills").exists());
+
+        std::env::remove_var("CODEX_HOME");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn narrowing_sharing_removes_only_links_aas_made() {
+        use std::os::unix::fs::symlink;
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let root = std::env::temp_dir().join(format!("aas-unshare-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let claude_home = root.join("claude");
+        std::fs::create_dir_all(claude_home.join("projects")).unwrap();
+        std::fs::write(claude_home.join("settings.json"), "{}").unwrap();
+        std::fs::write(claude_home.join("CLAUDE.md"), "sys").unwrap();
+        let prior = std::env::var_os("CLAUDE_CONFIG_DIR");
+        std::env::set_var("CLAUDE_CONFIG_DIR", &claude_home);
+
+        let home = root.join("profile");
+        std::fs::create_dir_all(&home).unwrap();
+        link_shared_state("claude", &home, false, None);
+        assert_eq!(
+            std::fs::read_link(home.join("projects")).unwrap(),
+            claude_home.join("projects")
+        );
+        // Real data and a link the user made elsewhere sit beside aas's links.
+        std::fs::remove_file(home.join("CLAUDE.md")).unwrap();
+        std::fs::write(home.join("CLAUDE.md"), "mine").unwrap();
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::remove_file(home.join("agents")).unwrap();
+        symlink(&elsewhere, home.join("agents")).unwrap();
+
+        // `--share sessions`: settings stop being shared, sessions stay.
+        link_shared_state("claude", &home, false, Some(&["sessions".to_string()]));
+        assert!(std::fs::read_link(home.join("projects")).is_ok());
+        assert!(std::fs::symlink_metadata(home.join("settings.json")).is_err());
+        assert!(std::fs::symlink_metadata(home.join("skills")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(home.join("CLAUDE.md")).unwrap(),
+            "mine"
+        );
+        assert_eq!(std::fs::read_link(home.join("agents")).unwrap(), elsewhere);
+
+        // `--isolated`: nothing of the system home stays linked; the system home is untouched.
+        link_shared_state("claude", &home, false, Some(&[]));
+        assert!(std::fs::symlink_metadata(home.join("projects")).is_err());
+        assert!(claude_home.join("projects").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(claude_home.join("settings.json")).unwrap(),
+            "{}"
+        );
+        assert_eq!(std::fs::read_link(home.join("agents")).unwrap(), elsewhere);
+
+        match prior {
+            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn isolating_codex_skills_keeps_system_and_own_skills() {
+        use std::os::unix::fs::symlink;
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let root = std::env::temp_dir().join(format!("aas-unshare-codex-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let codex_home = root.join("codex");
+        let skills = codex_home.join("skills");
+        std::fs::create_dir_all(skills.join(".system")).unwrap();
+        std::fs::create_dir_all(skills.join("shared")).unwrap();
+        std::fs::write(codex_home.join("config.toml"), "sys").unwrap();
+        std::env::set_var("CODEX_HOME", &codex_home);
+
+        // Per-entry links in the profile's own skills directory.
+        let home = root.join("profile");
+        std::fs::create_dir_all(&home).unwrap();
+        link_shared_state("codex", &home, false, None);
+        let here = home.join("skills");
+        assert!(std::fs::read_link(here.join("shared")).is_ok());
+        std::fs::create_dir_all(here.join(".system")).unwrap();
+        std::fs::write(here.join(".system/marker"), "cli").unwrap();
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        symlink(&elsewhere, here.join("other")).unwrap();
+        // One the system home also has stays private to the profile, as a real directory.
+        std::fs::create_dir_all(skills.join("private")).unwrap();
+        std::fs::create_dir_all(here.join("private")).unwrap();
+
+        link_shared_state("codex", &home, false, Some(&[]));
+        assert!(here.is_dir());
+        assert!(std::fs::symlink_metadata(here.join("shared")).is_err());
+        assert!(skills.join("shared").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(here.join(".system/marker")).unwrap(),
+            "cli"
+        );
+        assert_eq!(std::fs::read_link(here.join("other")).unwrap(), elsewhere);
+        assert!(std::fs::read_link(here.join("private")).is_err());
+        assert!(here.join("private").is_dir());
+        assert!(std::fs::symlink_metadata(home.join("config.toml")).is_err());
+
+        // A whole-directory link left by an older aas is dropped too.
+        let old = root.join("old");
+        std::fs::create_dir_all(&old).unwrap();
+        symlink(&skills, old.join("skills")).unwrap();
+        link_shared_state("codex", &old, false, Some(&[]));
+        assert!(std::fs::symlink_metadata(old.join("skills")).is_err());
+        assert!(skills.join("shared").is_dir());
+
+        // A cross-provider home never keeps a link to the config the proxy rewrites.
+        let cross = root.join("cross");
+        std::fs::create_dir_all(&cross).unwrap();
+        symlink(codex_home.join("config.toml"), cross.join("config.toml")).unwrap();
+        link_shared_state("codex", &cross, true, None);
+        assert!(std::fs::symlink_metadata(cross.join("config.toml")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(codex_home.join("config.toml")).unwrap(),
+            "sys"
+        );
 
         std::env::remove_var("CODEX_HOME");
         let _ = std::fs::remove_dir_all(&root);
